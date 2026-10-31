@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::CompactFailure;
 use crate::ask;
@@ -133,11 +133,50 @@ pub(crate) async fn do_sync(
         Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
     }
 
+    surreal_catch_up(store).await?;
+    surreal_last_stage(store).await?;
+
     Ok(SyncOutcome {
         ingest,
         total_chunks,
         total_edges,
     })
+}
+
+/// Last stage, no-ops on pgvector: swap in a rebuilt HNSW index when this or an earlier write
+/// changed rows (a failed swap fails the sync, the old index still answering), and the log
+/// tables' copy pass. The copy runs before the swap's `?` so a swap error cannot starve it; its
+/// own error is raised after the swap's, and the next sync converges either way.
+async fn surreal_last_stage(store: &Store) -> Result<()> {
+    let log_copy = store
+        .copy_logs_surreal()
+        .await
+        .context("surreal 로그 4표 사본 패스 실패 — pg 는 그대로, 다음 패스가 이어 맞춤");
+    for copied in log_copy.iter().flatten() {
+        eprintln!("[scheduler] log-copy: {}", copied.line());
+    }
+    let swaps = store.swap_surreal_if_changed().await?;
+    for swap in swaps
+        .iter()
+        .filter(|s| !matches!(s, crate::store::Swap::Skipped { .. }))
+    {
+        eprintln!("[scheduler] vector-swap: {}", swap.line());
+    }
+    anyhow::ensure!(
+        !swaps.iter().any(crate::store::Swap::failed),
+        "vector-swap 실패 — 옛 인덱스는 그대로 (drudge vector-swap 으로 다시 확인)"
+    );
+    log_copy.map(|_| ())
+}
+
+/// Rows the Python door wrote straight to pg never went through a mirror: level Surreal's
+/// document/node/edge with pg's by key (no-op on pgvector). A failure fails the sync.
+async fn surreal_catch_up(store: &Store) -> Result<()> {
+    let (written, deleted) = store.catch_up_surreal().await?;
+    if written + deleted > 0 {
+        eprintln!("[scheduler] surreal catch-up: wrote {written}, deleted {deleted}");
+    }
+    Ok(())
 }
 
 /// One compact cycle. Vector-off is a no-op.
@@ -177,7 +216,7 @@ async fn run_compact(store: Option<&Store>, failure: &Mutex<Option<CompactFailur
     match do_compact(store).await {
         Ok(s) => {
             eprintln!(
-                "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {} claim nodes {} claim edges {}) sealed_superseded {} total {}ms",
+                "[scheduler] compact done — vacuum {}ms reindex {}ms prune_query_log {} gc(tool {} concept {} claim nodes {} claim edges {}) sealed_superseded {} skipped_lock_timeout {:?} total {}ms",
                 s.report.vacuum_ms,
                 s.report.reindex_ms,
                 s.report.prune_query_log,
@@ -186,6 +225,7 @@ async fn run_compact(store: Option<&Store>, failure: &Mutex<Option<CompactFailur
                 s.report.gc_claim_nodes,
                 s.report.gc_claim_edges,
                 s.report.sealed_superseded_claims,
+                s.report.skipped_lock_timeout,
                 s.total_ms
             );
             *failure.lock().await = None;
@@ -288,40 +328,47 @@ pub(crate) fn spawn_scheduler(
     last_compact: Arc<Mutex<Option<Instant>>>,
     compact_failure: Arc<Mutex<Option<CompactFailure>>>,
 ) {
-    // `.max(1)` — `BORING_SYNC_HOURS=0` would make a zero Duration, and
-    // tokio::time::interval panics on a zero period. Clamp to ≥1h.
-    let sync_hours: u64 = config::env_set("BORING_SYNC_HOURS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4)
-        .max(1);
+    // boring.json `schedule` with env on top (config.rs: the ≥1h clamp lives there — a zero
+    // Duration panics tokio::time::interval).
+    let effective = cfg.schedule_effective();
+    if let Some(reason) = &effective.brief_hour_error {
+        eprintln!("[scheduler] daily brief not started: {reason}");
+    }
+    let schedule = effective.value;
+    let sync_hours = schedule.sync_hours;
     let sync_interval = Duration::from_secs(sync_hours * 3600);
 
-    let compact_hours: u64 = config::env_set("BORING_COMPACT_HOURS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24)
-        .max(1);
+    // Explicit sync-off: only the vault sync is skipped; compact and the brief keep running.
+    let sync_disabled = config::env_set("BORING_SYNC_DISABLED").as_deref() == Some("1");
+
+    let compact_hours = schedule.compact_hours;
     let compact_interval = Duration::from_secs(compact_hours * 3600);
+
+    // Explicit compact-off: only the tick loop's compact is skipped; sync and the brief keep running.
+    let compact_disabled = config::env_set("BORING_COMPACT_DISABLED").as_deref() == Some("1");
 
     tokio::spawn(async move {
         let store_ref = store.as_deref();
         // run once immediately at startup (compile only if vector off — refreshes wiki).
         // Lock serializes with HTTP /sync so callers wait for the startup baseline.
-        eprintln!(
-            "[scheduler] startup sync (interval={sync_hours}h, compact={compact_hours}h, vector={})",
-            store.is_some()
-        );
-        {
+        if sync_disabled {
+            eprintln!("[scheduler] sync off (BORING_SYNC_DISABLED=1)");
+        } else {
+            eprintln!(
+                "[scheduler] startup sync (interval={sync_hours}h, compact={compact_hours}h, vector={})",
+                store.is_some()
+            );
             let _guard = sync_lock.lock().await;
             run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
         }
 
-        // Daily briefing scheduler: runs once at BORING_BRIEF_HOUR local time.
+        if compact_disabled {
+            eprintln!("[scheduler] compact off (BORING_COMPACT_DISABLED=1)");
+        }
+
+        // Daily briefing scheduler: runs once at schedule.brief_hour local time (None = off).
         // The generated note is tagged `daily-brief` so future briefs do not ingest themselves.
-        if let Ok(hour) = config::env_set("BORING_BRIEF_HOUR")
-            .unwrap_or_else(|| "8".to_owned())
-            .parse::<u32>()
-            && (0..=23).contains(&hour)
-        {
+        if let Some(hour) = schedule.brief_hour.map(u32::from) {
             let store2 = store.clone();
             let llm2 = Arc::clone(&llm);
             let vault_dir2 = Arc::clone(&vault_dir);
@@ -339,15 +386,17 @@ pub(crate) fn spawn_scheduler(
         sync_ticker.tick().await; // the first tick is immediate — discard it (already ran above)
         loop {
             sync_ticker.tick().await;
-            eprintln!("[scheduler] periodic sync");
             {
                 let _guard = sync_lock.lock().await;
-                run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+                if !sync_disabled {
+                    eprintln!("[scheduler] periodic sync");
+                    run_sync(store_ref, &llm, (*vault_dir).as_ref(), &cfg).await;
+                }
 
                 // Auto-compact at the next sync after the compact interval has passed.
                 // This keeps maintenance aligned with write load rather than running on a fixed clock.
                 let mut last = last_compact.lock().await;
-                if last.is_none_or(|t| t.elapsed() >= compact_interval) {
+                if !compact_disabled && last.is_none_or(|t| t.elapsed() >= compact_interval) {
                     // Only a run that finished resets the window. Stamping the clock on failure
                     // made a compact that never once succeeded look like one on schedule.
                     if run_compact(store_ref, &compact_failure).await {

@@ -13,19 +13,36 @@
 //!
 //! ## Advantage over AGE
 //! Every value goes through `tokio-postgres` parameter binding ($1,$2…) → eliminates the cypher string-escaping footgun.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime, Timeouts};
+use deadpool_postgres::{
+    GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime, Timeouts, Transaction,
+};
 use pgvector::Vector;
 use serde_json::{Value, json};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use crate::frontmatter::{Claim, FrontMatter};
 
+mod code_copy_surreal;
+mod log_copy_surreal;
+mod vector_pg;
+mod vector_route;
+mod vector_surreal;
+
+pub use code_copy_surreal::{CodeCheck, CodeCopy};
+pub use log_copy_surreal::{LogCheck, LogCopy};
+pub use vector_route::VectorRoute;
+pub use vector_surreal::{
+    FillTable, KeySet, ProjectTable, ProjectTableError, SURREAL_BEHIND, Scope, SurrealClient, Swap,
+};
+
 /// Ingest input (one chunk).
+#[derive(Debug)]
 pub struct Doc {
     pub id: String, // "{source_path}#{idx}"
     pub content: String,
@@ -136,6 +153,15 @@ pub struct HandoverReport {
     pub unknown: usize,
 }
 
+/// What a `supersedes` edge closes in the older note's claims.
+#[derive(Debug, Clone, Copy)]
+enum SealRule {
+    /// Every current claim of the older note (verdict writes, `compact`).
+    WholeNote,
+    /// Only the slots the newer note re-states (`remember`).
+    RestatedSlots,
+}
+
 /// Result of a supersedes write: how many `supersedes` edges were written and how many pairs were
 /// skipped — a pair naming the same path twice, or one naming a path with no `document` row.
 #[derive(Debug, Default)]
@@ -146,6 +172,9 @@ pub struct SupersedesReport {
     /// The skipped paths themselves, in input order — the door echoes them to the caller, which
     /// otherwise learns "1 unknown" without learning which of its names missed.
     pub unknown_paths: Vec<String>,
+    /// The `(subject, predicate)` slots of the older notes this write closed, read after the
+    /// seal, in input order, each once.
+    pub retired: Vec<(String, String)>,
 }
 
 /// Splits `supersedes` pairs into edge-worthy ones and the skipped paths — a pair that names the
@@ -283,6 +312,7 @@ pub struct EventLogRow {
 }
 
 /// Read filter for the queryable event log.
+#[derive(Debug)]
 pub struct EventLogFilter<'a> {
     pub limit: i64,
     pub component: Option<&'a str>,
@@ -293,6 +323,8 @@ pub struct EventLogFilter<'a> {
     pub since_hours: Option<i32>,
 }
 
+const COMPACT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Result of a maintenance compact pass.
 #[derive(Debug, Default)]
 pub struct CompactReport {
@@ -302,6 +334,8 @@ pub struct CompactReport {
     /// swept silently: a number that climbs every run says reindexing keeps failing, which is
     /// the fault worth seeing — the leftovers themselves are only its residue.
     pub dropped_invalid_indexes: usize,
+    /// Tables whose `REINDEX CONCURRENTLY` could not get its lock within the lock timeout.
+    pub skipped_lock_timeout: Vec<String>,
     pub prune_query_log: usize,
     pub gc_tool: usize,
     pub gc_concept: usize,
@@ -334,6 +368,18 @@ pub struct Store {
     /// Embedding dimension (= `boring.json` `embed_dim`; bge-m3 = 1024). Enforced at every embedding
     /// upsert via `checked_vector` and mirrored by the `vector(dim)` DDL columns created in `open`.
     dim: usize,
+    target: crate::pg_detail::ConnectTarget,
+    /// Which backend ranks vectors (`vector.backend`); pgvector unless `with_vector_route` says otherwise.
+    vector_route: VectorRoute,
+}
+
+/// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("dim", &self.dim)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Semantic edge kinds (doc→entity) — the SSOT shared by clear/stats.
@@ -361,6 +407,24 @@ const RETIRED_NOTE: &str = "EXISTS (SELECT 1 FROM edge e \
        AND (n.author = 'owner' OR NOT EXISTS (SELECT 1 FROM document o \
                                              WHERE o.source_path = c.source_path \
                                                AND o.author = 'owner')))";
+
+/// `ingest::canon` in SQL. The class lists Rust's White_Space code points because `\s` follows the
+/// server locale. Measured equal to `ingest::canon` on 12 inputs; `lower()` differs from
+/// `to_lowercase()` only on special casing (`İ`, final sigma).
+const CANON_SEP: &str = r"[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000_-]+";
+
+fn canon_sql(col: &str) -> String {
+    format!("btrim(regexp_replace(lower({col}), '{CANON_SEP}', '-', 'g'), '-')")
+}
+
+/// A claim row is canon-spelled when its stored subject and predicate already equal their canon.
+/// Inside one canon slot such a row outranks every old-spelling row, whatever their `valid_from`.
+fn is_canon_sql(alias: &str) -> String {
+    let subject = canon_sql(&format!("{alias}.subject"));
+    let predicate = canon_sql(&format!("{alias}.predicate"));
+    format!("({alias}.subject = {subject} AND {alias}.predicate = {predicate})")
+}
+
 /// Not user memory, though both live in the vault and stay searchable elsewhere.
 ///
 /// - `eval-*.md`: internal fixtures, which must remain searchable while `make eval` runs.
@@ -422,6 +486,31 @@ const POOL_TIMEOUTS: Timeouts = Timeouts {
     recycle: Some(Duration::from_secs(POOL_TIMEOUT_SECONDS)),
 };
 
+/// A note is its number; the name's width is notation (4-digit before the renumbering, 11-digit
+/// after). The path as given first, then the other widths of the same number.
+pub fn wiki_path_spellings(path: &str) -> Vec<String> {
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let number = name
+        .strip_prefix("wiki-")
+        .and_then(|s| s.strip_suffix(".md"))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<u64>().ok());
+    let mut out = vec![path.to_owned()];
+    if let Some(n) = number {
+        for spelled in [format!("wiki-{n:04}.md"), format!("wiki-{n:011}.md")] {
+            let candidate = if dir.is_empty() {
+                spelled
+            } else {
+                format!("{dir}/{spelled}")
+            };
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
 /// chunk id ("path#idx") → graph document node id ("doc:path").
 fn doc_node_id(chunk_or_path: &str) -> String {
     let path = chunk_or_path
@@ -469,13 +558,6 @@ pub struct AnchoredClaim {
     pub era: String,
     pub stale_at: Option<SystemTime>,
     pub stale_reason: Option<String>,
-}
-
-impl std::ops::Deref for AnchoredClaim {
-    type Target = Claim;
-    fn deref(&self) -> &Claim {
-        &self.claim
-    }
 }
 
 #[derive(Debug, Default)]
@@ -607,14 +689,292 @@ fn register_row(r: &tokio_postgres::Row) -> RegisterRow {
     )
 }
 
+/// What a schema step leaves behind. `ALTER TABLE … IF NOT EXISTS` and `CREATE INDEX … IF NOT
+/// EXISTS` still take a table lock (AccessExclusive / Share) before noticing the object exists,
+/// which deadlocked `Store::open` against a concurrent writer — so the catalog is read first and
+/// the DDL is only sent when this effect is missing.
+enum Effect {
+    Column {
+        table: &'static str,
+        column: &'static str,
+    },
+    ColumnDefault {
+        table: &'static str,
+        column: &'static str,
+    },
+    Index(&'static str),
+}
+
+struct SchemaStep {
+    effect: Effect,
+    ddl: String,
+}
+
+/// The one place the judge ranking lives: owner 3 > `agent:*` 2 > inferred 1 > NULL or any other
+/// value 0. An edge's judge only moves up this order; `col` is the column expression to rank.
+fn judge_rank_sql(col: &str) -> String {
+    format!(
+        "(CASE WHEN {col} = 'owner' THEN 3 WHEN {col} LIKE 'agent:%' THEN 2 \
+         WHEN {col} = 'inferred' THEN 1 ELSE 0 END)"
+    )
+}
+
+fn step(effect: Effect, ddl: &str) -> SchemaStep {
+    SchemaStep {
+        effect,
+        ddl: ddl.to_owned(),
+    }
+}
+
+fn column(table: &'static str, column: &'static str, ddl: &str) -> SchemaStep {
+    step(Effect::Column { table, column }, ddl)
+}
+
+fn index(name: &'static str, ddl: &str) -> SchemaStep {
+    step(Effect::Index(name), ddl)
+}
+
+/// Every ALTER / CREATE INDEX of the schema path, in dependency order.
+#[allow(clippy::too_many_lines)] // a flat list of declarations; splitting only obscures the migration order.
+fn schema_steps(slot_subject: &str, slot_predicate: &str) -> Vec<SchemaStep> {
+    vec![
+        index(
+            "chunk_hnsw",
+            "CREATE INDEX IF NOT EXISTS chunk_hnsw ON chunk USING hnsw (embedding vector_cosine_ops)",
+        ),
+        index(
+            "chunk_gin",
+            "CREATE INDEX IF NOT EXISTS chunk_gin ON chunk USING gin (tsv)",
+        ),
+        index(
+            "edge_src",
+            "CREATE INDEX IF NOT EXISTS edge_src ON edge(src)",
+        ),
+        index(
+            "edge_dst",
+            "CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst)",
+        ),
+        // Who judged this edge: 'owner', 'inferred', 'agent:<name>'; NULL = written before the
+        // column existed. Stored verbatim; only `judge_rank_sql` ranks it, when a later write
+        // names the same edge (a higher rank replaces, an equal or lower one writes nothing).
+        column(
+            "edge",
+            "judge",
+            "ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text",
+        ),
+        // NULL = written before the column existed (never back-filled — the time is unknown). The
+        // default is its own step: a DEFAULT on ADD COLUMN would back-fill every row with now().
+        column(
+            "edge",
+            "first_seen_at",
+            "ALTER TABLE edge ADD COLUMN IF NOT EXISTS first_seen_at timestamptz",
+        ),
+        step(
+            Effect::ColumnDefault {
+                table: "edge",
+                column: "first_seen_at",
+            },
+            "ALTER TABLE edge ALTER COLUMN first_seen_at SET DEFAULT now()",
+        ),
+        column(
+            "document",
+            "extracted_sha",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT ''",
+        ),
+        column(
+            "document",
+            "updated_at",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()",
+        ),
+        column(
+            "document",
+            "author",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown'",
+        ),
+        index(
+            "document_updated",
+            "CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC)",
+        ),
+        column(
+            "claim",
+            "kind",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact'",
+        ),
+        column(
+            "claim",
+            "confidence",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain'",
+        ),
+        // D2 step 1 (PRD §8): `anchor` = `project:path[:span]`; `era` is the D3 legacy marker
+        // (existing rows keep 'pre-anchor').
+        column(
+            "claim",
+            "anchor",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor text",
+        ),
+        column(
+            "claim",
+            "stale_at",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_at timestamptz",
+        ),
+        column(
+            "claim",
+            "stale_reason",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_reason text",
+        ),
+        column(
+            "claim",
+            "era",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS era text NOT NULL DEFAULT 'pre-anchor'",
+        ),
+        // D2 step 2: `anchor_hash` = sha256 of the covering symbol's body; `anchor_symbol` = the
+        // key the sync-time re-pin looks the hash up by after a move.
+        column(
+            "claim",
+            "anchor_hash",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text",
+        ),
+        column(
+            "claim",
+            "anchor_symbol",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text",
+        ),
+        column(
+            "claim",
+            "said_by",
+            "ALTER TABLE claim ADD COLUMN IF NOT EXISTS said_by text",
+        ),
+        index(
+            "claim_anchor",
+            "CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL",
+        ),
+        index(
+            "claim_current",
+            "CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate) WHERE superseded_at IS NULL",
+        ),
+        index(
+            "claim_kind",
+            "CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind) WHERE superseded_at IS NULL",
+        ),
+        // The planner matches the expression text, so it comes from the same `canon_sql` the queries use.
+        index(
+            "claim_canon_slot",
+            &format!(
+                "CREATE INDEX IF NOT EXISTS claim_canon_slot ON claim(({slot_subject}), ({slot_predicate}))"
+            ),
+        ),
+        index(
+            "claim_hnsw",
+            "CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops) WHERE superseded_at IS NULL",
+        ),
+        column(
+            "query_log",
+            "hit_dists",
+            "ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dists real[] NOT NULL DEFAULT '{}'",
+        ),
+        column(
+            "query_log",
+            "hit_dist_kinds",
+            "ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dist_kinds text[] NOT NULL DEFAULT '{}'",
+        ),
+        index(
+            "query_log_created",
+            "CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC)",
+        ),
+        index(
+            "recall_label_created",
+            "CREATE INDEX IF NOT EXISTS recall_label_created ON recall_label(created_at DESC)",
+        ),
+        index(
+            "event_log_observed",
+            "CREATE INDEX IF NOT EXISTS event_log_observed ON event_log(observed_at DESC, id DESC)",
+        ),
+        index(
+            "event_log_component",
+            "CREATE INDEX IF NOT EXISTS event_log_component ON event_log(component, observed_at DESC)",
+        ),
+        index(
+            "event_log_event",
+            "CREATE INDEX IF NOT EXISTS event_log_event ON event_log(event_name, observed_at DESC)",
+        ),
+        index(
+            "event_log_status",
+            "CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC)",
+        ),
+        index(
+            "event_log_run_id",
+            "CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC)",
+        ),
+        // Rows from when the watermark was a bare timestamp read the '' pair — it sorts before
+        // every real key, so the sweep re-checks that timestamp's group once, which is correct.
+        column(
+            "sync_state",
+            "value_subject",
+            "ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_subject text NOT NULL DEFAULT ''",
+        ),
+        column(
+            "sync_state",
+            "value_predicate",
+            "ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_predicate text NOT NULL DEFAULT ''",
+        ),
+    ]
+}
+
+/// Decision: is this step's effect already in the catalog? Reads only; takes no table lock.
+async fn effect_present(db: &Client, effect: &Effect) -> Result<bool> {
+    let row = match effect {
+        Effect::Column { table, column } => {
+            db.query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                 WHERE table_schema = current_schema()
+                                   AND table_name = $1 AND column_name = $2)",
+                &[table, column],
+            )
+            .await
+        }
+        Effect::ColumnDefault { table, column } => {
+            db.query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_attribute
+                                 WHERE attrelid = to_regclass($1) AND attname = $2 AND atthasdef)",
+                &[table, column],
+            )
+            .await
+        }
+        Effect::Index(name) => {
+            db.query_one("SELECT to_regclass($1) IS NOT NULL", &[name])
+                .await
+        }
+    }
+    .context("read catalog for schema step")?;
+    Ok(row.get(0))
+}
+
+/// Effect: send only the DDL whose effect is missing.
+async fn apply_missing_ddl(db: &Client, steps: &[SchemaStep]) -> Result<()> {
+    for s in steps {
+        if !effect_present(db, &s.effect).await? {
+            db.batch_execute(&s.ddl)
+                .await
+                .with_context(|| format!("schema step: {}", s.ddl))?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     // ── connect + ensure schema ───────────────────────────────────────────────
 
     /// PostgreSQL connect + pgvector + node/edge graph schema initialization.
     /// `dim` = the embedding dimension (`boring.json` `embed_dim`) → the `vector(dim)` columns.
-    #[allow(clippy::too_many_lines)] // schema DDL grows with features; splitting only obscures the one migration block.
     pub async fn open(dsn: &str, dim: usize) -> Result<Self> {
+        Self::open_with_pool_size(dsn, dim, deadpool_postgres::PoolConfig::default().max_size).await
+    }
+
+    /// `open` with an explicit pool `max_size` — the one code path `open` delegates to.
+    #[allow(clippy::too_many_lines)] // schema DDL grows with features; splitting only obscures the one migration block.
+    pub async fn open_with_pool_size(dsn: &str, dim: usize, pool_size: usize) -> Result<Self> {
         let pg_config: PgConfig = dsn.parse().context("parse postgres connection string")?;
+        let target = crate::pg_detail::ConnectTarget::from_config(&pg_config);
         let manager = Manager::from_config(
             pg_config,
             NoTls,
@@ -624,6 +984,7 @@ impl Store {
         );
         let pool = Pool::builder(manager)
             .runtime(Runtime::Tokio1)
+            .max_size(pool_size)
             .timeouts(POOL_TIMEOUTS)
             .build()
             .context("build postgres connection pool")?;
@@ -670,6 +1031,9 @@ impl Store {
             .await
             .context("get connection for schema initialization")?;
 
+        let slot_subject = canon_sql("subject");
+        let slot_predicate = canon_sql("predicate");
+
         // DDL parameterized by the embedding dim (`embed_dim`). `vector({dim})` is the only interpolation;
         // dim is a parsed integer (no injection surface). `'{{}}'` escapes the literal empty-array default.
         obj
@@ -697,8 +1061,6 @@ impl Store {
                      chunk_idx   int  NOT NULL DEFAULT 0,
                      tsv         tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED
                  );
-                 CREATE INDEX IF NOT EXISTS chunk_hnsw ON chunk USING hnsw (embedding vector_cosine_ops);
-                 CREATE INDEX IF NOT EXISTS chunk_gin  ON chunk USING gin (tsv);
                  CREATE TABLE IF NOT EXISTS node (
                      id      text PRIMARY KEY,
                      kind    text NOT NULL,
@@ -711,22 +1073,6 @@ impl Store {
                      kind text NOT NULL,
                      PRIMARY KEY (src, dst, kind)
                  );
-                 CREATE INDEX IF NOT EXISTS edge_src ON edge(src);
-                 CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
-                 -- Who judged this edge: 'owner' (card button), 'inferred' (session-end
-                 -- distillation), 'agent:<name>' (an autonomous caller naming itself). NULL =
-                 -- written before the column existed, or a caller that brings no judge. The
-                 -- engine stores the value verbatim and never interprets it.
-                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS judge text;
-                 -- First-written time of an edge row; NULL = written before the column existed (never
-                 -- back-filled — the time is unknown). The default arrives in its own statement: a
-                 -- DEFAULT on ADD COLUMN would back-fill every existing row with now().
-                 ALTER TABLE edge ADD COLUMN IF NOT EXISTS first_seen_at timestamptz;
-                 ALTER TABLE edge ALTER COLUMN first_seen_at SET DEFAULT now();
-                 ALTER TABLE document ADD COLUMN IF NOT EXISTS extracted_sha text NOT NULL DEFAULT '';
-                 ALTER TABLE document ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
-                 ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown';
-                 CREATE INDEX IF NOT EXISTS document_updated ON document(updated_at DESC);
                  -- claim: temporal fact authority (Graphiti-style invalidation, scaled down for personal use).
                  --   current value of (subject,predicate) = superseded_at IS NULL. A new value seals the old.
                  CREATE TABLE IF NOT EXISTS claim (
@@ -747,7 +1093,75 @@ impl Store {
                      anchor_symbol text,
                      PRIMARY KEY (subject, predicate, valid_from)
                  );
-                 -- `about` was carrying two different relations under one name: a claim
+                 CREATE TABLE IF NOT EXISTS query_log (
+                     id            serial PRIMARY KEY,
+                     created_at    timestamptz NOT NULL DEFAULT now(),
+                     endpoint      text NOT NULL,
+                     query         text NOT NULL DEFAULT '',
+                     hit_paths     text[] NOT NULL DEFAULT '{{}}',
+                     sources       text[] NOT NULL DEFAULT '{{}}',
+                     answer_snippet text NOT NULL DEFAULT '',
+                     latency_ms    int
+                 );
+                 -- recall_label: the correctness label query_log cannot carry. A distance says how
+                 --   far a hit was, never whether it was worth injecting, so precision was
+                 --   unmeasurable and every relevance threshold was argued from distances alone.
+                 --   One row per (query_log row, hit position, judge): `llm` and `human` verdicts
+                 --   are stored SIDE BY SIDE, never overwriting each other, so their agreement rate
+                 --   is itself a measurement — an LLM judge nobody has checked
+                 --   is a biased instrument until that rate says otherwise.
+                 CREATE TABLE IF NOT EXISTS recall_label (
+                     query_log_id int NOT NULL REFERENCES query_log(id) ON DELETE CASCADE,
+                     hit_index    int NOT NULL,
+                     judge        text NOT NULL,
+                     verdict      text NOT NULL,
+                     model        text NOT NULL DEFAULT '',
+                     note         text NOT NULL DEFAULT '',
+                     created_at   timestamptz NOT NULL DEFAULT now(),
+                     PRIMARY KEY (query_log_id, hit_index, judge)
+                 );
+                 CREATE TABLE IF NOT EXISTS event_log (
+                     id               bigserial PRIMARY KEY,
+                     observed_at      timestamptz NOT NULL DEFAULT now(),
+                     time_unix_nano   bigint,
+                     severity_text    text NOT NULL DEFAULT 'INFO',
+                     severity_number  int NOT NULL DEFAULT 9,
+                     service_name     text NOT NULL DEFAULT '',
+                     component        text NOT NULL DEFAULT '',
+                     event_name       text NOT NULL DEFAULT '',
+                     status           text NOT NULL DEFAULT '',
+                     trace_id         text,
+                     span_id          text,
+                     run_id           text,
+                     session_id       text,
+                     workflow         text,
+                     workflow_node    text,
+                     workflow_outcome text,
+                     body             jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                     attributes       jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                     resource         jsonb NOT NULL DEFAULT '{{}}'::jsonb
+                 );
+                 -- Round-robin watermark for the D2 step-2 anchor staleness sweep: each sync takes
+                 -- the next batch of hashed claims after this position (wrapping to the corpus
+                 -- head), so a full pass is bounded per sync instead of growing with the corpus.
+                 -- The watermark is the WHOLE (valid_from, subject, predicate) sort key, not just
+                 -- the timestamp: claims distilled from one note share a valid_from, and a
+                 -- timestamp-only resume made a batch boundary inside such a group skip the rest
+                 -- of the group for a whole cycle.
+                 CREATE TABLE IF NOT EXISTS sync_state (
+                     key   text PRIMARY KEY,
+                     value timestamptz NOT NULL
+                 );
+                 "
+            ))
+            .await
+            .context("pgvector + graph schema")?;
+
+        apply_missing_ddl(&obj, &schema_steps(&slot_subject, &slot_predicate)).await?;
+
+        // Data migrations: they only touch rows, and need the columns added above.
+        obj.batch_execute(&format!(
+            "                 -- `about` was carrying two different relations under one name: a claim
                  -- belonging to a project (8,485 rows) and a document mentioning a concept
                  -- (5,148). Only the second is semantic, and `semantic_stats.about` -- which sits
                  -- beside `tools`, `concepts` and `uses` -- was counting both, so that number was
@@ -755,30 +1169,6 @@ impl Store {
                  -- nothing once the rows carry their own name.
                  UPDATE edge SET kind = 'claim_of_project'
                   WHERE kind = 'about' AND src LIKE 'claim:%' AND dst LIKE 'project:%';
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'fact';
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'certain';
-                 -- D2 step 1 (PRD §8): a claim anchors to the code its note cites. `anchor` is
-                 -- `project:path[:span]`; `stale_at`/`stale_reason` belong to step 2 (stale
-                 -- detection) and are written by nothing yet; `era` is the D3 legacy marker —
-                 -- rows written after this lands are 'anchored'/'unanchored' per the resolver,
-                 -- existing rows keep the default 'pre-anchor' (marker only, no rewrite).
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_at timestamptz;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS stale_reason text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS era text NOT NULL DEFAULT 'pre-anchor';
-                 -- D2 step 2 (PRD §8): first-pass staleness is a symbol-span hash, not a
-                 -- line-range hash — a line-range hash breaks on moves too. `anchor_hash` is
-                 -- sha256 of the covering symbol's body, set only when the anchor's project is
-                 -- registered in code_index; `anchor_symbol` is that symbol's qualified name,
-                 -- the key the sync-time re-pin looks the hash up by after a move.
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_hash text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS anchor_symbol text;
-                 ALTER TABLE claim ADD COLUMN IF NOT EXISTS said_by text;
-                 CREATE INDEX IF NOT EXISTS claim_anchor ON claim(anchor) WHERE anchor IS NOT NULL;
-                 CREATE INDEX IF NOT EXISTS claim_current ON claim(subject, predicate)
-                     WHERE superseded_at IS NULL;
-                 CREATE INDEX IF NOT EXISTS claim_kind ON claim(kind)
-                     WHERE superseded_at IS NULL;
                  -- A claim that there is no next step is not a next step. The distiller has
                  -- been writing `next-step: none` / `남은작업: 없음` as `kind: next` since the
                  -- beginning, so the stalled register reported work that was already finished
@@ -829,124 +1219,41 @@ impl Store {
                         'none', 'nothing', 'n/a', 'na', 'not applicable', 'no', '-', '--',
                         '없음', '없다', '없습니다', '없어요', '해당 없음', '해당없음',
                         '남은 작업 없음', '남은 작업이 없음', 'なし', '無し', '該当なし']);
-                 -- A list-kind claim must not be sealed by a sibling. The seal used to scope to
-                 -- (subject, predicate) for every kind, so the newest incident, next-step,
-                 -- decision or risk in a slot silently evicted every other one — measured on
-                 -- the live store 2026-09-17: decision 1,871 current vs 10,127 sealed, next
-                 -- 516 vs 5,166, risk 192 vs 4,020, blocked 74 vs 299; 555 distinct next-steps
-                 -- and 662 distinct risks held a value different from their slot's survivor.
-                 -- `upsert_claim` now seals non-fact kinds on (subject, predicate, source_path);
-                 -- this backfill unseals the rows the old rule sealed, but only where the
-                 -- writing note has no later row in the slot — a note's own superseded history
-                 -- stays sealed.
-                 --
-                 -- This carries a backup table, not just the UPDATE: it moves ~19k rows back
-                 -- into the population `next_actions`, `risks`, `/claims` and the brief read,
-                 -- and if the rule is wrong the owner needs the old state back. The backup is
-                 -- written first and `CREATE TABLE IF NOT EXISTS ... AS` skips once it exists,
-                 -- so a re-run never clobbers it. Idempotent: after the first run the predicate
-                 -- matches nothing. A retired note is exempt — the edge's seal is a
-                 -- retirement, not a stale-history row, and this batch runs on every
-                 -- `Store::open`.
-                 CREATE TABLE IF NOT EXISTS claim_unseal_backup_20260917 AS
-                   SELECT * FROM claim
-                    WHERE kind <> 'fact' AND superseded_at IS NOT NULL
-                      AND NOT EXISTS (SELECT 1 FROM claim l
-                                       WHERE l.subject = claim.subject AND l.predicate = claim.predicate
-                                         AND l.source_path = claim.source_path AND l.valid_from > claim.valid_from);
-                 UPDATE claim c SET superseded_at = NULL
-                  WHERE c.kind <> 'fact' AND c.superseded_at IS NOT NULL
-                    AND NOT EXISTS (SELECT 1 FROM claim l
-                                     WHERE l.subject = c.subject AND l.predicate = c.predicate
-                                       AND l.source_path = c.source_path AND l.valid_from > c.valid_from)
-                    AND NOT {RETIRED_NOTE};
                  CREATE TABLE IF NOT EXISTS node_gc_backup_20260917 AS
                    SELECT * FROM node WHERE {STALE_CLAIM_MIRROR_NODES};
                  CREATE TABLE IF NOT EXISTS edge_gc_backup_20260917 AS
                    SELECT * FROM edge
                     WHERE src IN (SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES})
                        OR dst IN (SELECT id FROM node WHERE {STALE_CLAIM_MIRROR_NODES});
-                 CREATE INDEX IF NOT EXISTS claim_hnsw ON claim USING hnsw (embedding vector_cosine_ops)
-                     WHERE superseded_at IS NULL;
-                 CREATE TABLE IF NOT EXISTS query_log (
-                     id            serial PRIMARY KEY,
-                     created_at    timestamptz NOT NULL DEFAULT now(),
-                     endpoint      text NOT NULL,
-                     query         text NOT NULL DEFAULT '',
-                     hit_paths     text[] NOT NULL DEFAULT '{{}}',
-                     sources       text[] NOT NULL DEFAULT '{{}}',
-                     answer_snippet text NOT NULL DEFAULT '',
-                     latency_ms    int
-                 );
-                 ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dists real[] NOT NULL DEFAULT '{{}}';
-                 ALTER TABLE query_log ADD COLUMN IF NOT EXISTS hit_dist_kinds text[] NOT NULL DEFAULT '{{}}';
-                 CREATE INDEX IF NOT EXISTS query_log_created ON query_log(created_at DESC);
-                 -- recall_label: the correctness label query_log cannot carry. A distance says how
-                 --   far a hit was, never whether it was worth injecting, so precision was
-                 --   unmeasurable and every relevance threshold was argued from distances alone.
-                 --   One row per (query_log row, hit position, judge): `llm` and `human` verdicts
-                 --   are stored SIDE BY SIDE, never overwriting each other, so their agreement rate
-                 --   is itself a measurement — an LLM judge nobody has checked
-                 --   is a biased instrument until that rate says otherwise.
-                 CREATE TABLE IF NOT EXISTS recall_label (
-                     query_log_id int NOT NULL REFERENCES query_log(id) ON DELETE CASCADE,
-                     hit_index    int NOT NULL,
-                     judge        text NOT NULL,
-                     verdict      text NOT NULL,
-                     model        text NOT NULL DEFAULT '',
-                     note         text NOT NULL DEFAULT '',
-                     created_at   timestamptz NOT NULL DEFAULT now(),
-                     PRIMARY KEY (query_log_id, hit_index, judge)
-                 );
-                 CREATE INDEX IF NOT EXISTS recall_label_created ON recall_label(created_at DESC);
-                 CREATE TABLE IF NOT EXISTS event_log (
-                     id               bigserial PRIMARY KEY,
-                     observed_at      timestamptz NOT NULL DEFAULT now(),
-                     time_unix_nano   bigint,
-                     severity_text    text NOT NULL DEFAULT 'INFO',
-                     severity_number  int NOT NULL DEFAULT 9,
-                     service_name     text NOT NULL DEFAULT '',
-                     component        text NOT NULL DEFAULT '',
-                     event_name       text NOT NULL DEFAULT '',
-                     status           text NOT NULL DEFAULT '',
-                     trace_id         text,
-                     span_id          text,
-                     run_id           text,
-                     session_id       text,
-                     workflow         text,
-                     workflow_node    text,
-                     workflow_outcome text,
-                     body             jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-                     attributes       jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-                     resource         jsonb NOT NULL DEFAULT '{{}}'::jsonb
-                 );
-                 CREATE INDEX IF NOT EXISTS event_log_observed ON event_log(observed_at DESC, id DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_component ON event_log(component, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_event ON event_log(event_name, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_status ON event_log(status, observed_at DESC);
-                 CREATE INDEX IF NOT EXISTS event_log_run_id ON event_log(run_id, observed_at DESC);
-                 -- Round-robin watermark for the D2 step-2 anchor staleness sweep: each sync takes
-                 -- the next batch of hashed claims after this position (wrapping to the corpus
-                 -- head), so a full pass is bounded per sync instead of growing with the corpus.
-                 -- The watermark is the WHOLE (valid_from, subject, predicate) sort key, not just
-                 -- the timestamp: claims distilled from one note share a valid_from, and a
-                 -- timestamp-only resume made a batch boundary inside such a group skip the rest
-                 -- of the group for a whole cycle.
-                 CREATE TABLE IF NOT EXISTS sync_state (
-                     key   text PRIMARY KEY,
-                     value timestamptz NOT NULL
-                 );
-                 -- Rows written when the watermark was a bare timestamp read the NOT NULL DEFAULT
-                 -- '' pair — empty strings sort before every real key, so the sweep re-checks that
-                 -- timestamp's group once, which is correct, not a skip.
-                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_subject text NOT NULL DEFAULT '';
-                 ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS value_predicate text NOT NULL DEFAULT '';"
+                 "
             ))
             .await
-            .context("pgvector + graph schema")?;
-
-        Ok(Self { pool, dim })
+            .context("claim/graph data migrations")?;
+        Ok(Self {
+            pool,
+            dim,
+            target,
+            vector_route: VectorRoute::default(),
+        })
     }
+
+    /// Start the store on the given vector backend (`vector.backend`).
+    #[must_use]
+    pub fn with_vector_route(mut self, route: VectorRoute) -> Self {
+        self.vector_route = route;
+        self
+    }
+
+    /// The door wording of a failure that came out of this store (see `pg_detail`).
+    pub fn door_detail(&self, e: &anyhow::Error) -> String {
+        crate::pg_detail::door_detail(&self.target, e)
+    }
+
+    /// `prefix: detail` for a stage-tagged failure.
+    pub fn door_staged(&self, e: &crate::pg_detail::Staged) -> String {
+        e.door_text(&self.target)
+    }
+
     /// Acquire a connection from the pool. Kept as a method (not direct field access) so every
     /// call site is a single point to instrument and so callers can reuse one object across a
     /// multi-statement logical unit (e.g. stats/compact) rather than holding several connections.
@@ -987,12 +1294,27 @@ impl Store {
     // ── document ─────────────────────────────────────────────────────────────
 
     pub async fn get_doc_sha(&self, path: &str) -> Result<Option<String>> {
-        let rows = self
-            .db()
-            .await?
+        Self::get_doc_sha_on(&self.db().await?, path).await
+    }
+
+    /// `get_doc_sha` on a caller-held connection or transaction handle.
+    pub async fn get_doc_sha_on(c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+        let rows = c
             .query("SELECT sha FROM document WHERE source_path = $1;", &[&path])
             .await?;
         Ok(rows.first().map(|r| r.get::<_, String>(0)))
+    }
+
+    /// The spelling of `path` that has a `document` row (the path as given wins), or None when no
+    /// width of that note exists. Verdict writes key on this, so a row that cites an old-width id
+    /// still lands on the document instead of counting as unknown.
+    pub async fn resolve_doc_path_on(c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+        for candidate in wiki_path_spellings(path) {
+            if Self::get_doc_sha_on(c, &candidate).await?.is_some() {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn all_doc_paths(&self) -> Result<Vec<String>> {
@@ -1006,9 +1328,12 @@ impl Store {
 
     /// Document mtime — the `valid_from` of a claim (temporal sort key). Falls back to now() if absent (graceful).
     pub async fn doc_updated_at(&self, path: &str) -> Result<SystemTime> {
-        let rows = self
-            .db()
-            .await?
+        Self::doc_updated_at_on(&self.db().await?, path).await
+    }
+
+    /// `doc_updated_at` on a caller-held connection or transaction handle.
+    pub async fn doc_updated_at_on(c: &impl GenericClient, path: &str) -> Result<SystemTime> {
+        let rows = c
             .query(
                 "SELECT updated_at FROM document WHERE source_path = $1;",
                 &[&path],
@@ -1019,18 +1344,20 @@ impl Store {
             .map_or_else(SystemTime::now, |r| r.get::<_, SystemTime>(0)))
     }
 
-    /// Update only the recency of documents whose content is unchanged (same sha) — mtime backfill without re-embedding.
-    /// Ensures the recency-first sort key (`updated_at`) is also populated for existing documents.
-    pub async fn set_updated_at(&self, path: &str, updated_at: SystemTime) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
-                "UPDATE document SET updated_at = $2
-                 WHERE source_path = $1 AND updated_at IS DISTINCT FROM $2;",
-                &[&path, &updated_at],
-            )
-            .await
-            .context("touch updated_at")?;
+    /// Move only the stored change-detection sha (old whole-file sha → content hash); nothing else is touched.
+    pub async fn set_doc_sha(&self, path: &str, sha: &str) -> Result<()> {
+        Self::set_doc_sha_on(&self.db().await?, path, sha).await?;
+        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
+    }
+
+    /// `set_doc_sha` on a caller-held connection or transaction handle.
+    pub async fn set_doc_sha_on(c: &impl GenericClient, path: &str, sha: &str) -> Result<()> {
+        c.execute(
+            "UPDATE document SET sha = $2 WHERE source_path = $1;",
+            &[&path, &sha],
+        )
+        .await
+        .context("set document sha")?;
         Ok(())
     }
 
@@ -1136,38 +1463,6 @@ impl Store {
             .collect())
     }
 
-    /// Documents semantically nearest to `source_path` by chunk-embedding cosine — the MEANING-based
-    /// complement to `related_docs`. `related_docs` only links docs sharing >=2 EXACT concept/tool slugs,
-    /// so it misses notes about the same thing in DIFFERENT words (and older / cross-project notes). For
-    /// each other doc this takes its single closest chunk to any of this doc's chunks, keeps docs within
-    /// `max_dist` (pgvector cosine DISTANCE = 1 - cosine_sim), and returns the nearest `limit`, first.
-    pub async fn semantic_related_docs(
-        &self,
-        source_path: &str,
-        limit: i64,
-        max_dist: f64,
-    ) -> Result<Vec<String>> {
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "WITH src AS (
-                     SELECT embedding FROM chunk WHERE source_path = $1 AND embedding IS NOT NULL
-                 )
-                 SELECT c.source_path, MIN(c.embedding <=> s.embedding)::float8 AS dist
-                 FROM chunk c, src s
-                 WHERE c.source_path <> $1 AND c.embedding IS NOT NULL
-                 GROUP BY c.source_path
-                 HAVING MIN(c.embedding <=> s.embedding) <= $2
-                 ORDER BY dist ASC
-                 LIMIT $3;",
-                &[&source_path, &max_dist, &limit],
-            )
-            .await
-            .context("semantic related docs")?;
-        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
-    }
-
     /// GraphRAG retrieval: the older notes this one shares ground with — the thread it continues.
     ///
     /// Two notes share ground when they assert the same **claim** (`claim:<subject>:<predicate>`)
@@ -1193,6 +1488,7 @@ impl Store {
         &self,
         source_path: &str,
         limit: i64,
+        min_shared: i64,
     ) -> Result<Vec<RecentDoc>> {
         let doc_id = doc_node_id(source_path);
         let rows = self
@@ -1244,7 +1540,8 @@ impl Store {
                      FROM shares s
                      JOIN document od ON ('doc:' || od.source_path) = s.doc_node
                      WHERE od.updated_at < (SELECT updated_at FROM document WHERE source_path = $3)
-                     GROUP BY s.doc_node ORDER BY shared DESC, s.doc_node ASC LIMIT $2
+                     GROUP BY s.doc_node HAVING sum(s.weight) >= $4
+                     ORDER BY shared DESC, s.doc_node ASC LIMIT $2
                  )
                  SELECT d.source_path, d.project, d.tags,
                         string_agg(c.content, E'\n' ORDER BY c.chunk_idx) AS content
@@ -1253,7 +1550,7 @@ impl Store {
                  JOIN chunk c ON c.source_path = d.source_path
                  GROUP BY d.source_path, d.project, d.tags, r.shared
                  ORDER BY r.shared DESC;",
-                &[&doc_id, &limit, &source_path],
+                &[&doc_id, &limit, &source_path, &min_shared],
             )
             .await
             .context("related by shared ground")?;
@@ -1355,9 +1652,32 @@ impl Store {
         confidence: &str,
         anchor: Option<&str>,
     ) -> Result<bool> {
-        let rows = self
-            .db()
-            .await?
+        Self::claim_is_unchanged_on(
+            &self.db().await?,
+            subject,
+            predicate,
+            value,
+            source_path,
+            kind,
+            confidence,
+            anchor,
+        )
+        .await
+    }
+
+    /// `claim_is_unchanged` on a caller-held connection or transaction handle.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_is_unchanged_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+    ) -> Result<bool> {
+        let rows = c
             .query(
                 "SELECT 1 FROM claim
                  WHERE subject = $1 AND predicate = $2 AND source_path = $4
@@ -1430,9 +1750,75 @@ impl Store {
         anchor_hash: Option<&str>,
         anchor_symbol: Option<&str>,
     ) -> Result<()> {
+        self.upsert_claim_with_anchor_on(
+            &self.db().await?,
+            subject,
+            predicate,
+            value,
+            source_path,
+            valid_from,
+            embedding,
+            kind,
+            confidence,
+            anchor,
+            anchor_hash,
+            anchor_symbol,
+        )
+        .await?;
+        self.mirror_surreal(&Scope::notes([source_path.to_owned()]))
+            .await
+    }
+
+    /// Lock every claim row of one canon slot, in the order `lock_claim_slots_of` takes them.
+    async fn lock_claim_slot_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let slot_subject = canon_sql("$1::text");
+        let slot_predicate = canon_sql("$2::text");
+        c.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE {canon_subject} = {slot_subject} AND {canon_predicate} = {slot_predicate}
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
+                 FOR UPDATE OF c;"
+            ),
+            &[&subject, &predicate],
+        )
+        .await
+        .context("lock claim slot in slot order")?;
+        Ok(())
+    }
+
+    /// `upsert_claim_with_anchor` on a caller-held connection or transaction handle.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_claim_with_anchor_on(
+        &self,
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        valid_from: SystemTime,
+        embedding: &[f32],
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+        anchor_hash: Option<&str>,
+        anchor_symbol: Option<&str>,
+    ) -> Result<()> {
         let vec = self.checked_vector(embedding)?; // dim guard (shared with upsert_chunk)
-        self.db().await?
-            .execute(
+        // Take the slot's rows in the order `lock_claim_slots_of` takes them, before the upsert
+        // and the seals below touch any of them: the seals lock rows in scan order, so a
+        // supersede holding one row of the slot while waiting on another meets this request in
+        // a cycle. `c` is the request's transaction (`ingest_in_own_tx`), so the locks last to
+        // its commit.
+        Self::lock_claim_slot_on(c, subject, predicate).await?;
+        c.execute(
                 "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence, anchor, anchor_hash, anchor_symbol, era)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text, $10::text, $11::text,
                          CASE WHEN $9::text IS NULL THEN 'unanchored' ELSE 'anchored' END)
@@ -1471,9 +1857,7 @@ impl Store {
         // guard — (subject, predicate, valid_from) is the primary key, so a row equalling
         // the live race's max is a race row itself and cannot be retired.
         if kind == "fact" {
-            self.db()
-                .await?
-                .execute(
+            c.execute(
                     &format!(
                         "UPDATE claim c SET superseded_at = m.mx
                          FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx FROM claim c
@@ -1491,51 +1875,45 @@ impl Store {
                 )
                 .await
                 .context("seal old claims")?;
-            self.db()
-                .await?
-                .execute(
-                    &format!(
-                        "UPDATE claim c SET superseded_at = NULL
+            c.execute(
+                &format!(
+                    "UPDATE claim c SET superseded_at = NULL
                          WHERE c.subject = $1 AND c.predicate = $2 AND c.superseded_at IS NOT NULL
                            AND c.valid_from = (SELECT max(c.valid_from) FROM claim c
                                                WHERE c.subject = $1 AND c.predicate = $2
                                                  AND NOT {RETIRED_NOTE});"
-                    ),
-                    &[&subject, &predicate],
-                )
-                .await
-                .context("unseal latest claim")?;
+                ),
+                &[&subject, &predicate],
+            )
+            .await
+            .context("unseal latest claim")?;
         } else {
-            self.db()
-                .await?
-                .execute(
-                    "UPDATE claim c SET superseded_at = m.mx
+            c.execute(
+                "UPDATE claim c SET superseded_at = m.mx
                      FROM (SELECT subject, predicate, source_path, max(valid_from) AS mx FROM claim
                            WHERE subject = $1 AND predicate = $2 AND source_path = $3
                            GROUP BY subject, predicate, source_path) m
                      WHERE c.subject = m.subject AND c.predicate = m.predicate
                        AND c.source_path = m.source_path
                        AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx;",
-                    &[&subject, &predicate, &source_path],
-                )
-                .await
-                .context("seal old claims")?;
-            self.db()
-                .await?
-                .execute(
-                    &format!(
-                        "UPDATE claim c SET superseded_at = NULL
+                &[&subject, &predicate, &source_path],
+            )
+            .await
+            .context("seal old claims")?;
+            c.execute(
+                &format!(
+                    "UPDATE claim c SET superseded_at = NULL
                          WHERE c.subject = $1 AND c.predicate = $2 AND c.source_path = $3
                            AND c.superseded_at IS NOT NULL
                            AND c.valid_from = (SELECT max(valid_from) FROM claim
                                              WHERE subject = $1 AND predicate = $2
                                                AND source_path = $3)
                            AND NOT {RETIRED_NOTE};"
-                    ),
-                    &[&subject, &predicate, &source_path],
-                )
-                .await
-                .context("unseal latest claim")?;
+                ),
+                &[&subject, &predicate, &source_path],
+            )
+            .await
+            .context("unseal latest claim")?;
         }
         Ok(())
     }
@@ -1554,37 +1932,51 @@ impl Store {
         predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<usize> {
+        let written =
+            Self::upsert_claim_node_on(&self.db().await?, path, project, subject, predicate, claim)
+                .await?;
+        self.mirror_surreal(&Scope::notes([path.to_owned()]))
+            .await?;
+        Ok(written)
+    }
+
+    /// `upsert_claim_node` on a caller-held connection or transaction handle.
+    pub async fn upsert_claim_node_on(
+        c: &impl GenericClient,
+        path: &str,
+        project: &str,
+        subject: &str,
+        predicate: &str,
+        claim: &crate::frontmatter::Claim,
+    ) -> Result<usize> {
         let claim_id = format!("claim:{subject}:{predicate}");
         let label = format!("{predicate}: {}", claim.value);
         let kind = claim.kind();
         let confidence = claim.confidence();
 
         // claim node
-        self.upsert_node(&claim_id, "claim", &label, Some(kind))
-            .await?;
+        Self::upsert_node_on(c, &claim_id, "claim", &label, Some(kind)).await?;
 
         // typed node for decisions/risks/etc.
         if kind != "fact" {
             let typed_id = format!("{kind}:{subject}:{predicate}");
             let typed_label = format!("{subject} — {}", claim.value);
-            self.upsert_node(&typed_id, kind, &typed_label, Some(confidence))
-                .await?;
-            self.upsert_edge(&claim_id, &typed_id, "is_a", None).await?;
+            Self::upsert_node_on(c, &typed_id, kind, &typed_label, Some(confidence)).await?;
+            Self::upsert_edge_on(c, &claim_id, &typed_id, "is_a", None).await?;
         }
 
         // doc -> claim edge
         let doc_id = doc_node_id(path);
-        self.upsert_edge(&doc_id, &claim_id, "claims", None).await?;
+        Self::upsert_edge_on(c, &doc_id, &claim_id, "claims", None).await?;
 
         // claim -> project edge
         if !project.is_empty() {
             let project_id = format!("project:{project}");
-            self.upsert_edge(&claim_id, &project_id, "claim_of_project", None)
-                .await?;
+            Self::upsert_edge_on(c, &claim_id, &project_id, "claim_of_project", None).await?;
         }
 
         if let Some(said_by) = claim.said_by {
-            self.relate_said(said_by, path, subject, predicate).await?;
+            Self::relate_said_on(c, said_by, path, subject, predicate).await?;
         }
 
         Ok(1 + usize::from(kind != "fact")
@@ -1633,6 +2025,56 @@ impl Store {
             )
             .await
             .context("recent claims")?;
+        Ok(rows
+            .iter()
+            .map(|r| Claim {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                kind: r.get(3),
+                confidence: r.get(4),
+                said_by: None,
+            })
+            .collect())
+    }
+
+    pub const NORTH_STAR_PREDICATES: [&'static str; 2] = ["goal", "check"];
+
+    pub fn north_star_subject(project: &str) -> String {
+        format!("north-star:{project}")
+    }
+
+    /// Current `decision` claims stored as a repository's north star: subject
+    /// `north-star:<project>`, predicate `goal` / `check`, newest `valid_from` per predicate.
+    /// Fetch only — the card puts them first (`ask::with_north_star`).
+    pub async fn north_star_claims(
+        &self,
+        project: &str,
+        exclude_origins: &[String],
+    ) -> Result<Vec<Claim>> {
+        let subject = Self::north_star_subject(project);
+        let predicates: Vec<String> = Self::NORTH_STAR_PREDICATES
+            .iter()
+            .map(|p| (*p).to_owned())
+            .collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT DISTINCT ON (c.predicate) c.subject, c.predicate, c.value, c.kind, c.confidence
+                 FROM claim c
+                 JOIN document d ON d.source_path = c.source_path
+                 WHERE c.superseded_at IS NULL
+                   AND c.kind = 'decision'
+                   AND c.subject = $1
+                   AND c.predicate = ANY($2)
+                   AND NOT (d.origin = ANY($3))
+                   AND d.source_path !~ $4
+                 ORDER BY c.predicate, c.valid_from DESC;",
+                &[&subject, &predicates, &exclude_origins, &NOT_USER_MEMORY_RE],
+            )
+            .await
+            .context("north star claims")?;
         Ok(rows
             .iter()
             .map(|r| Claim {
@@ -1771,10 +2213,10 @@ impl Store {
     /// register row shape, so a hit's claims and a register entry serialize identically.
     /// "Currently declare" is the `doc —claims→ claim` edge, not the `source_path` column: a
     /// rewritten note keeps its old rows alive, but only edge-reachable claims are handed over.
-    /// Current rows only, `fact` excluded (facts are context, not the record of a solve), most
-    /// solving kind first (`decision`, then `next`/`blocked`, then `risk`), newest `valid_from`
-    /// first within a kind, at most `per_doc` rows per document, with the full qualifying count
-    /// in `total_matching` so a cut is stated, not silent.
+    /// Current rows only, every kind including `fact` (`/search`, wiki-5375; the registers keep
+    /// their own fact-free SQL). Most solving kind first (`decision`, then `next`/`blocked`, then `risk`, then the rest),
+    /// newest `valid_from` first within a kind, at most `per_doc` rows per document, with the
+    /// full qualifying count in `total_matching` so a cut is stated, not silent.
     pub async fn declared_claims(
         &self,
         paths: &[String],
@@ -1802,7 +2244,6 @@ impl Store {
                      JOIN document dm ON dm.source_path = c.source_path
                      WHERE e.kind = 'claims'
                        AND c.superseded_at IS NULL
-                       AND c.kind <> 'fact'
                  ),
                  ranked AS (
                      SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project,
@@ -1903,181 +2344,6 @@ impl Store {
         })
     }
 
-    /// Recurrence register: current risk/blocked claims from the last `days` whose value is
-    /// semantically near an older current risk/blocked claim from a different note — "the
-    /// same mistake again". Read-only, one SQL round-trip; the pairing and the per-newer
-    /// grouping happen here.
-    ///
-    /// The gates reuse the register rules instead of inventing new numbers: a value under
-    /// `INFORMATIVE_VALUE_CHARS` reads as a tag, and a predicate that restates its kind
-    /// carries no information — such rows still answer, flagged `label_only`.
-    pub async fn recurrences(
-        &self,
-        days: i64,
-        project: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<Recurrence>> {
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "SELECT a.source_path, a.subject, a.predicate, a.value, a.kind, a.valid_from,
-                        b.source_path, b.subject, b.predicate, b.value, b.kind, b.valid_from,
-                        (a.embedding <=> b.embedding)::float4 AS distance,
-                        (a.valid_from::date - b.valid_from::date)::bigint AS days_apart,
-                        (a.predicate ~* $6) AS label_only
-                   FROM claim a
-                   JOIN claim b ON b.source_path <> a.source_path
-                   JOIN document da ON da.source_path = a.source_path
-                   JOIN document db ON db.source_path = b.source_path
-                  WHERE a.superseded_at IS NULL
-                    AND b.superseded_at IS NULL
-                    AND a.kind IN ('risk', 'blocked')
-                    AND b.kind IN ('risk', 'blocked')
-                    AND a.embedding IS NOT NULL
-                    AND b.embedding IS NOT NULL
-                    AND length(a.value) >= $3
-                    AND length(b.value) >= $3
-                    AND a.valid_from >= (NOW() - INTERVAL '1 day' * ($1::bigint))
-                    AND (a.valid_from::date - b.valid_from::date) >= ($2::bigint)
-                    AND (a.embedding <=> b.embedding) <= $4::real
-                    AND ($5::text IS NULL OR da.project = $5)
-                    AND ($5::text IS NULL OR db.project = $5)
-                  ORDER BY distance ASC, a.valid_from DESC;",
-                &[
-                    &days,
-                    &RECURRENCE_MIN_DAYS_APART,
-                    &INFORMATIVE_VALUE_CHARS,
-                    &RECURRENCE_MAX_DISTANCE,
-                    &project,
-                    &TAUTOLOGICAL_PREDICATES,
-                ],
-            )
-            .await
-            .context("recurrences")?;
-        // Pairs arrive nearest-first, so the first row seen for a newer claim carries that
-        // group's smallest distance; the group order below is exactly the sort the register
-        // promises. `limit` counts newers, not pairs. Rows of one newer claim are NOT
-        // adjacent — the sort interleaves them with other claims' pairs — so grouping goes
-        // through a key→index map, not "same as the previous row" (live: 6 newers came out
-        // as 16 rows that way).
-        let mut out: Vec<Recurrence> = Vec::new();
-        let mut index: HashMap<(String, String, String, SystemTime), usize> = HashMap::new();
-        for r in &rows {
-            let newer = ClaimRef {
-                source_path: r.get(0),
-                subject: r.get(1),
-                predicate: r.get(2),
-                value: r.get(3),
-                kind: r.get(4),
-                valid_from: r.get(5),
-            };
-            let older = ClaimRef {
-                source_path: r.get(6),
-                subject: r.get(7),
-                predicate: r.get(8),
-                value: r.get(9),
-                kind: r.get(10),
-                valid_from: r.get(11),
-            };
-            let distance: f32 = r.get(12);
-            let days_apart: i64 = r.get(13);
-            let label_only: bool = r.get(14);
-            let key = (
-                newer.source_path.clone(),
-                newer.subject.clone(),
-                newer.predicate.clone(),
-                newer.valid_from,
-            );
-            if let Some(&i) = index.get(&key) {
-                out[i].older.push(older);
-            } else {
-                index.insert(key, out.len());
-                out.push(Recurrence {
-                    newer,
-                    older: vec![older],
-                    distance,
-                    days_apart,
-                    label_only,
-                });
-            }
-        }
-        for row in &mut out {
-            row.older.sort_by_key(|c| c.valid_from);
-        }
-        if limit >= 0 {
-            out.truncate(usize::try_from(limit).unwrap_or(out.len()));
-        }
-        Ok(out)
-    }
-
-    /// Query embedding → top-k **current** claims (superseded_at IS NULL). Authority retrieval.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn current_claims(
-        &self,
-        query_emb: &[f32],
-        k: i64,
-        exclude_origins: &[String],
-        project: Option<&str>,
-        kinds: Option<&[String]>,
-        anchor_path: Option<&str>,
-        include_stale: bool,
-    ) -> Result<Vec<AnchoredClaim>> {
-        let vec = Vector::from(query_emb.to_vec());
-        // Honor the SAME origin boundary the recall path applies (retrieve::merge_hits filters by
-        // exclude_origins). Claims carry no origin column, but their parent document does — JOIN and
-        // filter on it so an injected/cross-origin claim cannot bypass an exclusion that the recalled
-        // chunks in the same answer respect (Layer 1: one answer, one consistent origin boundary).
-        // `origin = ANY('{}')` is false, so an empty exclusion passes every claim (no behavior change).
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.anchor, c.era,
-                        c.stale_at, c.stale_reason
-                 FROM claim c
-                 JOIN document d ON d.source_path = c.source_path
-                 WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL
-                   AND NOT (d.origin = ANY($3))
-                   AND ($4::text IS NULL OR d.project = $4)
-                   AND ($5::text[] IS NULL OR c.kind = ANY($5))
-                   AND d.source_path !~ $6
-                   AND ($7::text IS NULL OR split_part(c.anchor, ':', 2) LIKE replace(replace($7, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
-                   AND ($8::bool OR c.stale_at IS NULL)
-                 ORDER BY c.embedding <=> $1
-                 LIMIT $2;",
-                &[
-                    &vec,
-                    &k,
-                    &exclude_origins,
-                    &project,
-                    &kinds,
-                    &NOT_USER_MEMORY_RE,
-                    &anchor_path,
-                    &include_stale,
-                ],
-            )
-            .await
-            .context("current claims")?;
-        Ok(rows
-            .iter()
-            .map(|r| AnchoredClaim {
-                claim: Claim {
-                    subject: r.get(0),
-                    predicate: r.get(1),
-                    value: r.get(2),
-                    kind: r.get(3),
-                    confidence: r.get(4),
-                    said_by: None,
-                },
-                anchor: r.get(5),
-                era: r.get(6),
-                stale_at: r.get(7),
-                stale_reason: r.get(8),
-            })
-            .collect())
-    }
-
     /// document upsert + project/topic nodes + in_project/tagged edge regeneration (idempotent).
     /// `updated_at` = source file mtime (the true recency signal) — the sort key for recency-first retrieval.
     pub async fn upsert_document(
@@ -2086,11 +2352,22 @@ impl Store {
         sha: &str,
         updated_at: SystemTime,
     ) -> Result<()> {
+        Self::upsert_document_on(&self.db().await?, front, sha, updated_at).await?;
+        self.mirror_surreal(&Scope::notes([front.source_path.clone()]))
+            .await
+    }
+
+    /// `upsert_document` on a caller-held connection or transaction handle.
+    pub async fn upsert_document_on(
+        c: &impl GenericClient,
+        front: &FrontMatter,
+        sha: &str,
+        updated_at: SystemTime,
+    ) -> Result<()> {
         let path = &front.source_path;
         let title_ref: Option<&str> = front.title.as_deref();
         let author = String::from(front.author.clone());
-        self.db().await?
-            .execute(
+        c.execute(
                 "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at, author)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (source_path) DO UPDATE SET
@@ -2117,23 +2394,24 @@ impl Store {
         // project node + in_project edge
         if !front.project.is_empty() {
             let pid = format!("project:{}", front.project);
-            self.upsert_node(&pid, "project", &front.project, None)
-                .await?;
-            self.upsert_edge(&doc_id, &pid, "in_project", None).await?;
+            Self::upsert_node_on(c, &pid, "project", &front.project, None).await?;
+            Self::upsert_edge_on(c, &doc_id, &pid, "in_project", None).await?;
         }
 
         // tagged: remove existing then regenerate (idempotent)
-        self.db()
-            .await?
-            .execute(
-                "DELETE FROM edge WHERE src = $1 AND kind = 'tagged';",
-                &[&doc_id],
-            )
-            .await?;
-        for tag in &front.tags {
+        c.execute(
+            "DELETE FROM edge WHERE src = $1 AND kind = 'tagged';",
+            &[&doc_id],
+        )
+        .await?;
+        // Topic nodes are shared between notes: take them in tag order for every file, so two
+        // files in flight wait on each other instead of deadlocking.
+        let mut tags: Vec<&String> = front.tags.iter().collect();
+        tags.sort();
+        for tag in tags {
             let tid = format!("topic:{tag}");
-            self.upsert_node(&tid, "topic", tag, None).await?;
-            self.upsert_edge(&doc_id, &tid, "tagged", None).await?;
+            Self::upsert_node_on(c, &tid, "topic", tag, None).await?;
+            Self::upsert_edge_on(c, &doc_id, &tid, "tagged", None).await?;
         }
         Ok(())
     }
@@ -2142,14 +2420,22 @@ impl Store {
     /// note has FEWER chunks than before. Used by the upsert-then-prune re-ingest so a reader never
     /// sees an empty/half-deleted chunk set (no delete-first window). `from_idx == new chunk count`.
     pub async fn prune_chunks_from(&self, path: &str, from_idx: usize) -> Result<()> {
+        Self::prune_chunks_from_on(&self.db().await?, path, from_idx).await?;
+        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
+    }
+
+    /// `prune_chunks_from` on a caller-held connection or transaction handle.
+    pub async fn prune_chunks_from_on(
+        c: &impl GenericClient,
+        path: &str,
+        from_idx: usize,
+    ) -> Result<()> {
         let from = i32::try_from(from_idx).unwrap_or(i32::MAX);
-        self.db()
-            .await?
-            .execute(
-                "DELETE FROM chunk WHERE source_path = $1 AND chunk_idx >= $2;",
-                &[&path, &from],
-            )
-            .await?;
+        c.execute(
+            "DELETE FROM chunk WHERE source_path = $1 AND chunk_idx >= $2;",
+            &[&path, &from],
+        )
+        .await?;
         Ok(())
     }
 
@@ -2175,16 +2461,24 @@ impl Store {
             .await?
             .execute("DELETE FROM claim WHERE source_path = $1;", &[&path])
             .await?;
-        Ok(())
+        // The chunk rows went with the document (CASCADE), so no SQL above names them; Surreal
+        // drops every key of this note that pg no longer holds.
+        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
     }
 
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
+        self.upsert_chunk_on(&self.db().await?, d).await?;
+        self.mirror_surreal(&Scope::notes([d.front.source_path.clone()]))
+            .await
+    }
+
+    /// `upsert_chunk` on a caller-held connection or transaction handle.
+    pub async fn upsert_chunk_on(&self, c: &impl GenericClient, d: &Doc) -> Result<()> {
         let vec = self.checked_vector(&d.embedding)?; // dim guard (shared with upsert_claim)
         let idx = i32::try_from(d.chunk_idx).unwrap_or(i32::MAX);
-        self.db().await?
-            .execute(
+        c.execute(
                 "INSERT INTO chunk (id, source_path, content, embedding, origin, project, kind, chunk_idx)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (id) DO UPDATE SET
@@ -2201,22 +2495,6 @@ impl Store {
     }
 
     // ── retrieval ─────────────────────────────────────────────────────────────
-
-    pub async fn vector_search(&self, vec: &[f32], k: usize) -> Result<Vec<Hit>> {
-        let qvec = Vector::from(vec.to_vec());
-        let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
-        let rows = self.db().await?
-                        .query(
-                "SELECT id, content, origin, project, source_path, (embedding <=> $1)::float4 AS dist
-                 FROM chunk ORDER BY embedding <=> $1 LIMIT $2;",
-                &[&qvec, &k_i64],
-            )
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|r| row_to_hit(r, DistKind::VectorCosine))
-            .collect())
-    }
 
     pub async fn text_search(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
         let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
@@ -2235,65 +2513,6 @@ impl Store {
             .iter()
             .map(|r| row_to_hit(r, DistKind::TextRank))
             .collect())
-    }
-
-    /// Vector search with optional project and recency filters.
-    /// `since_hours` restricts to chunks whose parent document was updated within the window.
-    pub async fn vector_search_filtered(
-        &self,
-        vec: &[f32],
-        k: usize,
-        project: Option<&str>,
-        since_hours: Option<i32>,
-    ) -> Result<Vec<Hit>> {
-        let qvec = Vector::from(vec.to_vec());
-        let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "SELECT c.id, c.content, c.origin, c.project, c.source_path,
-                        (c.embedding <=> $1)::float4 AS dist
-                 FROM chunk c
-                 JOIN document d ON d.source_path = c.source_path
-                 WHERE ($3::text IS NULL OR c.project = $3)
-                   AND ($4::int IS NULL OR d.updated_at >= now() - make_interval(hours => $4))
-                 ORDER BY c.embedding <=> $1
-                 LIMIT $2;",
-                &[&qvec, &k_i64, &project, &since_hours],
-            )
-            .await?;
-        Ok(rows
-            .iter()
-            .map(|r| row_to_hit(r, DistKind::VectorCosine))
-            .collect())
-    }
-
-    /// Find the single nearest document by mean chunk distance. Used at the remember write gate
-    /// to skip near-duplicate session notes. Returns `(source_path, distance)` if within `max_dist`.
-    pub async fn nearest_document(
-        &self,
-        vec: &[f32],
-        max_dist: f64,
-    ) -> Result<Option<(String, f64)>> {
-        let qvec = Vector::from(vec.to_vec());
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "SELECT d.source_path, MIN(c.embedding <=> $1)::float8 AS dist
-                 FROM document d
-                 JOIN chunk c ON c.source_path = d.source_path
-                 WHERE c.embedding IS NOT NULL
-                 GROUP BY d.source_path
-                 HAVING MIN(c.embedding <=> $1) <= $2
-                 ORDER BY dist ASC
-                 LIMIT 1;",
-                &[&qvec, &max_dist],
-            )
-            .await
-            .context("nearest document")?;
-        Ok(rows.first().map(|r| (r.get(0), r.get(1))))
     }
 
     /// Full-text search with optional project and recency filters.
@@ -2493,6 +2712,241 @@ impl Store {
             .await
             .context("project names")?;
         Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
+    }
+
+    /// Projects with a document touched within `days`, busiest first (ties by name) — `GET /projects?active_days=`.
+    pub async fn active_project_counts(&self, days: i32) -> Result<Vec<(String, i64)>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::projects::ACTIVE_PROJECTS_SQL, &[&days])
+            .await
+            .context("active project counts")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)))
+            .collect())
+    }
+
+    /// Current `rule` claims for `GET /rules` (SQL copied from the Python door).
+    pub async fn rule_rows(&self) -> Result<Vec<crate::rules::RuleRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::rules::SQL, &[&"rule"])
+            .await
+            .context("rule claims")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::rules::RuleRow {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                source_path: r.get(3),
+            })
+            .collect())
+    }
+
+    /// Current claims of one subject for `GET /claim-source` (SQL copied from the Python door).
+    /// `valid_from` is rendered in UTC; the Python door renders in the psycopg connection's
+    /// TimeZone, which is unverified.
+    pub async fn claim_source_rows(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<crate::claim_source::ClaimRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::claim_source::SQL, &[&subject])
+            .await
+            .context("claim source")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::claim_source::ClaimRow {
+                source_path: r.get(0),
+                valid_from: chrono::DateTime::<chrono::Utc>::from(r.get::<_, SystemTime>(1))
+                    .fixed_offset(),
+                value: r.get(2),
+                author: r.get(3),
+            })
+            .collect())
+    }
+
+    /// Current claims of one predicate for `GET /claim-sources` (SQL copied from the Python door).
+    /// Same UTC-vs-connection-TimeZone caveat as `claim_source_rows`.
+    pub async fn claim_source_list_rows(
+        &self,
+        predicate: &str,
+    ) -> Result<Vec<crate::claim_source::ListRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::claim_source::LIST_SQL, &[&predicate])
+            .await
+            .context("claim source list")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::claim_source::ListRow {
+                subject: r.get(0),
+                row: crate::claim_source::ClaimRow {
+                    source_path: r.get(1),
+                    valid_from: chrono::DateTime::<chrono::Utc>::from(r.get::<_, SystemTime>(2))
+                        .fixed_offset(),
+                    value: r.get(3),
+                    author: r.get(4),
+                },
+            })
+            .collect())
+    }
+
+    /// Current claims of one note with the sealed value each replaced, for `GET /claim-priors`.
+    pub async fn claim_priors(&self, source: &str) -> Result<Vec<crate::claim_priors::ClaimPrior>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::claim_priors::SQL, &[&source])
+            .await
+            .context("claim priors")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::claim_priors::ClaimPrior {
+                subject: r.get(0),
+                predicate: r.get(1),
+                value: r.get(2),
+                prior: crate::claim_priors::prior_of(
+                    r.get(3),
+                    r.get(4),
+                    r.get::<_, Option<SystemTime>>(5)
+                        .map(chrono::DateTime::<chrono::Utc>::from),
+                ),
+            })
+            .collect())
+    }
+
+    /// Every live claim's `(subject, source_path)` for `GET /repairs/split-subjects`. No ORDER BY:
+    /// the grouping sorts, so row order changes nothing.
+    pub async fn split_subject_rows(&self) -> Result<Vec<(String, String)>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::split_subjects::SUBJECTS_SQL, &[])
+            .await
+            .context("split subject rows")?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    /// Per-predicate row counts and the longest value of the given spellings, for
+    /// `GET /repairs/split-subjects/samples`.
+    pub async fn split_samples(
+        &self,
+        variants: &[String],
+    ) -> Result<Vec<crate::split_subjects::Sample>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                crate::split_subjects::SAMPLES_SQL,
+                &[
+                    &crate::split_subjects::SAMPLE_VALUE_CHARS,
+                    &variants,
+                    &crate::split_subjects::SAMPLE_LIMIT,
+                ],
+            )
+            .await
+            .context("split samples")?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::split_subjects::Sample {
+                predicate: r.get(0),
+                rows: r.get(1),
+                value: r.get(2),
+            })
+            .collect())
+    }
+
+    /// The group `subject` names, read on the request's transaction.
+    async fn split_group_on(
+        tx: &Transaction<'_>,
+        subject: &str,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>> {
+        let rows = tx
+            .query(crate::split_subjects::SUBJECTS_SQL, &[])
+            .await
+            .context("split subject rows")?;
+        let rows: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        Ok(crate::split_subjects::find_group(&rows, subject))
+    }
+
+    /// `POST /repairs/split-subjects`: delete the claim rows of one group's other spellings and
+    /// blank the affected notes' sha so the next sync re-reads them, in one transaction. Without
+    /// the owner's standing the owner-written notes are left as they are and named in
+    /// `owner_held`. `None` means `subject` names no live group.
+    pub(crate) async fn merge_split_subject(
+        &self,
+        subject: &str,
+        standing: crate::serve::owner::Standing,
+    ) -> Result<Option<crate::split_subjects::Merged>> {
+        use crate::serve::owner::Standing;
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin split merge transaction")?;
+        // The first read only names the spellings to lock. The rows the merge acts on are read
+        // again once the slots are held, on the same transaction: a row an ingest or a seal
+        // committed in between is seen, and no other writer can change them until we commit.
+        let Some((spellings, _)) = Self::split_group_on(&tx, subject).await? else {
+            return Ok(None);
+        };
+        Self::lock_split_slots(&tx, &spellings).await?;
+        let Some((variants, notes)) = Self::split_group_on(&tx, subject).await? else {
+            return Ok(None);
+        };
+        let owner_held = match standing {
+            Standing::Owner => Vec::new(),
+            Standing::NotOwner => Self::owner_authored(&tx, &notes).await?,
+        };
+        let touched: Vec<String> = notes
+            .into_iter()
+            .filter(|path| !owner_held.contains(path))
+            .collect();
+        let deleted_rows = tx
+            .execute(crate::split_subjects::DELETE_SQL, &[&variants, &touched])
+            .await
+            .context("delete split claim rows")?;
+        let reread_notes = tx
+            .execute(crate::split_subjects::BLANK_SHA_SQL, &[&touched])
+            .await
+            .context("blank split notes' sha")?;
+        tx.commit()
+            .await
+            .context("commit split merge transaction")?;
+        self.mirror_surreal(&Scope::notes(touched)).await?;
+        Ok(Some(crate::split_subjects::Merged {
+            subject: subject.to_owned(),
+            deleted_rows,
+            reread_notes,
+            owner_held,
+        }))
+    }
+
+    /// Card-session edges for `GET /approved` (SQL copied from the Python door). Row order is
+    /// not fixed; the caller sorts.
+    pub async fn approved_edges(&self) -> Result<Vec<crate::approved::EdgeRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(crate::approved::SQL, &[])
+            .await
+            .context("approved edges")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::approved::EdgeRow {
+                src: r.get(0),
+                dst: r.get(1),
+                kind: r.get(2),
+            })
+            .collect())
     }
 
     /// Per-judge verdict counts, plus how often the two judges agreed on hits both of them
@@ -2700,6 +3154,13 @@ impl Store {
     /// statement through its own `batch_execute` call so the simple-query protocol keeps them
     /// in autocommit mode rather than wrapping multiple statements in an implicit transaction.
     pub async fn compact(&self) -> Result<CompactSummary> {
+        self.compact_with_lock_timeout(COMPACT_LOCK_TIMEOUT).await
+    }
+
+    pub async fn compact_with_lock_timeout(
+        &self,
+        lock_timeout: std::time::Duration,
+    ) -> Result<CompactSummary> {
         let mut report = CompactReport::default();
         let started = std::time::Instant::now();
         let db = self.db().await?;
@@ -2720,6 +3181,24 @@ impl Store {
         }
         report.vacuum_ms = t0.elapsed().as_millis();
 
+        // The timeout is session state on a pooled connection: reset it before the connection
+        // goes back, whether or not the reindex phase succeeded.
+        db.batch_execute(&format!("SET lock_timeout = {}", lock_timeout.as_millis()))
+            .await
+            .context("set lock_timeout for reindex")?;
+        let reindexed = Self::reindex_tables(&db, &mut report).await;
+        let reset = db.batch_execute("RESET lock_timeout").await;
+        reindexed?;
+        reset.context("reset lock_timeout after reindex")?;
+
+        self.finish_compact(&db, report, started).await
+    }
+
+    /// `REINDEX TABLE CONCURRENTLY` waits for every older transaction, so under a held
+    /// transaction it never ends. A table that cannot be locked within the session's
+    /// `lock_timeout` is skipped and named in `report.skipped_lock_timeout`; the cancelled
+    /// reindex leaves its `_ccnew` index, which the next run's sweep below drops and counts.
+    async fn reindex_tables(db: &Client, report: &mut CompactReport) -> Result<()> {
         let t0 = std::time::Instant::now();
         for table in [
             "document",
@@ -2769,12 +3248,27 @@ impl Store {
                     .with_context(|| format!("drop invalid index {name}"))?;
                 report.dropped_invalid_indexes += 1;
             }
-            db.batch_execute(&format!("REINDEX TABLE CONCURRENTLY {table};"))
+            match db
+                .batch_execute(&format!("REINDEX TABLE CONCURRENTLY {table};"))
                 .await
-                .with_context(|| format!("reindex table {table}"))?;
+            {
+                Ok(()) => {}
+                Err(e) if e.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+                    report.skipped_lock_timeout.push(table.to_owned());
+                }
+                Err(e) => return Err(e).with_context(|| format!("reindex table {table}")),
+            }
         }
         report.reindex_ms = t0.elapsed().as_millis();
+        Ok(())
+    }
 
+    async fn finish_compact(
+        &self,
+        db: &Client,
+        mut report: CompactReport,
+        started: std::time::Instant,
+    ) -> Result<CompactSummary> {
         let pruned = db
             .execute(
                 "DELETE FROM query_log WHERE created_at < now() - interval '90 days';",
@@ -2803,15 +3297,14 @@ impl Store {
 
     // ── graph helpers (node/edge upsert) ───────────────────────────────────────
 
-    async fn upsert_node(
-        &self,
+    async fn upsert_node_on(
+        c: &impl GenericClient,
         id: &str,
         kind: &str,
         label: &str,
         outcome: Option<&str>,
     ) -> Result<()> {
-        self.db().await?
-            .execute(
+        c.execute(
                 "INSERT INTO node (id, kind, label, outcome) VALUES ($1, $2, $3, $4)
                  ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, outcome = EXCLUDED.outcome;",
                 &[&id, &kind, &label, &outcome],
@@ -2821,19 +3314,21 @@ impl Store {
         Ok(())
     }
 
-    async fn upsert_edge(
-        &self,
+    async fn upsert_edge_on(
+        c: &impl GenericClient,
         src: &str,
         dst: &str,
         kind: &str,
         judge: Option<&str>,
     ) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
-                "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;",
-                &[&src, &dst, &kind, &judge],
-            )
+        let sql = format!(
+            "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (src, dst, kind) DO UPDATE SET judge = EXCLUDED.judge
+             WHERE {} > {};",
+            judge_rank_sql("EXCLUDED.judge"),
+            judge_rank_sql("edge.judge"),
+        );
+        c.execute(&sql, &[&src, &dst, &kind, &judge])
             .await
             .context("upsert edge")?;
         Ok(())
@@ -2852,10 +3347,22 @@ impl Store {
     /// retired note touched passes to the latest remaining live row. Whether the edge retires
     /// at all is `{RETIRED_NOTE}` — an owner-written older note yields only to an owner-written
     /// newer one, the store-side half of the door's refusal.
+    ///
+    /// Runs on the request's transaction handle `tx`; the caller opens and commits it.
     pub async fn record_supersedes(
-        &self,
+        tx: &Transaction<'_>,
         pairs: &[[String; 2]],
         judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        Self::record_supersedes_sealing(tx, pairs, judge, SealRule::WholeNote).await
+    }
+
+    /// `record_supersedes` with the seal rule named by the caller.
+    async fn record_supersedes_sealing(
+        tx: &Transaction<'_>,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+        rule: SealRule,
     ) -> Result<SupersedesReport> {
         let mut report = SupersedesReport::default();
         let (pairs, skipped) = split_supersedes(pairs);
@@ -2863,18 +3370,27 @@ impl Store {
         report
             .unknown_paths
             .extend(skipped.iter().map(|p| (*p).to_owned()));
+        // Known pairs are picked in request order (so `unknown_paths` keeps it), then written
+        // sorted by (older, newer): two requests touching the same older notes take the seal's
+        // row locks in the same order, so opposite-order requests wait instead of deadlocking.
+        let mut known = Vec::new();
         for pair in pairs {
-            if self.get_doc_sha(&pair[0]).await?.is_none() {
+            if Self::get_doc_sha_on(tx, &pair[0]).await?.is_none() {
                 report.unknown += 1;
                 report.unknown_paths.push(pair[0].clone());
                 continue;
             }
-            if self.get_doc_sha(&pair[1]).await?.is_none() {
+            if Self::get_doc_sha_on(tx, &pair[1]).await?.is_none() {
                 report.unknown += 1;
                 report.unknown_paths.push(pair[1].clone());
                 continue;
             }
-            self.upsert_edge(
+            known.push(pair);
+        }
+        known.sort_by(|a, b| (&a[1], &a[0]).cmp(&(&b[1], &b[0])));
+        for pair in known {
+            Self::upsert_edge_on(
+                tx,
                 &doc_node_id(&pair[0]),
                 &doc_node_id(&pair[1]),
                 "supersedes",
@@ -2882,9 +3398,115 @@ impl Store {
             )
             .await?;
             report.supersedes += 1;
-            self.seal_superseded_claims(&pair[0], &pair[1]).await?;
+            match rule {
+                SealRule::WholeNote => {
+                    Self::seal_superseded_claims(tx, &pair[0], &pair[1]).await?;
+                }
+                SealRule::RestatedSlots => {
+                    Self::seal_restated_slots(tx, &pair[0], &pair[1]).await?;
+                }
+            }
+            Self::note_retired_slots(tx, &pair[0], &pair[1], &mut report.retired).await?;
         }
         Ok(report)
+    }
+
+    /// Owner decision, as the Python writer does it: close only the `(subject, predicate)` slots
+    /// the newer note re-states, stamped like the whole-note seal. The older note's other facts
+    /// stay live, and nothing is handed on to a next-latest row. Same owner rule as the whole
+    /// seal (`{RETIRED_NOTE}`).
+    async fn seal_restated_slots(tx: &Transaction<'_>, newer: &str, older: &str) -> Result<()> {
+        Self::lock_claim_slots_of(tx, newer).await?;
+        tx.execute(
+            &format!(
+                "UPDATE claim c SET superseded_at = COALESCE(
+                        (SELECT max(valid_from) FROM claim WHERE source_path = $1),
+                        now())
+                 WHERE c.source_path = $2 AND c.superseded_at IS NULL
+                   AND (c.subject, c.predicate) IN
+                       (SELECT subject, predicate FROM claim WHERE source_path = $1)
+                   AND {RETIRED_NOTE};",
+            ),
+            &[&newer, &older],
+        )
+        .await
+        .context("seal re-stated slots of the superseded note")?;
+        Ok(())
+    }
+
+    /// Appends the older note's slots closed by this write to `retired`, each once. Read after
+    /// the seal: whichever rule closed a row (the claim write's latest-wins or the seal), a row
+    /// of the older note stamped with the newer note's latest `valid_from` was closed by it.
+    async fn note_retired_slots(
+        tx: &Transaction<'_>,
+        newer: &str,
+        older: &str,
+        retired: &mut Vec<(String, String)>,
+    ) -> Result<()> {
+        let rows = tx
+            .query(
+                "SELECT c.subject, c.predicate FROM claim c
+                  WHERE c.source_path = $2
+                    AND c.superseded_at = (SELECT max(valid_from) FROM claim WHERE source_path = $1)
+                  ORDER BY c.subject, c.predicate;",
+                &[&newer, &older],
+            )
+            .await
+            .context("read retired claims")?;
+        for row in rows {
+            let slot: (String, String) = (row.get(0), row.get(1));
+            if !retired.contains(&slot) {
+                retired.push(slot);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lock every claim row in the canon slots `source_path` touches, slot by slot. Ingest takes
+    /// a slot's rows in `sorted_claims` order (byte order of the canon subject, then predicate);
+    /// the seals below would otherwise take them in table scan order, and two requests on the
+    /// same slots then wait on each other in a cycle. `"C"` collation is Rust's `str` order.
+    async fn lock_claim_slots_of(tx: &Transaction<'_>, source_path: &str) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let touched_subject = canon_sql("subject");
+        let touched_predicate = canon_sql("predicate");
+        tx.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE ({canon_subject}, {canon_predicate}) IN
+                       (SELECT {touched_subject}, {touched_predicate} FROM claim
+                        WHERE source_path = $1)
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
+                 FOR UPDATE OF c;"
+            ),
+            &[&source_path],
+        )
+        .await
+        .context("lock claim slots in slot order")?;
+        Ok(())
+    }
+
+    /// Lock every claim row carrying one of `spellings`, in the order `lock_claim_slots_of` takes
+    /// a slot's rows (canon subject, canon predicate in `"C"` collation, then `valid_from`), so a
+    /// merge and an ingest or seal on the same slots wait on each other instead of in a cycle.
+    async fn lock_split_slots(tx: &Transaction<'_>, spellings: &[String]) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        tx.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE c.subject = ANY($1)
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
+                 FOR UPDATE OF c;"
+            ),
+            &[&spellings],
+        )
+        .await
+        .context("lock split slots in slot order")?;
+        Ok(())
     }
 
     /// Seal every current claim of the superseded note: `superseded_at` = the newer note's
@@ -2895,10 +3517,13 @@ impl Store {
     /// After the seal, each fact slot the retired note touched is handed to the next-latest
     /// live row: with the retired note out of the competition the latest remaining live row
     /// becomes current, instead of the slot ending with none.
-    async fn seal_superseded_claims(&self, newer: &str, older: &str) -> Result<usize> {
-        let sealed = self
-            .db()
-            .await?
+    async fn seal_superseded_claims(
+        tx: &Transaction<'_>,
+        newer: &str,
+        older: &str,
+    ) -> Result<usize> {
+        Self::lock_claim_slots_of(tx, older).await?;
+        let sealed = tx
             .execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = COALESCE(
@@ -2915,20 +3540,28 @@ impl Store {
         // slot's max is taken over live rows only (`NOT {RETIRED_NOTE}`), so the latest
         // among them becomes current. A slot with no live row left stays empty — all its
         // rows are the retired note's, sealed above.
-        self.db()
-            .await?
-            .execute(
+        // The slot is the canon spelling; its latest is the canon-spelled row first, then
+        // `valid_from`, so an old-spelling row never outranks a canon-spelled one.
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let canon_touched_subject = canon_sql("subject");
+        let canon_touched_predicate = canon_sql("predicate");
+        let is_canon = is_canon_sql("c");
+        tx.execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = NULL
-                     FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx
-                           FROM claim c
-                           WHERE (c.subject, c.predicate) IN (SELECT subject, predicate FROM claim
-                                                              WHERE source_path = $1 AND kind = 'fact')
-                             AND NOT {RETIRED_NOTE}
-                           GROUP BY c.subject, c.predicate) m
+                     FROM (SELECT DISTINCT ON (cs, cp) cs, cp, is_canon, valid_from
+                           FROM (SELECT {canon_subject} AS cs, {canon_predicate} AS cp,
+                                        {is_canon} AS is_canon, c.valid_from
+                                 FROM claim c
+                                 WHERE ({canon_subject}, {canon_predicate}) IN
+                                       (SELECT {canon_touched_subject}, {canon_touched_predicate} FROM claim
+                                        WHERE source_path = $1 AND kind = 'fact')
+                                   AND NOT {RETIRED_NOTE}) r
+                           ORDER BY cs, cp, is_canon DESC, valid_from DESC) m
                      WHERE c.kind = 'fact' AND c.superseded_at IS NOT NULL
-                       AND c.subject = m.subject AND c.predicate = m.predicate
-                       AND c.valid_from = m.mx;",
+                       AND {canon_subject} = m.cs AND {canon_predicate} = m.cp
+                       AND {is_canon} = m.is_canon AND c.valid_from = m.valid_from;",
                 ),
                 &[&older],
             )
@@ -2957,19 +3590,28 @@ impl Store {
             ) else {
                 continue;
             };
-            total += self.seal_superseded_claims(&newer, &older).await?;
+            // One transaction per edge: a failure at edge N keeps the seals of edges before it.
+            let mut conn = self.db().await?;
+            let tx = conn.transaction().await.context("begin seal transaction")?;
+            total += Self::seal_superseded_claims(&tx, &newer, &older).await?;
+            tx.commit().await.context("commit seal transaction")?;
+            self.mirror_surreal(&Scope::notes([older])).await?;
         }
         Ok(total)
     }
 
+    /// A pooled connection for a caller that opens its own request transaction
+    /// (`conn.transaction()`) and passes the handle to the `&Transaction` functions below.
+    pub async fn conn(&self) -> Result<deadpool_postgres::Object> {
+        self.db().await
+    }
+
     /// Which of `paths` the owner wrote (`document.author = 'owner'`).
-    pub async fn owner_authored(&self, paths: &[String]) -> Result<Vec<String>> {
+    pub async fn owner_authored(tx: &Transaction<'_>, paths: &[String]) -> Result<Vec<String>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = self
-            .db()
-            .await?
+        let rows = tx
             .query(
                 "SELECT source_path FROM document WHERE source_path = ANY($1) AND author = 'owner' ORDER BY source_path;",
                 &[&paths],
@@ -2982,12 +3624,15 @@ impl Store {
     /// The scorer's write door: record what one session consumed. Upserts `session:<id>` (label =
     /// `observed_at`) and one `used`/`contested` edge per known path, each carrying `judge` — who
     /// judged ('owner', 'inferred', 'agent:<name>', or NULL when the caller brings no name). An
-    /// edge that already exists keeps the judge it first carried: ON CONFLICT DO NOTHING does not
-    /// overwrite, so the first judgement to name an edge stays on it. Idempotent — a repeat call
-    /// updates the label and adds edges, never deletes. Paths with no `document` row are skipped
+    /// edge that already exists changes judge only upward (`judge_rank_sql`: owner > agent:* >
+    /// inferred > NULL), so an owner press lands on an edge distill inferred and nothing lowers
+    /// it. Idempotent — a repeat call updates the label and adds edges, never deletes. Paths with no `document` row are skipped
     /// and counted in the report, not errored.
+    ///
+    /// Runs on the request's transaction handle `tx`; the caller opens and commits it, so a
+    /// failure anywhere leaves none of the request's rows.
     pub async fn record_consumption(
-        &self,
+        tx: &Transaction<'_>,
         session_id: &str,
         observed_at: &str,
         used: &[String],
@@ -2996,29 +3641,27 @@ impl Store {
         judge: Option<&str>,
     ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
-        self.upsert_node(&session_node, "session", observed_at, None)
-            .await?;
+        Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
 
         let mut report = ConsumptionReport::default();
         for path in used {
-            if self.get_doc_sha(path).await?.is_none() {
+            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
                 report.unknown += 1;
                 continue;
-            }
-            self.upsert_edge(&session_node, &doc_node_id(path), "used", judge)
-                .await?;
+            };
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "used", judge).await?;
             report.used += 1;
         }
         for path in contested {
-            if self.get_doc_sha(path).await?.is_none() {
+            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
                 report.unknown += 1;
                 continue;
-            }
-            self.upsert_edge(&session_node, &doc_node_id(path), "contested", judge)
+            };
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "contested", judge)
                 .await?;
             report.contested += 1;
         }
-        let supersedes_report = self.record_supersedes(supersedes, judge).await?;
+        let supersedes_report = Self::record_supersedes(tx, supersedes, judge).await?;
         report.supersedes += supersedes_report.supersedes;
         report.unknown += supersedes_report.unknown;
         Ok(report)
@@ -3030,27 +3673,134 @@ impl Store {
     /// edges are deliberately invisible to `consumption_counts`: being handed is not being
     /// consumed. Idempotent — a repeat call updates the label and adds no duplicate edges. Paths
     /// with no `document` row are counted in `unknown`, not errored.
+    ///
+    /// Runs on the request's transaction handle `tx`; the caller opens and commits it.
     pub async fn record_handover(
-        &self,
+        tx: &Transaction<'_>,
         session_id: &str,
         observed_at: &str,
         paths: &[String],
     ) -> Result<HandoverReport> {
         let session_node = format!("session:{session_id}");
-        self.upsert_node(&session_node, "session", observed_at, None)
-            .await?;
+        Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
 
         let mut report = HandoverReport::default();
         for path in paths {
-            if self.get_doc_sha(path).await?.is_none() {
+            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
                 report.unknown += 1;
                 continue;
-            }
-            self.upsert_edge(&session_node, &doc_node_id(path), "handed", None)
-                .await?;
+            };
+            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "handed", None).await?;
             report.handed += 1;
         }
         Ok(report)
+    }
+
+    /// `record_handover` in its own transaction — for a caller whose request is that one call.
+    pub async fn handover_in_tx(
+        &self,
+        session_id: &str,
+        observed_at: &str,
+        paths: &[String],
+    ) -> Result<HandoverReport> {
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin handover transaction")?;
+        let report = Self::record_handover(&tx, session_id, observed_at, paths).await?;
+        tx.commit().await.context("commit handover transaction")?;
+        self.mirror_surreal(&Scope::graph([format!("session:{session_id}")]))
+            .await?;
+        Ok(report)
+    }
+
+    /// One gap report, in its own transaction: the `gap:` node (label = the question, outcome =
+    /// kind), the `session:` node (label = `observed_at`, overwritten on every call), the
+    /// session→gap edge, and a `gap_handed` edge to each handed note that has a `document` row.
+    /// Same writes as the Python door's `record_gap`; a repeat adds no edge twice.
+    pub async fn record_gap_in_tx(
+        &self,
+        args: &crate::gap::GapArgs,
+        observed_at: &str,
+    ) -> Result<crate::gap::GapReport> {
+        let gap = crate::gap::gap_node_id(&args.session_id, &args.query);
+        let session_node = format!("session:{}", args.session_id);
+        let mut conn = self.db().await?;
+        let tx = conn.transaction().await.context("begin gap transaction")?;
+        Self::upsert_node_on(&tx, &gap, "gap", &args.query, Some(args.kind.as_str())).await?;
+        Self::upsert_node_on(&tx, &session_node, "session", observed_at, None).await?;
+        Self::upsert_edge_on(&tx, &session_node, &gap, "gap", None).await?;
+        let known: HashSet<String> = tx
+            .query(
+                "SELECT source_path FROM document WHERE source_path = ANY($1);",
+                &[&args.handed],
+            )
+            .await
+            .context("known handed documents")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let handed: Vec<&String> = args.handed.iter().filter(|p| known.contains(*p)).collect();
+        for path in &handed {
+            Self::upsert_edge_on(&tx, &gap, &doc_node_id(path), "gap_handed", None).await?;
+        }
+        tx.commit().await.context("commit gap transaction")?;
+        self.mirror_surreal(&Scope::graph([gap.clone(), session_node]))
+            .await?;
+        Ok(crate::gap::GapReport {
+            gap,
+            kind: args.kind.as_str(),
+            handed: handed.len(),
+            unknown: args.handed.len() - handed.len(),
+        })
+    }
+
+    /// `record_supersedes` in its own transaction — for a caller whose request is that one call.
+    pub async fn supersedes_in_tx(
+        &self,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin supersedes transaction")?;
+        let report = Self::record_supersedes(&tx, pairs, judge).await?;
+        tx.commit().await.context("commit supersedes transaction")?;
+        self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
+            .await?;
+        Ok(report)
+    }
+
+    /// The supersedes write of a `remember` request, in its own transaction: it closes only the
+    /// slots the new note re-states. `compact` and verdict writes keep the whole-note seal.
+    pub async fn remember_supersedes_in_tx(
+        &self,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        let mut conn = self.db().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .context("begin supersedes transaction")?;
+        let report = Self::remember_supersedes(&tx, pairs, judge).await?;
+        tx.commit().await.context("commit supersedes transaction")?;
+        self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
+            .await?;
+        Ok(report)
+    }
+
+    /// `remember_supersedes_in_tx` on the request's transaction handle: the caller opens and
+    /// commits it, so the edges commit or roll back with the note they came from.
+    pub async fn remember_supersedes(
+        tx: &Transaction<'_>,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        Self::record_supersedes_sealing(tx, pairs, judge, SealRule::RestatedSlots).await
     }
 
     /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a
@@ -3142,19 +3892,29 @@ impl Store {
         source_path: &str,
         said_by: Option<crate::frontmatter::SaidBy>,
     ) -> Result<()> {
+        Self::mirror_claim_said_by_on(&self.db().await?, subject, predicate, source_path, said_by)
+            .await
+    }
+
+    /// `mirror_claim_said_by` on a caller-held connection or transaction handle.
+    pub async fn mirror_claim_said_by_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        said_by: Option<crate::frontmatter::SaidBy>,
+    ) -> Result<()> {
         let said_by = said_by.map(String::from);
-        self.db()
-            .await?
-            .execute(
-                "UPDATE claim SET said_by = $4
+        c.execute(
+            "UPDATE claim SET said_by = $4
                  WHERE subject = $1 AND predicate = $2 AND source_path = $3
                    AND said_by IS DISTINCT FROM $4
                    AND valid_from = (SELECT max(valid_from) FROM claim
                                       WHERE subject = $1 AND predicate = $2 AND source_path = $3);",
-                &[&subject, &predicate, &source_path, &said_by],
-            )
-            .await
-            .context("mirror claim said_by")?;
+            &[&subject, &predicate, &source_path, &said_by],
+        )
+        .await
+        .context("mirror claim said_by")?;
         Ok(())
     }
 
@@ -3162,10 +3922,8 @@ impl Store {
     /// reach, distinct, in path order. This is what a bare `{session_id, verdict}` `/consumption`
     /// applies the verdict to: the engine already knows what was handed, the caller only brings
     /// the thumbs-up/down. An unknown session hands nothing — an empty read, not an error.
-    pub async fn handed_paths(&self, session_id: &str) -> Result<Vec<String>> {
-        let rows = self
-            .db()
-            .await?
+    pub async fn handed_paths(tx: &Transaction<'_>, session_id: &str) -> Result<Vec<String>> {
+        let rows = tx
             .query(
                 "SELECT DISTINCT dst FROM edge WHERE src = $1 AND kind = 'handed' ORDER BY dst;",
                 &[&format!("session:{session_id}")],
@@ -3179,6 +3937,33 @@ impl Store {
                 dst.strip_prefix("doc:").unwrap_or(&dst).to_owned()
             })
             .collect())
+    }
+
+    /// The concept names written on each document (`about` edges to `concept:` nodes), as the
+    /// note spelled them — what `recall` shows so a writer reuses a name instead of coining one.
+    /// Same query as the Python door's `pg.concepts_by_doc`.
+    pub async fn concepts_of(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT e.src, n.label FROM edge e JOIN node n ON n.id = e.dst
+                 WHERE e.src = ANY($1) AND e.kind = 'about' AND n.kind = 'concept'
+                 ORDER BY e.src, n.label;",
+                &[&doc_ids],
+            )
+            .await
+            .context("concepts of")?;
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let src: String = row.get(0);
+            let label: String = row.get(1);
+            map.entry(src.strip_prefix("doc:").unwrap_or(&src).to_owned())
+                .or_default()
+                .push(label);
+        }
+        Ok(map)
     }
 
     /// `supersedes` edges pointing at these documents — the `source_path`s of the newer docs that
@@ -3305,32 +4090,53 @@ impl Store {
     // ── semantic nodes ──────────────────────────────────────────────────────────
 
     pub async fn upsert_tool(&self, slug: &str, text: &str) -> Result<()> {
-        self.upsert_node(&format!("tool:{slug}"), "tool", text, None)
+        Self::upsert_tool_on(&self.db().await?, slug, text).await?;
+        self.mirror_surreal(&Scope::graph([format!("tool:{slug}")]))
             .await
     }
+    pub async fn upsert_tool_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
+        Self::upsert_node_on(c, &format!("tool:{slug}"), "tool", text, None).await
+    }
     pub async fn upsert_concept(&self, slug: &str, text: &str) -> Result<()> {
-        self.upsert_node(&format!("concept:{slug}"), "concept", text, None)
+        Self::upsert_concept_on(&self.db().await?, slug, text).await?;
+        self.mirror_surreal(&Scope::graph([format!("concept:{slug}")]))
             .await
+    }
+    pub async fn upsert_concept_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
+        Self::upsert_node_on(c, &format!("concept:{slug}"), "concept", text, None).await
     }
 
     /// Remove this document's semantic edges (uses/about) — makes the deterministic graph rebuild idempotent.
     pub async fn clear_semantic_edges(&self, doc_path: &str) -> Result<()> {
+        Self::clear_semantic_edges_on(&self.db().await?, doc_path).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
+    }
+    pub async fn clear_semantic_edges_on(c: &impl GenericClient, doc_path: &str) -> Result<()> {
         let doc_id = doc_node_id(doc_path);
         let kinds: Vec<&str> = SEMANTIC_EDGE_KINDS.to_vec();
-        self.db()
-            .await?
-            .execute(
-                "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
-                &[&doc_id, &kinds],
-            )
-            .await?;
+        c.execute(
+            "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
+            &[&doc_id, &kinds],
+        )
+        .await?;
         Ok(())
     }
 
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(
+        Self::relate_doc_tool_on(&self.db().await?, doc_path, slug).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
+    }
+    pub async fn relate_doc_tool_on(
+        c: &impl GenericClient,
+        doc_path: &str,
+        slug: &str,
+    ) -> Result<()> {
+        Self::upsert_edge_on(
+            c,
             &doc_node_id(doc_path),
             &format!("tool:{slug}"),
             "uses",
@@ -3339,7 +4145,17 @@ impl Store {
         .await
     }
     pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
-        self.upsert_edge(
+        Self::relate_doc_concept_on(&self.db().await?, doc_path, slug).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
+    }
+    pub async fn relate_doc_concept_on(
+        c: &impl GenericClient,
+        doc_path: &str,
+        slug: &str,
+    ) -> Result<()> {
+        Self::upsert_edge_on(
+            c,
             &doc_node_id(doc_path),
             &format!("concept:{slug}"),
             "about",
@@ -3357,14 +4173,32 @@ impl Store {
         subject: &str,
         predicate: &str,
     ) -> Result<()> {
+        Self::relate_said_on(&self.db().await?, said_by, doc_path, subject, predicate).await?;
+        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+            .await
+    }
+    /// The `person:` node a `said_by` names, upserted; returns its id.
+    pub async fn upsert_speaker_on(
+        c: &impl GenericClient,
+        said_by: crate::frontmatter::SaidBy,
+    ) -> Result<&'static str> {
         let speaker = match said_by {
             crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
         };
-        self.upsert_node(speaker, "person", &String::from(said_by), None)
-            .await?;
-        self.upsert_edge(speaker, &doc_node_id(doc_path), "said", None)
-            .await?;
-        self.upsert_edge(
+        Self::upsert_node_on(c, speaker, "person", &String::from(said_by), None).await?;
+        Ok(speaker)
+    }
+    pub async fn relate_said_on(
+        c: &impl GenericClient,
+        said_by: crate::frontmatter::SaidBy,
+        doc_path: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
+        let speaker = Self::upsert_speaker_on(c, said_by).await?;
+        Self::upsert_edge_on(c, speaker, &doc_node_id(doc_path), "said", None).await?;
+        Self::upsert_edge_on(
+            c,
             speaker,
             &format!("claim:{subject}:{predicate}"),
             "said",
@@ -3583,7 +4417,7 @@ impl Store {
             )
             .await
             .context("repin claim anchor")?;
-        Ok(())
+        self.mirror_surreal(&Scope::slot(subject, predicate)).await
     }
 
     pub async fn mark_claim_stale(
@@ -3602,23 +4436,29 @@ impl Store {
             )
             .await
             .context("mark claim stale")?;
-        Ok(())
+        self.mirror_surreal(&Scope::slot(subject, predicate)).await
     }
 
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
     pub async fn gc_orphans(&self) -> Result<GcStats> {
         let mut gc = GcStats::default();
+        let mut gone: Vec<String> = Vec::new();
         for kind in ["tool", "concept"] {
-            let n = self
+            let removed: Vec<String> = self
                 .db()
                 .await?
-                .execute(
+                .query(
                     "DELETE FROM node WHERE kind = $1
-                       AND id NOT IN (SELECT src FROM edge UNION SELECT dst FROM edge);",
+                       AND id NOT IN (SELECT src FROM edge UNION SELECT dst FROM edge)
+                     RETURNING id;",
                     &[&kind],
                 )
-                .await?;
-            let c = usize::try_from(n).unwrap_or(0);
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let c = removed.len();
+            gone.extend(removed);
             match kind {
                 "tool" => gc.tool = c,
                 _ => gc.concept = c,
@@ -3645,7 +4485,9 @@ impl Store {
             db.execute("DELETE FROM node WHERE id = ANY($1);", &[&doomed])
                 .await?;
             gc.claim_edges = usize::try_from(edges).unwrap_or(0);
+            gone.extend(doomed);
         }
+        self.mirror_surreal(&Scope::graph(gone)).await?;
         Ok(gc)
     }
 }

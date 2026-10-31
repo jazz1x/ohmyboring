@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 REAL_PY="$(command -v python3)"
-export ROOT REAL_PY
+# doctor reads the marker TTLs through ohmyboring.config; the fixture checkout has no src of its own.
+PYTHONPATH="$ROOT/src"
+export ROOT REAL_PY PYTHONPATH
 
 make_fake_path() {
     fakebin="$1"
@@ -231,12 +233,29 @@ fi
 # (a1b) the probe needs the real interpreter — extraction parses the fixture JSON, and the
 # sentinel must record what the replayed command delivered. Models above take precedence.
 if [ "${1:-}" = "-" ] || { [ -n "${1:-}" ] && [ -f "${1:-}" ]; }; then
-    exec /usr/bin/python3 "$@"
+    exec "$REAL_PY" "$@"
 fi
 exit 1
 SH
 
-    chmod +x "$fakebin/curl" "$fakebin/docker" "$fakebin/jq" "$fakebin/python3"
+    # doctor runs the host interpreter as `uv run --locked --project <dir> python <args…>`;
+    # strip that prefix and hand the rest to the python3 fake above.
+    cat >"$fakebin/uv" <<'SH'
+#!/bin/sh
+[ "${1:-}" = run ] || exit 1
+shift
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --locked) shift ;;
+        --project) shift 2 ;;
+        python) shift; break ;;
+        *) exit 1 ;;
+    esac
+done
+exec python3 "$@"
+SH
+
+    chmod +x "$fakebin/curl" "$fakebin/docker" "$fakebin/jq" "$fakebin/python3" "$fakebin/uv"
 }
 
 window_ts() {

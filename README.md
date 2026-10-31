@@ -29,7 +29,9 @@ make ask Q="how did I fix the docker build cache problem?"
 
 > A fresh clone has an **empty vault**, so day-1 `make ask` finds nothing. `make collect` backfills your Claude history; after that, Claude sessions auto-accumulate and Codex is picked up by its worker when eligible (see [Feeding it](#feeding-it-ingestion)).
 
-> Requires **Docker**, **Python 3**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint).
+> Requires **Docker**, **uv**, **jq**, **curl**, **git**, **make**, and a local LLM server — **Ollama** or **LM Studio** (or another OpenAI-compatible endpoint). uv fetches the Python version `pyproject.toml` asks for, so the system Python does not matter.
+>
+> A second clone on the same Mac collides with the first: container names and ports are fixed. See the [Troubleshooting](#troubleshooting) table.
 
 **Pick a local LLM backend:**
 
@@ -55,6 +57,58 @@ Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + 
 
 ---
 
+## How I use it day to day
+
+- **Every session starts where the last one stopped.** When a session opens, the `SessionStart` hook injects a card for the project you opened: recent decisions, risks, facts and next steps. Every prompt after that gets up to three past notes that match its wording (`hooks/recall.py`).
+- **Settled things are written down the moment they settle.** A decision and its reason, a cause finally named, a rule you stated: the agent saves it with `remember` as one note, and puts what was decided into `claims` (subject, predicate, value, kind) so the registers can serve it.
+- **The next session reads before it re-derives.** `next_actions` answers "where were we", `decisions` is checked before deciding something that may already be decided, `recall` before solving a problem that has the shape of an old one.
+- **Sessions hand work to each other through notes.** One session writes a handoff note with `remember`; another session (after `/clear`, or a different terminal) reads it back by its note id with `recall`.
+- **Mornings start with a summary.** The `brief` and `weekly_brief` tools summarise recent work newest-first, and `make card` sends a morning proposal card to Slack.
+
+---
+
+## Connecting your agent so it improves your work
+
+The engine serves its tools over MCP at `http://localhost:7710/mcp`. This repository's `.mcp.json` registers it for Claude Code; `install.sh` also wires the Claude hooks and the Cursor/Codex MCP entries (see [Wiring the hooks manually](#wiring-the-hooks-manually)).
+
+The loop that makes the memory pay off:
+
+1. **Write** — when something is settled, call `remember` with the complete note and its claims.
+2. **Read before re-deriving** — before working something out again, call `recall`, `decisions` or `next_actions`.
+3. **Mark what helped** — `verdict` records whether the notes handed to a session were used (`used`) or wrong (`contested`).
+
+Three commands to try first:
+
+```bash
+make remember M="We pin the Rust toolchain because a newer clippy broke the build." T="toolchain pin"
+make ask Q="why is the Rust toolchain pinned?"
+make doctor     # stack, hooks/MCP, worker/queue and latest ingest in one view
+```
+
+---
+
+## Storage: pgvector or SurrealDB
+
+- **pgvector is the source of truth** and the default (`vector.backend` = `pgvector`).
+- **SurrealDB can run beside it as a follower copy.** Set `vector.backend` to `surreal`, start it with `docker compose --profile surreal up -d`, and fill it once with `vector-fill`. Vector searches are then ranked in SurrealDB.
+- **Every write lands in pgvector first, then is copied.** Chunks and claims are copied right after each write; documents and graph nodes/edges are compared and caught up at the end of every sync; the four log tables and the code index tables are copied by passes that read pgvector. `recurrences` always runs on pgvector.
+- **The source of truth has not moved.** SurrealDB is still the copy; switching the original to SurrealDB has not happened yet.
+- The SurrealDB query candidate list `ef` defaults to **2000**.
+
+---
+
+## Code sync: how code is stored, linked and used
+
+**Stored.** For each repository listed in `code_index.sources[]` (off unless you add one), `code-sync` parses Rust (`.rs`), Python (`.py`) and shell (`.sh`, `.bash`) files with Tree-sitter and writes them into four tables: repository, file, symbol and relation. Code is never copied into `vault/wiki`.
+
+**Linked.** When a note is saved, every `path/to/file.rs:123` mention in its body becomes an anchor. A claim whose subject or value names that file gets the anchor, and the engine stores a hash of the body of the symbol covering that line (or of the whole file when no line is given). On every scheduled sync the engine hashes those symbols again: if the symbol only moved, the anchor follows it; if its body changed or it disappeared, the claim is marked **stale**.
+
+**Used.** Agents search the code index with `code_search`, read one symbol and what it reaches with `code_symbol`, and check coverage with `code_index_status`. `corpus_status` reports `claims_stale`: how many settled facts point at code that has changed since.
+
+**Limits.** Call, import and reference targets are kept as unresolved text; nothing resolves them to a symbol yet.
+
+---
+
 ## Feeding it (ingestion)
 
 Memory gets in four ways — after setup you rarely touch the automatic paths:
@@ -71,18 +125,29 @@ Memory gets in four ways — after setup you rarely touch the automatic paths:
 `install.sh` does this for you. To redo it (or if you ran with `BORING_WIRE=0`):
 
 ```bash
-python3 agents/shared/agent_wiring.py --install \
+uv run --locked python agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7710/mcp
 ```
 
-This installs Claude hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus a `UserPromptSubmit` hook running `recall.py`.
+This installs Claude hooks, Cursor/Codex MCP entries, the Codex host worker, and Hermes cron workers when `hermes-agent` is enabled. Or edit `~/.claude/settings.json` by hand for Claude only: a `SessionEnd` hook running `python3 ~/oh-my-boring/hooks/distill-session.py`, plus the `UserPromptSubmit` and `SessionStart` hooks below.
+
+What the Claude Code hooks call (`agents/shared/agent_wiring.py` installs exactly these four):
+
+| Hook event | Calls | What it does |
+| --- | --- | --- |
+| `SessionStart` | `agents/claude-code/session-start-recall.py` | injects the recent-context card for the project you opened (guessed from cwd / git remote) |
+| `UserPromptSubmit` | `hooks/recall.py` | injects relevant past notes into the prompt |
+| `UserPromptSubmit` | `hooks/rules.py` | surfaces your standing rules when their trigger words appear |
+| `SessionEnd` | `hooks/distill-session.py` | distills the transcript and saves it with `remember` |
+
+Use `remember` / `recall` as your memory instead of loose `.md` files in the agent's own memory folder: write contracts, decisions and handoffs with `remember`, read them back with `recall`. Before a session runs out of context, save a handoff note with `remember`; the next session gets it back through `SessionStart` or an explicit `recall`.
 
 ---
 
 ## Viewing your memory
 
-The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-NNNN]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `BORING_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
+The notes are just markdown, so **open the `vault/` folder as an [Obsidian](https://obsidian.md) vault** — graph view, backlinks, tags, and full-text search come for free. The compiled notes already carry Obsidian-safe `tags` and `[[wiki-00000000001]]` `relates_to` links, so the graph view draws your memory's connections directly (richest with `BORING_VECTOR=on`, which projects the GraphRAG graph into those links). No custom UI to build. Obsidian's own `.obsidian/` workspace folder is gitignored, so your layout stays local and never leaks into git.
 
 Obsidian shows you what the corpus *holds*. To see what it actually **does** — which notes the
 recall hook injected into your sessions, how far the retriever reached to find them, and whether
@@ -122,7 +187,12 @@ flowchart LR
 
 - **Read door** — fast, no LLM. `make ask`, `recall.py`, MCP `recall` read `vault/wiki` directly.
 - **Write door** — gated. `distill-session.py` calls the local LLM and writes through ohmyboring's deterministic `remember` MCP tool.
-- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-NNNN.md` and re-ingests it.
+- **Duplicate gate** — duplicate notes are normally skipped; if the same session or a strong rollout copy produces a richer note, `remember` rewrites the same `wiki-00000000001.md` and re-ingests it.
+
+**Who does what (engine, tool, agent).** The split follows `drudge/PHILOSOPHY.md`: block the most wrong states with the least structure (Layer 3, line 54), and reject bad input at the boundary, not deep inside (Layer 2, line 47).
+- **Engine** (`drudge`) — deterministic, no LLM: gates, dedup, search, caps and stops live in code, not in a prompt.
+- **Tool** (MCP) — the contract between the two: the 25 tools (`remember`, `recall`, …) are what an agent calls.
+- **Agent** — judgment: it decides what to write and what to ask, then calls the tools; whatever it hands over is checked by the engine.
 
 ### Workflow graph contract
 
@@ -166,8 +236,13 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `llm.embed_model` / `llm.embed_dim` | embedding model + its vector dimension (kernel's only model) |
 | `llm.bootstrap` | `auto` = bootstrap may start/pull · `manual` = health-check only (you own the server) |
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | explicit source roots for the separate AST code corpus; currently Rust/Tree-sitter, disabled unless opted in |
+| `code_index.sources[]` | explicit source roots for the separate AST code corpus; Rust, Python and shell via Tree-sitter, disabled unless opted in |
 | `agents[]` | agent session transcript and adapter configuration; not raw repository/codebase ingestion |
+| `allow_company_origin` | boolean, default `false`. `true` = `origin:company` notes (session experience from company work) count as accepted corpus and do not flip the audit "clean" flag; `false` flags them for review. Session experience only — company KB originals stay off-policy |
+| `checkout_roots` | list of directories (`~` expanded, depth ≤ 3) holding your git checkouts. The nightly hygiene pass reports projects named after a checkout folder instead of its remote repo. Unset = the check is not run (reported as not scanned, never as zero) |
+| `card.note_links` | links shown beside a note id on the morning card, in order; leave a key out to hide it. `obsidian` (`vault`, optional `folder`) · `file` (`folder` = absolute host path, no `~`; `editor` URL scheme, default `vscode`) |
+| `embed_model` / `embed_dim` (top level) | deprecated v1 keys (defaults `bge-m3` / `1024`), still honored as a fallback when `llm.embed_model` / `llm.embed_dim` are unset — use the `llm.*` keys |
+| `vector.backend` | vector index backend of the engine: `pgvector` (default) or `surreal`. `surreal` reads vectors from the SurrealDB in `vector.surreal` (`url`, `namespace`, `database`, `user`, `password_env`, `ef` = query candidate list, default 2000; start it with `--profile surreal`, fill it with the `vector-fill` command). After the fill, every chunk and claim write is made in `pgvector` first and then in SurrealDB; a failed SurrealDB write is an error that says `pgvector` has it, and the fix is to run `vector-fill` again (`vector-check` and doctor compare the two). `recurrences` stays on `pgvector`; `config_get` and the startup log say both. Any other value does not stop the engine: it runs on `pgvector`, and `config_get` and the startup log say so |
 
 Code is never copied into `vault/wiki`. After enabling a source from `boring.example.json`, run `cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>` and inspect it with `code-status` or the `code_search`, `code_symbol`, and `code_index_status` MCP tools. Tree-sitter records syntax and parse errors; call/import/reference target text remains unresolved until a semantic resolver is added.
 
@@ -243,7 +318,7 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
 | `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
 | `BORING_OWNER_TOKEN` | shared secret for owner calls (corrections via `supersedes`, card verdict buttons). The engine, the door, and the card must all see the same value — compose passes it to both containers. Unset = no caller can write as the owner |
-| `BORING_DOOR_URL` | where the morning card and the Claude Code SessionStart hook find the door — required by both consumers. Without it the card refuses to start (exit 2) and the hook skips the `오늘 승인한 것` section. No consumer defaults it |
+| `BORING_DOOR_URL` | where the morning card and the Claude Code SessionStart hook find the door — required by both consumers. Without it the card refuses to start (exit 2) and the hook skips the `오늘 승인한 것` section (the hook's literal Korean header, "Approved today"). No consumer defaults it |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant (`make secretary`); the bot token needs the `message.channels` scope — thread replies are how corrections reach memory |
 
 Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are stored in the local engine DB first as OpenTelemetry-shaped log records; the NDJSON file is a fallback spool for engine-down cases unless you choose `BORING_EVENT_SINK=spool` or `both`. Use HTTP `/events` (or the `/otel-events` alias) or MCP `events` for the DB view; use `make events` for the DB view with automatic fallback to the file spool.
@@ -330,7 +405,7 @@ make collect N=20
 
 # GitHub Codex (normally handled by the Hermes worker)
 make doctor
-COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+COLLECT_LIMIT=20 uv run --locked python agents/codex/collect-sessions.py
 ```
 
 ### Daily/weekly consumption
@@ -347,7 +422,7 @@ curl -s -X POST http://localhost:7710/weekly \
   -d '{"project":"omb"}' | jq .
 
 # Preview the exact Slack-bound morning brief text
-python3 agents/hermes/briefing.py
+uv run --locked python agents/hermes/briefing.py
 
 # Stalled register — things that have not moved in 7+ days (requires BORING_VECTOR=on)
 curl -s -X POST http://localhost:7710/stalled \
@@ -356,6 +431,12 @@ curl -s -X POST http://localhost:7710/stalled \
 ```
 
 Hermes cron sends briefing script stdout as Slack `mrkdwn` text. `make eval` fixture notes are searchable during the gate but are pruned afterward and excluded from recency/claim briefing surfaces so test corpus entries do not appear in daily or weekly digests.
+
+Keeping records (a suggestion, not a gate):
+
+- Contracts, handoffs and verdicts: save them with `remember` instead of a local `.md` file.
+- A new version points at the one before it through `supersedes`.
+- If `remember` looks timed out, check the vault for the title before writing again: `rg -l --no-ignore '<part of the title>' vault/wiki`.
 
 ### PII / sensitive-data gate
 
@@ -381,11 +462,17 @@ rules:
     reason: "Staging credential"
 ```
 
+The default policy ships as `vault/rules/pii.yaml` (national-ID numbers and similar shapes); `pii.local.yaml` is merged on top of it. If a rule has no `action` and `default_action` is omitted, the action is `flag`.
+
 A `block` rule rejects the note at `remember` time; a `redact` rule masks matches before saving; a `flag` rule saves the note and adds a `pii-flag` tag. To let a flagged shape through on one line, add the exemption marker on that line:
 
 ```markdown
 The Jira ticket PROJ-1234 <!-- pii-allow: internal-ticket --> is public.
 ```
+
+**Secret scrub (no user setting).** Separately from PII rules, `remember` replaces known credential shapes in a note's title and body with `‹REDACTED›`, and the query log gets the same scrub. It covers Slack tokens, `sk-` / `sk-ant-` API keys, AWS `AKIA…` keys, GitHub tokens, Google `AIza…` keys, JWTs, `-----BEGIN … PRIVATE KEY-----` headers, and `api_key` / `secret` / `token` / `password` / `bearer` assignments with a 12+ character value. The list is a constant in the code (`drudge/src/redact.rs`), not a setting: no config key or file turns it off or extends it. To change what it masks, edit `redact.rs` and rebuild. For shapes of your own, use a PII rule above.
+
+**Company-origin split.** `allow_company_origin` (in the gitignored `boring.json`, default `false`) decides what the audit does with `origin:company` notes — session experience from company work. `false`: they are flagged for review and the audit "clean" flag flips. `true`: they count as accepted corpus and the flag stays. With `false` (the default), `company` notes are also left out of the `decisions`, `risks`, `next_actions` and `stalled` registers. It does not block writes. Which notes are `company` comes from the `repos[]` rules in the settings table.
 
 ### MCP tool call (raw JSON-RPC)
 
@@ -424,7 +511,7 @@ The old `hooks/` path still works as a set of backward-compatible symlinks, so e
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | Pulls relevant snippets and injects them as prompt context |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | Exposes `ohmyboring` as an MCP server |
 | Codex | `agents/codex/README.md` | MCP + host worker backfill | `~/.codex/mcp.json` / launchd or cron / `collect-sessions.py` | Exposes `ohmyboring` as an MCP server and backfills eligible Codex sessions; installed workers harvest stable rollout transcripts but skip true subagents |
-| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`briefing`, `morning-card`, `weekly-card`) + serial backfill workers (`ingest-worker.py`, Codex collector). The two card jobs ask the door to run the card programs (`POST /run/morning-card` · `/run/weekly-card`, delivery `local` — the tools post to Slack themselves); the launchd registrations (`scripts/schedule-card.sh`) stay until hermes has run one morning successfully, and the tools' own once-per-day/week guard keeps the overlap from double-posting |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | Config-driven cron (`briefing`, `morning-card`, `weekly-card`) + serial backfill workers (`ingest-worker.py`, Codex collector). The card jobs run the card programs through `card_runner.py` (delivery `local` — the tools post to Slack themselves); hermes cron owns the card schedule (the launchd `com.ohmyboring.morning-card` job was removed on 2026-09-28) |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / manual | Lazy backfill of older Claude Code sessions |
 | shared | `src/ohmyboring/config.py` | imported by adapters | `boring.json` policy loader |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | Idempotently configures hooks/MCP for enabled agents |
@@ -446,9 +533,9 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 | `POST /ask` / `ask` | Direct question answered from memory | not required |
 | `POST /search` / `recall` | Raw memory excerpts. Each hit carries `dist` and `dist_kind` (`vector_cosine` or `text_rank`) when the serving path has a comparable number; both are absent on the wiki-recall fallback rather than reporting a score from a third, incomparable scale | not required; semantic search uses vector when enabled |
 | `/remember` / `remember` | Store a curated note | — |
-| `POST /gap` / `gap` | Record a gap — `session_id`, `query`, `kind` (`missing`·`stale`·`broken`), `handed` (note source_paths; required for `stale`). The door only records, never judges | not required |
+| `POST /gap` / `gap` | Record a gap — `session_id`, `query`, `kind` (`missing`·`stale`·`broken`), `handed` (note source_paths; required for `stale`). Records only, never judges; answered by the engine when `DOOR_LINK_WRITER=engine` (the compose default), by the door when `python` | not required |
 
-The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers routes of its own: `GET /approved`, `GET /claim-source`, `GET /claim-sources`, `GET /projects?active_days=`, `GET`/`POST /repairs/split-subjects`, and `POST /gap`. Unregistered paths get a 404 — a door, not a catch-all proxy.
+The door at `127.0.0.1:7710` relays the engine's route table (read at startup from the contract snapshot, so it follows the engine) and answers some routes itself, depending on the `DOOR_*` switches in `docker-compose.yml` (11 of them; `engine` hands a route to the engine and the door proxies it, `python` makes the door answer). With `DOOR_LINK_WRITER=engine` the engine answers `GET`/`POST /repairs/split-subjects` and `POST /gap`, and the door keeps only POST split's row check, reread, and card-row bookkeeping. `DOOR_MEMORY_READER` covers `GET /approved`, `/claim-source`, `/claim-sources`, `/rules`; `DOOR_SEARCH_READER` covers `/projects` and `/search`. `GET /projects?active_days=` is the door's own DB-backed variant. All 11 switches are `engine` in production. The door has no `/run/*` routes — hermes cron runs the card programs itself. Unregistered paths get a 404 — a door, not a catch-all proxy.
 
 ### Token budget
 
@@ -480,9 +567,9 @@ For other agents, copy the root `.mcp.json` to the appropriate location (e.g. `~
 
 (VS Code Copilot uses `.vscode/mcp.json` with the root key `servers`. CLI alt: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`. Compose siblings reach it at `http://boring-door:7710/mcp`.)
 
-Available tools (24): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `project_status` (registers — rows and material, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed).
+Available tools (25): `recall`, `neighbors`, `claims` (memory retrieval) · `code_search`, `code_symbol`, `code_index_status` (separate AST code corpus) · `ask`, `brief`, `weekly_brief` (generative — run the LLM) · `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `project_status` (registers — rows and material, no LLM) · `context`, `corpus_status`, `events`, `config_get` (structured / introspection) · `remember`, `forget`, `classify_repo`, `sync` (write / maintain) · `verdict` (thumbs-up/down on what a session was handed) · `gap` (report a question memory could not answer).
 
-In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local event DB return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `verdict`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, and `code_index_status` do not require vector mode. The three code tools require an enabled `code_index` source and a prior `code-sync`.
+In the default wiki-first mode (`BORING_VECTOR=off`), tools that rely on recency/vector ordering, the graph, or the local event DB return JSON-RPC `-32603` until you set `BORING_VECTOR=on`: `neighbors`, `claims`, `corpus_status`, `events`, `brief`, `weekly_brief`, `project_status`, `decisions`, `risks`, `next_actions`, `stalled`, `recurrences`, `verdict`, `gap`. `recall` and `ask` read `vault/wiki` directly; `context` is callable but returns an empty claim card without the store; `remember`, `forget`, `sync`, `config_get`, `classify_repo`, `code_search`, `code_symbol`, and `code_index_status` do not require vector mode. The three code tools require an enabled `code_index` source and a prior `code-sync`.
 
 - `next_actions` *(requires `BORING_VECTOR=on`)* — next-action register: recent `next` claims and active `blocked` claims synthesized into a short todo/blocker list. Optionally filter by project.
 - `stalled` *(requires `BORING_VECTOR=on`)* — stalled register: `next` and `blocked` claims older than `older_than_days` (default 7).
@@ -530,7 +617,7 @@ curl -s -X POST http://localhost:7710/mcp \
 When hermes-agent is enabled in `boring.json`, `make up` wires it automatically:
 
 - Adds `mcp_servers.ohmyboring` to `~/.hermes/config.yaml`
-- Installs the canonical `~/.hermes/scripts/briefing.py` (uses `BORING_URL`, with `DRUDGE_URL` as a legacy fallback)
+- Installs the canonical `~/.hermes/scripts/briefing.py` (reaches the door through `door_url()`, i.e. `BORING_DOOR_URL`)
 - Validates the connection in `make smoke`
 
 Enable it in `boring.json`:
@@ -561,9 +648,9 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 ## Development · guardrails
 
 - SSOT docs: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
+- `make guard` = fmt + clippy + test + py-compile + py-unit-tests (`scripts/guard.sh`), then a vault data hygiene dry-run
 - `make quality` = release acceptance drift gate for MCP tools, vector-mode docs, and removed dangerous surfaces
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
 
 ---
@@ -620,13 +707,22 @@ For automatic periodic sync, add a cron job:
 ```text
 oh-my-boring/
 ├─ drudge/                  # Rust engine
+├─ src/ohmyboring/          # Python package (engine ports, door logic)
+├─ integrations/            # LangChain · LangGraph · Deep Agents packages
 ├─ agents/                  # host-side agent adapters
 │  ├─ claude-code/          # Claude Code hooks
-│  ├─ hermes/               # hermes-agent cron
+│  ├─ codex/                # Codex adapter
+│  ├─ cursor/               # Cursor adapter
+│  ├─ door/                 # the door (:7710)
+│  ├─ hermes/               # hermes-agent cron + card_runner.py
+│  ├─ memory/               # Deep Agents memory store
 │  ├─ schedulers/           # cron/launchd backfill
-│  └─ shared/               # policy/config library
+│  ├─ shared/               # policy/config library
+│  └─ slack/                # card programs
 ├─ hooks/                   # backward-compatible symlinks → agents/
-├─ scripts/                 # guard.sh · smoke.sh
+├─ scripts/                 # guard.sh · smoke.sh · doctor.sh · …
+├─ docs/                    # PRD · RUNBOOK · reports
+├─ config/                  # (empty, .gitkeep)
 ├─ vault/                   # raw → wiki memory
 ├─ data/                    # Postgres persistence (gitignored)
 ├─ docker-compose.yml
@@ -635,6 +731,6 @@ oh-my-boring/
 └─ Makefile
 ```
 
-> **Note on vault/wiki IDs:** `wiki-0000.md` is the tracked sample note (shipped with the repo). Personal notes start at `wiki-0001.md` and are gitignored, so your private content never leaks into git.
+> **Note on vault/wiki IDs:** `wiki-0000.md` is the tracked sample note (shipped with the repo) and the only note with a four-digit ID. Your own notes get eleven-digit IDs, starting at `wiki-00000000001.md`, and are gitignored, so your private content never leaks into git.
 >
 > **Platform note:** Tested on macOS and Linux. Windows is not officially supported yet because `hooks/` uses symlinks for backward compatibility.

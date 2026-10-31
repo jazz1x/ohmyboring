@@ -22,5 +22,4 @@ def _collector_path() -> str:
 
 if __name__ == "__main__":
     os.environ.setdefault("CODEX_INCLUDE_ROLLOUTS", "1")
-    os.environ.setdefault("COLLECT_STABLE_AGE_SECONDS", "1800")
     runpy.run_path(_collector_path(), run_name="__main__")

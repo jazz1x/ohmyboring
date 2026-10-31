@@ -12,14 +12,18 @@
 # Default mode exits non-zero only when drudge is down; the other lines are advisory so the
 # user sees the WHOLE picture in one run, not just the first failure. Use --strict for the
 # release/briefing readiness gate: every failed dependency/check makes the command fail.
+# --brief prints one short screen of where things are (heads, engine build/sync, container
+# creation times, env names, enabled hermes jobs' newest result, latest trunk CI) and exits
+# before any check runs — read-only, no sentinel, no doctor event (make status).
 # POSIX sh (dash) has no pipefail → every check reports its own result explicitly.
 set -u
 
-# Defaults mirror the hook (distill-session.py): BORING_URL + BORING_HOME + the marker dir,
-# so the diagnostic inspects exactly what the hook writes to.
+# Defaults mirror the hook (distill-session.py): BORING_URL + the marker dir, so the diagnostic
+# inspects exactly what the hook writes to. BORING_HOME defaults to the checkout this script
+# lives in, so a clone outside ~/oh-my-boring needs no override.
 BORING_URL="${BORING_URL:-http://127.0.0.1:7700}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-BORING_HOME="${BORING_HOME:-$HOME/oh-my-boring}"
+BORING_HOME="${BORING_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 MARK_DIR="${HOME}/.cache/boring-distill"
 # (d0b) How much of a container's log tail to read, and how many failures in it mean the process
 # is looping rather than having had a bad minute.
@@ -55,8 +59,74 @@ for arg in "$@"; do
     case "$arg" in
         --fix) FIX=1 ;;
         --strict) STRICT=1 ;;
+        --brief) BRIEF=1 ;;
     esac
 done
+
+# A probe that cannot answer prints its reason, never an empty or zero value.
+brief_summary() {
+    trunk_ref="refs/heads/${BORING_TRUNK:-feat/migration-python}"
+    heads="$(git -C "$BORING_HOME" ls-remote origin "$trunk_ref" refs/heads/main 2>/dev/null)"
+    trunk="$(printf '%s\n' "$heads" | awk -v r="$trunk_ref" '$2==r {print substr($1,1,8)}')"
+    main="$(printf '%s\n' "$heads" | awk '$2=="refs/heads/main" {print substr($1,1,8)}')"
+    echo "heads   trunk ${trunk:-unavailable (git ls-remote)} · main ${main:-unavailable (git ls-remote)}"
+
+    # Same build_sha read as the (a2b) drift check below.
+    health="$(curl -sf -m5 "$BORING_URL/health" 2>/dev/null)"
+    if [ -z "$health" ]; then
+        echo "engine  unavailable ($BORING_URL/health did not answer)"
+    else
+        field() { printf '%s' "$health" | sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
+        echo "engine  build_sha $(field build_sha | cut -c1-8) · sync $(field sync) · corpus $(field corpus_count) · db_healthy $(field db_healthy)"
+    fi
+
+    for c in boring-drudge boring-door boring-agent; do
+        line="$(docker inspect -f '{{.State.Status}} created {{.Created}}' "$c" 2>/dev/null)"
+        printf '%-7s %s\n' "${c#boring-}" "${line:-unavailable (docker inspect $c)}"
+    done
+
+    # Names only — `cut` drops every value before it leaves the container.
+    for c in boring-agent boring-door; do
+        names="$(docker exec "$c" sh -c 'env | cut -d= -f1' 2>/dev/null)"
+        if [ -z "$names" ]; then
+            echo "env     $c unavailable (docker exec)"
+            continue
+        fi
+        have=""; missing=""
+        for n in OLLAMA_HOST BORING_CARD_ROOT BORING_DOOR_URL BORING_URL BORING_OWNER_TOKEN SECRETARY_OWNER_ID; do
+            if printf '%s\n' "$names" | grep -qx "$n"; then have="$have $n"; else missing="$missing $n"; fi
+        done
+        echo "env     $c has:${have:- none} · missing:${missing:- none}"
+    done
+
+    # Enabled jobs only. As in the morning-card check below: the output dir is rotated, so the
+    # newest file by name is the run; the result is the line in it, not the mtime.
+    hermes_home="${BORING_HERMES_HOME:-$HOME/.hermes}"
+    jobs="$(jq -r '(.jobs // .)[] | select(.enabled) | [.id, .name, (.last_status // "none")] | @tsv' \
+        "$hermes_home/cron/jobs.json" 2>/dev/null)"
+    [ -n "$jobs" ] || echo "cron    unavailable ($hermes_home/cron/jobs.json unreadable or jq missing)"
+    printf '%s\n' "$jobs" | while IFS="$(printf '\t')" read -r id name status; do
+        [ -n "$id" ] || continue
+        newest="$(ls "$hermes_home/cron/output/$id" 2>/dev/null | sort | tail -1)"
+        if [ -z "$newest" ]; then
+            result="unavailable (no output file)"
+        else
+            # Card jobs print "ok exit=N" or "FAILED …"; other jobs print neither.
+            result="$(grep -m1 -oE 'ok exit=[0-9]+|FAILED.{0,60}' "$hermes_home/cron/output/$id/$newest" 2>/dev/null)"
+            result="${newest%.md} ${result:-(no ok/FAILED line)}"
+        fi
+        printf 'cron    %-20s %s · %s\n' "$name" "$status" "$result"
+    done
+
+    ci="$(cd "$BORING_HOME" && gh run list --branch "${trunk_ref#refs/heads/}" --limit 1 \
+        --json databaseId,headSha,status,conclusion \
+        -q '.[0] | "\(.databaseId) \(.headSha[0:8]) \(.status) \(.conclusion)"' 2>/dev/null)"
+    echo "ci      ${ci:-unavailable (gh run list)}"
+}
+if [ "${BRIEF:-0}" -eq 1 ]; then
+    brief_summary
+    exit 0
+fi
 # Shared /health readiness judge (db_healthy), so every gate asks the same question.
 DOCTOR_LIB_DIR="$(cd "$(dirname "$0")/lib" && pwd)"
 # shellcheck source=lib/drudge_health_readiness.sh
@@ -96,7 +166,7 @@ log_doctor_event() {
     [ "$STRICT" -eq 1 ] && event_name="readiness"
     duration_s="$(($(date +%s) - doctor_started_at))"
     if [ -f "$EVENT_LOG" ]; then
-        if ! python3 "$EVENT_LOG" --record doctor "$event_name" "$status" \
+        if ! uv run --locked --project "$BORING_HOME" python "$EVENT_LOG" --record doctor "$event_name" "$status" \
             --field "run_id=$doctor_run_id" \
             --field "strict=$STRICT" \
             --field "duration_s=$duration_s" \
@@ -127,8 +197,8 @@ fix_env() {
 }
 
 fix_hooks() {
-    echo "  → fixing agent hooks: python3 $BORING_HOME/agents/shared/agent_wiring.py --install --boring-home $BORING_HOME"
-    python3 "$BORING_HOME/agents/shared/agent_wiring.py" --install --boring-home "$BORING_HOME"
+    echo "  → fixing agent hooks: uv run --locked --project "$BORING_HOME" python $BORING_HOME/agents/shared/agent_wiring.py --install --boring-home $BORING_HOME"
+    uv run --locked --project "$BORING_HOME" python "$BORING_HOME/agents/shared/agent_wiring.py" --install --boring-home "$BORING_HOME"
 }
 
 fix_engine() {
@@ -279,7 +349,7 @@ fi
 
 # (a1b) The SessionEnd command must deliver its stdin to the script it runs: a command
 # backgrounded with `&` reads /dev/null, and that is how this hook ran for months on no payload.
-hook_cmd=$(python3 - "$settings" 2>/dev/null <<'PY'
+hook_cmd=$(uv run --locked --project "$BORING_HOME" python - "$settings" 2>/dev/null <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as fh:
@@ -553,7 +623,22 @@ else
     marker_writable=0
 fi
 
-pending_ttl_raw="${BORING_READINESS_PENDING_TTL:-${INGEST_PENDING_TTL:-1800}}"
+# The marker TTLs come from the Python parser of boring.json `collect` (env INGEST_/COLLECT_*_TTL
+# already folded in); an unreadable boring.json leaves the value empty and the check below goes red.
+collect_ttl() {
+    PYTHONPATH="$BORING_HOME/src${PYTHONPATH:+:$PYTHONPATH}" uv run --locked --project "$BORING_HOME" python - "$1" <<'PY'
+import sys
+from ohmyboring import config
+from ohmyboring.result import Ok
+match config.collect():
+    case Ok(collect):
+        print(int(getattr(collect, sys.argv[1] + "_ttl_seconds")))
+    case err:
+        print(err.error, file=sys.stderr)
+        sys.exit(1)
+PY
+}
+pending_ttl_raw="${BORING_READINESS_PENDING_TTL:-$(collect_ttl pending)}"
 if pending_ttl="$(int_seconds "$pending_ttl_raw")"; then
     :
 else
@@ -561,7 +646,7 @@ else
     bad "invalid pending marker TTL '$pending_ttl_raw' — set BORING_READINESS_PENDING_TTL or INGEST_PENDING_TTL to a positive integer second count"
     failed_marker=1
 fi
-retry_ttl_raw="${BORING_READINESS_RETRY_TTL:-${INGEST_RETRY_TTL:-$pending_ttl_raw}}"
+retry_ttl_raw="${BORING_READINESS_RETRY_TTL:-${BORING_READINESS_PENDING_TTL:-$(collect_ttl retry)}}"
 if retry_ttl="$(int_seconds "$retry_ttl_raw")"; then
     :
 else
@@ -640,7 +725,7 @@ if [ -f "$codex_status" ]; then
     ok "Codex session ingestion status:"
     codex_args="--status"
     [ "$STRICT" -eq 1 ] && codex_args="--status --strict"
-    if BORING_HOME="$BORING_HOME" BORING_VAULT_DIR="${BORING_VAULT_DIR:-$BORING_HOME/vault}" python3 "$codex_status" $codex_args; then
+    if BORING_HOME="$BORING_HOME" BORING_VAULT_DIR="${BORING_VAULT_DIR:-$BORING_HOME/vault}" uv run --locked --project "$BORING_HOME" python "$codex_status" $codex_args; then
         :
     else
         bad "Codex session ingestion status failed"; failed_codex=1
@@ -653,7 +738,7 @@ fi
 # the distilled note was too shallow even after the one repair attempt.
 event_log_probe="$BORING_HOME/src/ohmyboring/adapters/events.py"
 if [ -f "$event_log_probe" ]; then
-    if BORING_EVENT_LOG="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}" python3 "$event_log_probe" --recent-resolution-failures --max 3; then
+    if BORING_EVENT_LOG="${BORING_EVENT_LOG:-$HOME/.cache/oh-my-boring/events.ndjson}" uv run --locked --project "$BORING_HOME" python "$event_log_probe" --recent-resolution-failures --max 3; then
         ok "no recent resolution quality failures"
     else
         bad "recent resolution quality failures found — inspect make events or the BORING_EVENT_LOG fallback before briefing"; failed_resolution=1
@@ -667,7 +752,7 @@ fi
 # weeks, and those stale rows were later read as evidence the graph was still covered. Silence
 # is the failure this names.
 if [ -f "$event_log_probe" ]; then
-    if gate_line="$(python3 "$event_log_probe" --stale-gates)"; then
+    if gate_line="$(uv run --locked --project "$BORING_HOME" python "$event_log_probe" --stale-gates)"; then
         ok "watched gates ran recently ($gate_line)"
     else
         bad "a watched gate has gone stale — it is not failing, it stopped running ($gate_line)"; failed_resolution=1
@@ -688,14 +773,14 @@ else
     bad "event spool dir cannot be created ($spool_dir) — when the engine is down, session_end and injection_uptake rows are dropped with no trace anywhere"
     failed_eventlog=1
 fi
-sink_mode="$(BORING_EVENT_LOG="$event_spool" python3 "$event_log_probe" --sink-mode 2>/dev/null || true)"
+sink_mode="$(BORING_EVENT_LOG="$event_spool" uv run --locked --project "$BORING_HOME" python "$event_log_probe" --sink-mode 2>/dev/null || true)"
 spool_rows=0
 if [ -f "$event_spool" ]; then
     spool_rows=$(wc -l <"$event_spool" 2>/dev/null | tr -d ' ')
 fi
 case "$sink_mode" in
     db)
-        spool_loss="$(BORING_EVENT_LOG="$event_spool" python3 "$event_log_probe" --verdict-spool-loss 2>/dev/null || true)"
+        spool_loss="$(BORING_EVENT_LOG="$event_spool" uv run --locked --project "$BORING_HOME" python "$event_log_probe" --verdict-spool-loss 2>/dev/null || true)"
         in_rows=0
         in_sessions=0
         out_rows=0
@@ -780,7 +865,7 @@ fi
 # everywhere else.
 ledger_probe="$BORING_HOME/agents/shared/uptake_core.py"
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    dup_split="$(python3 "$ledger_probe" --duplicate-injections 2>/dev/null || true)"
+    dup_split="$(uv run --locked --project "$BORING_HOME" python "$ledger_probe" --duplicate-injections 2>/dev/null || true)"
     # Red is the rolling recent week. The PRD verdict window is closed (prd-section2-window,
     # 2026-10-12), so it is reported as information only.
     readable=0
@@ -872,7 +957,7 @@ card_jobs_json="$HERMES_HOME/cron/jobs.json"
 if [ ! -r "$card_jobs_json" ]; then
     warn "morning card: 모름 — hermes 작업 기록이 없음 ($card_jobs_json) (not the same as working)"
 else
-    card_job_id=$(python3 - "$card_jobs_json" <<'PY'
+    card_job_id=$(uv run --locked --project "$BORING_HOME" python - "$card_jobs_json" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
@@ -907,10 +992,10 @@ PY
                     card_failed=$(printf '%s\n' "$card_line" | grep -c 'FAILED' || true)
                     card_exit=$(printf '%s\n' "$card_line" | sed -n 's/.*exit=\([0-9][0-9]*\).*/\1/p')
                     # Staleness binds first: the script exits before writing any output when the
-                    # door is down, so yesterday's post must not read as today's. python3 because
+                    # door is down, so yesterday's post must not read as today's. python because
                     # GNU/BSD date differ; the filename is local time, so astimezone() attaches
                     # this machine's offset and only calendar dates are compared.
-                    card_judge=$(python3 - "${card_file%.md}" "${BORING_NOW:-}" <<'PY'
+                    card_judge=$(uv run --locked --project "$BORING_HOME" python - "${card_file%.md}" "${BORING_NOW:-}" <<'PY'
 import sys
 from datetime import datetime, timedelta
 
@@ -959,7 +1044,7 @@ fi
 # (d5c) below finds a hook that FIRED twice, which means it only speaks after the duplicate has
 # written rows, and it stays silent forever for an adapter registered twice that never runs.
 if [ -f "$wiring" ]; then
-    if reg_out="$(python3 "$wiring" --check-registrations --boring-home "$BORING_HOME" 2>&1)"; then
+    if reg_out="$(uv run --locked --project "$BORING_HOME" python "$wiring" --check-registrations --boring-home "$BORING_HOME" 2>&1)"; then
         ok "no hook of ours is registered twice (${reg_out##*checked_configs=})"
     else
         bad "HOOK REGISTERED TWICE — $reg_out. Every prompt fires it twice, which leaves the rate unchanged and halves the evidence behind the sample floor (PRD §2)."
@@ -977,7 +1062,7 @@ fi
 # registrations while swallowing the signal.
 verdict_cli="$BORING_HOME/scripts/uptake-verdict.py"
 if [ -f "$verdict_cli" ] && [ "${BORING_SKIP_MIDPOINT:-0}" != 1 ]; then
-    midpoint_out="$(python3 "$verdict_cli" --midpoint 2>&1)"
+    midpoint_out="$(uv run --locked --project "$BORING_HOME" python "$verdict_cli" --midpoint 2>&1)"
     # Exit codes only. This used to read the message text to tell "floor met" from "not due", so
     # the wording of a Korean sentence was the only thing separating them — rephrasing it would
     # have silently turned one into the other.
@@ -997,7 +1082,7 @@ fi
 # blind stretch is dated instead of discovered at the end. It scores a phrase from a really
 # injected hit against a synthetic assistant turn; it writes nothing.
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    if probe_out="$(python3 "$ledger_probe" --sensitivity-probe 2>/dev/null)"; then
+    if probe_out="$(uv run --locked --project "$BORING_HOME" python "$ledger_probe" --sensitivity-probe 2>/dev/null)"; then
         case "$probe_out" in
             *uptake_sensitivity=ok*) ok "uptake detector is sensitive (${probe_out#*reason=})" ;;
             *) warn "uptake sensitivity undetermined — $probe_out. Not a fault; the ledger carries nothing to probe with yet." ;;
@@ -1017,7 +1102,7 @@ fi
 # Ran by hand on 2026-09-07 and nowhere else, which is the arrangement that fails on the day
 # nobody is at the keyboard — the same reason (d5d) is a daily line and not a verdict-day ritual.
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    if check_out="$(python3 "$ledger_probe" --self-check 2>&1)"; then
+    if check_out="$(uv run --locked --project "$BORING_HOME" python "$ledger_probe" --self-check 2>&1)"; then
         case "$check_out" in
             *uptake_self_check=ok*) ok "uptake self-check ran (${check_out#*cross=})" ;;
             *) warn "uptake self-check undetermined — $check_out. Not a fault; too few sessions or transcripts to pair." ;;
@@ -1030,7 +1115,7 @@ fi
 
 # (d5g) (d5d) asked through `transcript.extract` rather than around it — see #311.
 if [ -f "$ledger_probe" ] && [ "${BORING_SKIP_LEDGER_PROBE:-0}" != 1 ]; then
-    if pipe_out="$(python3 "$ledger_probe" --pipeline-probe 2>/dev/null)"; then
+    if pipe_out="$(uv run --locked --project "$BORING_HOME" python "$ledger_probe" --pipeline-probe 2>/dev/null)"; then
         case "$pipe_out" in
             *uptake_pipeline_probe=ok*) ok "uptake survives the reader (${pipe_out#*reason=})" ;;
             *) warn "uptake pipeline probe undetermined — $pipe_out. Not a fault; no ledger session has a transcript to read." ;;
@@ -1050,7 +1135,7 @@ fi
 hermes_scripts_dir="$HOME/.hermes/scripts"
 if [ -d "$hermes_scripts_dir" ] && [ -f "$wiring" ]; then
     script_list="$(mktemp)"
-    if python3 "$wiring" --list-hermes-scripts --boring-home "$BORING_HOME" >"$script_list" 2>/dev/null; then
+    if uv run --locked --project "$BORING_HOME" python "$wiring" --list-hermes-scripts --boring-home "$BORING_HOME" >"$script_list" 2>/dev/null; then
         hermes_drift=0
         hermes_total=0
         while IFS= read -r src; do
@@ -1110,7 +1195,7 @@ done
 # like "fresh". Checked only when the checkout carries the Dockerfile (a wiki-first install has no door).
 door_dockerfile="$BORING_HOME/agents/door/Dockerfile"
 door_epoch() {
-    python3 -c 'import sys,re,datetime as d; s=re.sub(r"\.\d+","",sys.argv[1]).replace("Z","+00:00"); print(int(d.datetime.fromisoformat(s).timestamp()))' "$1" 2>/dev/null
+    uv run --locked --project "$BORING_HOME" python -c 'import sys,re,datetime as d; s=re.sub(r"\.\d+","",sys.argv[1]).replace("Z","+00:00"); print(int(d.datetime.fromisoformat(s).timestamp()))' "$1" 2>/dev/null
 }
 if [ -f "$door_dockerfile" ]; then
     door_paths="$(awk '$1 == "COPY" { for (i = 2; i < NF; i++) if ($i !~ /^--/) print $i }' "$door_dockerfile")"
@@ -1146,6 +1231,28 @@ if [ -f "$door_dockerfile" ]; then
         bad "DEPLOY DRIFT — door image ${door_created%%.*}Z vs last COPY-path commit $door_commit_time ($door_commit_sha). Merging is not deploying; run 'make door-build && make door-up'."
         failed_door_image=1
     fi
+fi
+
+# (d5e) vector index parity. With `vector.backend=surreal` a failed Surreal write leaves pg ahead
+# of Surreal (the write's error said so), and nothing else would show it later. `drudge
+# vector-check` compares row count and id-set hash of chunk and open claim on both sides and
+# fails when they differ; on pgvector it says "해당 없음". The binary decides the backend (it parses
+# boring.json the way the engine does). No binary: a boring.json that asks for surreal cannot be
+# measured, which is red; otherwise the backend is pgvector and the line does not apply.
+vector_cli="$BORING_HOME/drudge/target/release/drudge"
+if [ -x "$vector_cli" ]; then
+    if vector_out="$("$vector_cli" vector-check 2>&1)"; then
+        ok "vector index parity: $(printf '%s' "$vector_out" | grep -v '^\[' | tr '\n' ' ')"
+    else
+        bad "vector index parity — $(printf '%s' "$vector_out" | grep -v '^\[' | tr '\n' ' ')"
+        failed_engine=1
+    fi
+elif [ -f "$BORING_HOME/boring.json" ] \
+     && grep -Eq '"backend"[[:space:]]*:[[:space:]]*"surreal"' "$BORING_HOME/boring.json"; then
+    bad "cannot measure vector index parity — boring.json asks for backend=surreal but the host CLI $vector_cli is not built"
+    failed_engine=1
+else
+    ok "vector index parity: backend=pgvector — 해당 없음 (boring.json does not ask for surreal)"
 fi
 
 if [ "$FIX" -eq 1 ]; then

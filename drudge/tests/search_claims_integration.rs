@@ -224,7 +224,7 @@ async fn declared_claims_skips_rows_without_claims_edge() {
 }
 
 #[tokio::test]
-async fn declared_claims_never_returns_fact_claims() {
+async fn search_claims_hand_over_a_fact_only_note() {
     let Some(dsn) = test_dsn() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
@@ -251,14 +251,65 @@ async fn declared_claims_never_returns_fact_claims() {
     )
     .await;
 
-    let declared = store
+    // /search keeps it (C-DSHAPE2): the note's only live claim is the fact.
+    let included = store
         .declared_claims(std::slice::from_ref(&path), 10)
         .await
         .expect("declared claims");
-    assert!(
-        !declared.contains_key(&path),
-        "a fact-only note hands over nothing, even when nothing else qualifies"
-    );
+    let rows = included.get(&path).expect("search hands the fact over");
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].kind, "fact");
+    assert_eq!(rows.total_matching, 1);
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn search_claims_prefer_a_decision_over_a_fact_at_one_per_hit() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let ts = stamp();
+    let path = format!("/vault/wiki/claims-dec-fact-{ts}.md");
+    let front = fixture(&format!("claims-dec-fact-{ts}"), &path);
+    store
+        .upsert_document(&front, "sha-dec-fact", SystemTime::now())
+        .await
+        .expect("upsert document");
+
+    let base = SystemTime::now();
+    // The fact is the newer row: recency alone would pick it; the tier must pick the decision.
+    declare_claim(
+        &store,
+        &front,
+        &format!("d-{ts}"),
+        "choice",
+        "use pgvector",
+        "decision",
+        base,
+    )
+    .await;
+    declare_claim(
+        &store,
+        &front,
+        &format!("f-{ts}"),
+        "stack",
+        "runs on postgres",
+        "fact",
+        base + Duration::from_mins(1),
+    )
+    .await;
+
+    let declared = store
+        .declared_claims(std::slice::from_ref(&path), 1)
+        .await
+        .expect("declared claims");
+    let rows = declared.get(&path).expect("claims");
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].kind, "decision");
+    assert_eq!(rows.total_matching, 2, "the cut is stated");
 
     store.delete_document(&path).await.expect("cleanup");
 }

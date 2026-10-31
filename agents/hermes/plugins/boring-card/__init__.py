@@ -97,8 +97,19 @@ DELEGATE_MODEL_TIMEOUT = float(os.environ.get("CARD_DELEGATE_TIMEOUT") or "120")
 
 
 def _repo_module_dirs() -> tuple[str, str, str] | None:
-    """The repo's agents/slack + agents/shared + src dirs via BORING_HOME — no hardcoded path."""
-    home = os.environ.get("BORING_HOME")
+    """The repo's agents/slack + agents/shared + src dirs — no hardcoded path. BORING_CARD_ROOT
+    first: card_runner draws the buttons from it, so the press must be handled by the same
+    checkout. BORING_HOME is the container-wide fallback, and says so in the log."""
+    home = os.environ.get("BORING_CARD_ROOT")
+    if home:
+        _LOG.info("%s: card modules from BORING_CARD_ROOT=%s", _PLUGIN_NAME, home)
+    else:
+        home = os.environ.get("BORING_HOME")
+        _LOG.info(
+            "%s: BORING_CARD_ROOT is not set — card modules from BORING_HOME=%s",
+            _PLUGIN_NAME,
+            home,
+        )
     if not home:
         return None
     slack = os.path.join(home, "agents", "slack")
@@ -135,7 +146,7 @@ def register(ctx: Any) -> None:
     dirs = _repo_module_dirs()
     if dirs is None:
         _LOG.error(
-            "%s: BORING_HOME does not point at a checkout (agents/slack + agents/shared "
+            "%s: BORING_CARD_ROOT / BORING_HOME does not point at a checkout (agents/slack + agents/shared "
             "+ src not found) — the press parser and effects cannot be imported; no handler "
             "registered",
             _PLUGIN_NAME,
@@ -732,7 +743,9 @@ def register(ctx: Any) -> None:
                 await _push(
                     press,
                     snapshot,
-                    card_view.row_pressed(snapshot, press, lang=lang, repair_result=repair_result),
+                    card_view.row_pressed(
+                        snapshot, press, lang=lang, repair_result=repair_result, at=datetime.now(UTC)
+                    ),
                 )
 
     ctx.register_slack_action_handler(_ACTION_ID, _handler)

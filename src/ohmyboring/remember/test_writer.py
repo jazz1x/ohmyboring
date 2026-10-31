@@ -314,26 +314,26 @@ class WriterCase(unittest.TestCase):
         outcome = self.write(args, deps)
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
-        self.assertEqual(outcome.wiki_id, "wiki-0001")
+        self.assertEqual(outcome.wiki_id, "wiki-00000000001")
         self.assertIsNone(outcome.duplicate)
         self.assertEqual((outcome.supersedes, outcome.unknown), (0, 0))
         self.assertEqual(
             outcome.message,
-            "remembered → wiki/wiki-0001.md · chunks 1 · graph(tools 2 concepts 1 claims 1) — recallable now",
+            "remembered → wiki/wiki-00000000001.md · chunks 1 · graph(tools 2 concepts 1 claims 1) — recallable now",
         )
 
         # 파일 — id·날짜(시계 주입)·relates_to 빈 칸·author.
-        note_path = os.path.join(self.vault, "wiki", "wiki-0001.md")
-        self.assertEqual(self.written_files(), ["wiki-0001.md"])
+        note_path = os.path.join(self.vault, "wiki", "wiki-00000000001.md")
+        self.assertEqual(self.written_files(), ["wiki-00000000001.md"])
         text = Path(note_path).read_text(encoding="utf-8")
-        self.assertIn("id: wiki-0001", text)
+        self.assertIn("id: wiki-00000000001", text)
         self.assertIn("date: '2026-10-02'", text)
         self.assertIn("relates_to: []", text)
         self.assertIn("author: agent:tester", text)
 
         # document 행 — sha 는 파일 내용 해시(읽어 온 것과 같아야 sync 가 0 변경으로 본다).
         doc = self.sql_with("INSERT INTO document")[0][1]
-        self.assertEqual(doc["path"], self.p("wiki-0001.md"))
+        self.assertEqual(doc["path"], self.p("wiki-00000000001.md"))
         self.assertEqual(doc["title"], "E3c-1 저장 시험")
         self.assertEqual(doc["author"], "agent:tester")
         self.assertEqual(doc["tags"], ["e3c1"])
@@ -343,7 +343,7 @@ class WriterCase(unittest.TestCase):
         # chunk 행 — path#0, 본문 그대로, 이어 prune.
         chunks = self.sql_with("INSERT INTO chunk")
         self.assertEqual(len(chunks), 1)
-        self.assertEqual(chunks[0][1]["id"], f"{self.p('wiki-0001.md')}#0")
+        self.assertEqual(chunks[0][1]["id"], f"{self.p('wiki-00000000001.md')}#0")
         self.assertIn("본문이다.", chunks[0][1]["content"])
         prunes = self.sql_with("DELETE FROM chunk")
         self.assertEqual(prunes[0][1]["from_idx"], 1)
@@ -399,7 +399,7 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(len(written_events), 1)
         event = written_events[0]
         self.assertEqual(event["decision"], "stored")
-        self.assertEqual(event["source_path"], self.p("wiki-0001.md"))
+        self.assertEqual(event["source_path"], self.p("wiki-00000000001.md"))
         self.assertEqual(event["chunks"], 1)
         self.assertEqual(event["edges"], 4)
         self.assertEqual(event["claims"], 1)
@@ -563,11 +563,25 @@ class WriterCase(unittest.TestCase):
         outcome = self.write({"title": "번호 시험", "body": "본문"}, deps)
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
-        self.assertEqual(outcome.wiki_id, "wiki-0010")
+        self.assertEqual(outcome.wiki_id, "wiki-00000000010")
         self.assertEqual(
             self.written_files(),
-            ["wiki-0001.md", "wiki-0002.md", "wiki-0004.md", "wiki-0010.md"],
+            ["wiki-00000000010.md", "wiki-0001.md", "wiki-0002.md", "wiki-0004.md"],
         )
+
+    def test_wiki_number_passes_u32_and_reads_eleven_digit_names(self):
+        self.seed_note("wiki-0005", "작은 번호", "본문")
+        deps = self.deps(doc_paths=("/vault/wiki/wiki-05000000000.md",))
+        outcome = self.write({"title": "큰 번호 시험", "body": "본문"}, deps)
+        assert isinstance(outcome, writer.Written)
+        self.assertEqual(outcome.wiki_id, "wiki-05000000001")
+        self.assertEqual(self.written_files(), ["wiki-0005.md", "wiki-05000000001.md"])
+
+    def test_after_wiki_9999_comes_wiki_00000010000_in_eleven_digits(self):
+        self.seed_note("wiki-9999", "넷 자리 끝", "본문")
+        outcome = self.write({"title": "다섯 자리 첫 노트", "body": "본문"}, self.deps())
+        assert isinstance(outcome, writer.Written)
+        self.assertEqual(outcome.wiki_id, "wiki-00000010000")
 
     def test_a_new_note_file_is_not_executable(self):
         outcome = self.write({"title": "권한 시험", "body": "본문"})
@@ -582,7 +596,7 @@ class WriterCase(unittest.TestCase):
         outcome = self.write({"title": "번호 시험", "body": "본문"})
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
-        self.assertEqual(outcome.wiki_id, "wiki-0001")
+        self.assertEqual(outcome.wiki_id, "wiki-00000000001")
 
     # ── 걸너뜀 ──────────────────────────────────────────────────────────────
 
@@ -605,6 +619,23 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(dedup[0]["reason"], "exact_title")
         self.assertEqual(dedup[0]["existing_source_path"], existing)
         self.assertEqual(self.events.by_event("remember_written")[0]["decision"], "skipped")
+
+    def test_skip_event_carries_incoming_title_and_claims_capped(self):
+        self.seed_note("wiki-0001", "같은 제목", "옛 본문")
+        claims = [
+            {"subject": f"slot {n}", "predicate": "state", "value": f"v{n}", "kind": "fact"}
+            for n in range(10)
+        ]
+        self.write({"title": "같은 제목", "body": "새로운 본문이다. 충분히 다르다.", "claims": claims})
+        dedup = self.events.by_event("dedup_decision")[0]
+        self.assertEqual(dedup["status"], "skipped")
+        self.assertEqual(dedup["incoming_title"], "같은 제목")
+        self.assertEqual(
+            dedup["incoming_claims"],
+            [{"subject": f"slot {n}", "predicate": "state", "value": f"v{n}"} for n in range(8)],
+        )
+        self.assertEqual(dedup["incoming_claim_count"], 10)
+        self.assertTrue(dedup["claims_truncated"])
 
     # ── 대체(중복 문 판정) ────────────────────────────────────────────────────
 
@@ -634,12 +665,12 @@ class WriterCase(unittest.TestCase):
         outcome = self.write(args, self.deps(sha_by_path={old: "sha"}, seal_rows=[("slot a", "state")]))
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
-        self.assertEqual(outcome.wiki_id, "wiki-0002")
+        self.assertEqual(outcome.wiki_id, "wiki-00000000002")
         self.assertEqual(outcome.duplicate, old)
         self.assertEqual(outcome.supersedes, 1)
         self.assertEqual(
             outcome.message,
-            "remembered → wiki/wiki-0002.md (supersedes wiki/wiki-0001.md) · chunks 1 · "
+            "remembered → wiki/wiki-00000000002.md (supersedes wiki/wiki-0001.md) · chunks 1 · "
             "graph(tools 0 concepts 0 claims 2) — recallable now · supersedes linked 1"
             " · retired claims: slot a/state",
         )
@@ -648,13 +679,13 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(
             [(e["src"], e["dst"]) for e in super_edges],
             # src 는 새 노트의 진짜 경로, dst 는 중복 문이 이름한 옛 노트 경로(/vault 규약).
-            [(f"doc:{self.p('wiki-0002.md')}", f"doc:{old}")],
+            [(f"doc:{self.p('wiki-00000000002.md')}", f"doc:{old}")],
         )
         # 부분 닫기 SQL — 새 노트가 다시 말한 슬롯 명단만 닫는다(통째 봉인 변이는 여기 빨갛다).
         seals = self.sql_with("IN (SELECT subject, predicate FROM claim WHERE source_path")
         self.assertEqual(len(seals), 1)
         self.assertIn("superseded_at IS NULL", seals[0][0])
-        self.assertEqual(seals[0][1]["new"], self.p("wiki-0002.md"))
+        self.assertEqual(seals[0][1]["new"], self.p("wiki-00000000002.md"))
         self.assertEqual(seals[0][1]["old"], old)
         # 엔진의 통째 봉인 문자열(은퇴 조각)이 아니다.
         self.assertEqual(self.sql_with("AND EXISTS (SELECT 1 FROM edge e"), [])
@@ -682,7 +713,7 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(outcome.unknown, 1)
         self.assertEqual(
             outcome.message,
-            "remembered → wiki/wiki-0002.md · chunks 1 · graph(tools 0 concepts 0 claims 0)"
+            "remembered → wiki/wiki-00000000002.md · chunks 1 · graph(tools 0 concepts 0 claims 0)"
             " — recallable now · supersedes linked 1, not found 1 (/vault/wiki/wiki-9999.md)"
             " · retired claims: none",
         )
@@ -785,7 +816,7 @@ class WriterCase(unittest.TestCase):
             self.deps(scanner=scanner),
         )
         self.assertIsInstance(outcome, writer.Written)
-        text = Path(self.vault, "wiki", "wiki-0001.md").read_text(encoding="utf-8")
+        text = Path(self.vault, "wiki", "wiki-00000000001.md").read_text(encoding="utf-8")
         self.assertIn("[ACME]", text)
         self.assertNotIn("ACME42", text)
 
@@ -827,6 +858,15 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(self.written_files(), [])
         self.assertEqual(self.sql_with("INSERT INTO"), [])
 
+    def test_supersedes_names_a_note_by_number_whatever_the_width(self):
+        target = "/vault/wiki/wiki-00000009572.md"
+        deps = self.deps(_handler(self.sql, doc_paths=(target,), sha_by_path={target: "sha"}), is_owner=True)
+        outcome = self.write({"title": "교정", "body": "본문", "supersedes": ["wiki/wiki-9572.md"]}, deps)
+        assert isinstance(outcome, writer.Written)
+        self.assertEqual((outcome.supersedes, outcome.unknown), (1, 0))
+        [edge] = [p for (_s, p) in self.sql_with("INSERT INTO edge") if p["kind"] == "supersedes"]
+        self.assertEqual(edge["dst"], f"doc:{target}")
+
     def test_owner_may_supersede_owner_note(self):
         target = "/vault/wiki/wiki-0001.md"
         deps = self.deps(
@@ -836,7 +876,7 @@ class WriterCase(unittest.TestCase):
         outcome = self.write({"title": "교정", "body": "본문", "supersedes": ["wiki/wiki-0001.md"]}, deps)
         self.assertIsInstance(outcome, writer.Written)
         assert isinstance(outcome, writer.Written)
-        self.assertEqual(outcome.wiki_id, "wiki-0002")
+        self.assertEqual(outcome.wiki_id, "wiki-00000000002")
         self.assertTrue(self.sql_with("INSERT INTO edge"), "supersedes 간선이 쓰여야 한다")
         self.assertEqual(self.events.by_event("owner_supersede_refused"), [])
 
@@ -926,7 +966,7 @@ class WriterCase(unittest.TestCase):
         self.assertEqual(
             said,
             [
-                ("person:owner", f"doc:{self.p('wiki-0001.md')}"),
+                ("person:owner", f"doc:{self.p('wiki-00000000001.md')}"),
                 ("person:owner", "claim:door:speaks"),
             ],
         )

@@ -1,20 +1,5 @@
 {
-  "door_routes": [
-    "GET /approved",
-    "GET /claim-source",
-    "GET /claim-sources",
-    "GET /projects",
-    "GET /repairs/split-subjects",
-    "GET /repairs/split-subjects/samples",
-    "GET /rules",
-    "POST /gap",
-    "POST /repairs/split-subjects",
-    "POST /run/advice-write",
-    "POST /run/morning-card",
-    "POST /run/repair-judge",
-    "POST /run/weekly-card",
-    "POST /search"
-  ],
+  "door_routes": [],
   "get_shapes": {
     "/audit": {
       "optional": [],
@@ -86,7 +71,11 @@
     }
   },
   "http_routes": [
+    "GET /approved",
     "GET /audit",
+    "GET /claim-priors",
+    "GET /claim-source",
+    "GET /claim-sources",
     "GET /events",
     "GET /health",
     "GET /mcp",
@@ -95,6 +84,9 @@
     "GET /query-log",
     "GET /recall-label-stats",
     "GET /recall-labels",
+    "GET /repairs/split-subjects",
+    "GET /repairs/split-subjects/samples",
+    "GET /rules",
     "POST /ask",
     "POST /brief",
     "POST /compact",
@@ -102,6 +94,7 @@
     "POST /context",
     "POST /decisions",
     "POST /events",
+    "POST /gap",
     "POST /graph",
     "POST /handover",
     "POST /mcp",
@@ -110,6 +103,7 @@
     "POST /recall-labels",
     "POST /recurrences",
     "POST /remember",
+    "POST /repairs/split-subjects",
     "POST /risks",
     "POST /search",
     "POST /stalled",
@@ -323,6 +317,39 @@
       },
       "type": "object"
     },
+    "gap": {
+      "properties": {
+        "handed": {
+          "description": "source_path of the notes you were handed (required for stale).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "missing",
+            "stale",
+            "broken"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "description": "The question memory could not answer.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "Your session id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "query",
+        "kind"
+      ],
+      "type": "object"
+    },
     "neighbors": {
       "properties": {
         "query": {
@@ -462,10 +489,12 @@
           "type": "array"
         },
         "concepts": {
-          "description": "key technical concepts/patterns (≤6)",
+          "description": "key technical concepts/patterns (1-6, required). 이미 쓰던 개념 이름을 먼저 쓴다(recall·neighbors 결과의 concepts). 영어 slug(예: mutation-testing).",
           "items": {
             "type": "string"
           },
+          "maxItems": 6,
+          "minItems": 1,
           "type": "array"
         },
         "judge": {
@@ -525,7 +554,8 @@
       },
       "required": [
         "title",
-        "body"
+        "body",
+        "concepts"
       ],
       "type": "object"
     },

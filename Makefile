@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor readiness heal verify-llm door-build door-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor status readiness heal verify-llm door-build door-up engine-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -49,16 +49,16 @@ agent-logs: ## boring-agent (hermes) logs (MCP connection diagnostics)
 	$(COMPOSE) logs -f boring-agent
 
 events: ## Show recent workflow events (engine DB first, file fallback)
-	@python3 src/ohmyboring/adapters/events.py --tail --max "$${N:-20}"
+	@uv run --locked python src/ohmyboring/adapters/events.py --tail --max "$${N:-20}"
 
 events-replay: ## Hand spooled events to the engine (after an outage; doctor names the trapped rows)
-	@python3 src/ohmyboring/adapters/events.py --replay-spool
+	@uv run --locked python src/ohmyboring/adapters/events.py --replay-spool
 
 secretary: ## Answer @mentions in Slack from memory (Socket Mode; needs SLACK_APP_TOKEN/SLACK_BOT_TOKEN in .env)
-	set -a; . ./.env; set +a; python3 agents/slack/secretary.py
+	set -a; . ./.env; set +a; uv run --locked python agents/slack/secretary.py
 
 card: ## Send the morning proposal card to Slack (needs SLACK_BOT_TOKEN/SLACK_CARD_CHANNEL/BORING_DOOR_URL in .env; buttons are answered by the hermes plugin)
-	set -a; . ./.env; set +a; python3 agents/slack/card.py
+	set -a; . ./.env; set +a; uv run --locked python agents/slack/card.py
 
 door: ## The door — served by the boring-door container at 127.0.0.1:7710; this runs the same app on the host (DOOR_PORT, default 7710)
 	set -a; . ./.env 2>/dev/null || true; set +a; uvicorn agents.door.door:app --host 127.0.0.1 --port $${DOOR_PORT:-7710}
@@ -67,7 +67,18 @@ door-build: ## Build only the boring-door image (never touches the engine)
 	BUILD_SHA=$$(git rev-parse HEAD 2>/dev/null || true) $(COMPOSE) build boring-door
 
 door-up: ## Start only the boring-door container (--no-deps; never recreates the engine)
-	$(COMPOSE) up -d --no-deps boring-door
+	@# A worktree made compose take itself as the project dir: no .env, empty /vault and /config (10-27, 1m53s live).
+	@# The canonical checkout is the parent of git's common dir; empty output stops here (no CURDIR fallback).
+	gd=$$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); \
+	test -n "$$gd" || { echo "door-up: cannot find the canonical checkout (git common dir empty)" >&2; exit 1; }; \
+	canon=$$(dirname "$$gd"); \
+	$(COMPOSE) -f docker-compose.yml --project-directory "$$canon" --env-file "$$canon/.env" up -d --no-deps --no-build boring-door
+
+engine-up: ## Start only the engine container (boring-drudge) from a worktree, on the canonical checkout's compose project
+	gd=$$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); \
+	test -n "$$gd" || { echo "engine-up: cannot find the canonical checkout (git common dir empty)" >&2; exit 1; }; \
+	canon=$$(dirname "$$gd"); \
+	$(COMPOSE) -f docker-compose.yml --project-directory "$$canon" --env-file "$$canon/.env" up -d --no-deps --no-build boring-drudge
 
 models: ## Pull Ollama models (DRUDGE_LLM_MODEL + DRUDGE_EMBED_MODEL, defaults gemma4:12b + bge-m3)
 	ollama pull "${DRUDGE_LLM_MODEL:-gemma4:12b}" && ollama pull "${DRUDGE_EMBED_MODEL:-bge-m3}"
@@ -93,14 +104,14 @@ remember: ## Save + ingest a note immediately   make remember M="content" [T="ti
 	@[ -n "$(M)" ] || { echo 'usage: make remember M="content" [T="title"]'; exit 1; }
 	@curl -s -m600 -X POST "$${BORING_DOOR_URL:-http://127.0.0.1:7710}/mcp" -H 'content-type: application/json' \
 	  -d "$$(jq -nc --arg t "$${T:-$(M)}" --arg b "$(M)" \
-	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b}}}')" \
+	    '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"remember",arguments:{title:$$t,body:$$b,concepts:["manual-note"]}}}')" \
 	  | jq -r '.result.content[0].text // .error.message'
 
 collect: ## Lazily collect past Claude Code sessions (one at a time)   make collect [N=1]
-	@COLLECT_LIMIT=$${N:-1} python3 agents/schedulers/collect-sessions.py
+	@COLLECT_LIMIT=$${N:-1} uv run --locked python agents/schedulers/collect-sessions.py
 
 distill-now: ## Queue the CURRENT session, then have hermes drain the queue right now (re-runnable)   make distill-now
-	@python3 agents/schedulers/collect-sessions.py --now
+	@uv run --locked python agents/schedulers/collect-sessions.py --now
 	@docker exec -u "$$(id -u):$$(id -g)" boring-agent /opt/hermes/.venv/bin/python3 /opt/data/scripts/ingest-worker.py --drain-only >/dev/null \
 	  || { echo 'hermes (boring-agent) is not running — the session stays queued; it is distilled on the next hermes tick'; exit 1; }
 
@@ -112,6 +123,9 @@ e2e: ## wiki-mode end-to-end (remember→recall round-trip + vector-off reject);
 
 doctor: ## Diagnose the write-door (stack, hooks, newest note, Codex worker/queue)
 	./scripts/doctor.sh
+
+status: ## One screen of where things are (heads, engine, containers, env names, cron, CI); read-only
+	./scripts/doctor.sh --brief
 
 readiness: ## Strict briefing/readiness gate (fails on any doctor finding)
 	./scripts/doctor.sh --strict
@@ -132,27 +146,27 @@ maintenance-status: ## Show daily housekeeping registration state
 	./scripts/schedule-maintenance.sh status
 
 steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
-	@python3 scripts/data-steward.py
+	@uv run --locked python scripts/data-steward.py
 
 steward-fix: ## Apply safe data-steward repairs through the backup-first cleanup gate
-	@python3 scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+	@uv run --locked python scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
 
 vault-cleanup-check: ## Verify vault cleanup contract without rewriting notes
-	@python3 scripts/vault-cleanup-gate.py --check --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+	@uv run --locked python scripts/vault-cleanup-gate.py --check --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
 
 vault-cleanup-fix: ## Backup vault/wiki, apply safe steward repairs, then verify
-	@python3 scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+	@uv run --locked python scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
 
 retention: ## Show raw session retention plan (dry-run)
-	@python3 scripts/retention.py
+	@uv run --locked python scripts/retention.py
 
 retention-apply: ## Apply raw session retention (archive old transcripts, delete ancient archives)
-	@python3 scripts/retention.py --apply
+	@uv run --locked python scripts/retention.py --apply
 
 guard: ## Structural gate (fmt+clippy+test+py-compile+py-unit-tests) + vault data hygiene dry-run
 	./scripts/guard.sh
 	@echo "7) data-steward dry-run …"
-	@python3 scripts/data-steward.py --vault "$(PWD)/vault"
+	@uv run --locked python scripts/data-steward.py --vault "$(PWD)/vault"
 
 quality: ## Release acceptance gate (MCP contract + docs drift + removed dangerous surface)
 	cd drudge && cargo test --quiet quality_gate
@@ -187,7 +201,7 @@ test-db-upgrade: ## Schema parity — a DB upgraded from data/schema/baseline.sq
 	@sh scripts/test_schema_parity.sh
 
 self-verify-check: ## Check self-verification stage contract: make self-verify-check [STAGE=bootstrap] [SUMMARY=/path/summary.tsv]
-	@python3 scripts/self-verify-contract.py --stage "$${STAGE:-bootstrap}" $${SUMMARY:+--summary "$$SUMMARY"}
+	@uv run --locked python scripts/self-verify-contract.py --stage "$${STAGE:-bootstrap}" $${SUMMARY:+--summary "$$SUMMARY"}
 
 deny: ## Supply-chain gate (cargo-deny: vulnerabilities, licenses, duplicate versions)
 	cd drudge && cargo deny check
@@ -196,25 +210,25 @@ eval: ## Behavioral regression gate (stack needed; runs data/eval/run_eval.py wh
 	./scripts/eval-gate.sh
 
 bench-llm: ## Compare LLM distillation quality (default tier: 16gb)
-	@python3 scripts/bench-llm.py --tier 16gb
+	@uv run --locked python scripts/bench-llm.py --tier 16gb
 
 bench-llm-tier: ## Compare LLM distillation quality by RAM tier: make bench-llm-tier TIER=32gb
-	@python3 scripts/bench-llm.py --tier "${TIER:-16gb}"
+	@uv run --locked python scripts/bench-llm.py --tier "${TIER:-16gb}"
 
 bench-embed: ## Benchmark local embedding model (dim, latency, sanity)
-	@python3 scripts/bench-embed.py
+	@uv run --locked python scripts/bench-embed.py
 
 anchor-shadow: ## Anchor hit rate: how many code edits revisit a file the vault already knows (PRD §8 Q8)
-	@python3 scripts/anchor-shadow.py --days $(or $(DAYS),30)
+	@uv run --locked python scripts/anchor-shadow.py --days $(or $(DAYS),30)
 
 rework-shadow: ## Re-invention rate: turns that rebuilt a note the session never named (PRD §1)
-	@python3 scripts/rework-shadow.py --days $(or $(DAYS),14)
+	@uv run --locked python scripts/rework-shadow.py --days $(or $(DAYS),14)
 
 usage: ## Token and model usage read from local transcripts (make usage GROUP=day,model SINCE=2026-08-26)
-	@python3 scripts/usage.py --group "$(or $(GROUP),model)" $(if $(SINCE),--since $(SINCE),) $(if $(UNTIL),--until $(UNTIL),)
+	@uv run --locked python scripts/usage.py --group "$(or $(GROUP),model)" $(if $(SINCE),--since $(SINCE),) $(if $(UNTIL),--until $(UNTIL),)
 
 peek: ## Local read-only view of what gets injected and whether it lands (127.0.0.1:7788)
-	@python3 scripts/peek.py
+	@uv run --locked python scripts/peek.py
 
 psql: ## Connect directly to Postgres (requires vector mode / --profile vector)
 	$(COMPOSE) exec boring-postgres psql -U boring -d boring

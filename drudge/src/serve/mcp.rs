@@ -6,6 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
@@ -17,9 +18,13 @@ use crate::graph;
 use crate::ingest;
 use crate::redact;
 use crate::serve::owner::{self, Caller};
-use crate::serve::{AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, register_limit, vec_off_rpc};
-use crate::store::{EventLogFilter, SupersedesReport};
+use crate::serve::remember_defer::{DeferredNotes, IndexJob};
+use crate::serve::{
+    AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, SyncState, register_limit, vec_off_rpc,
+};
+use crate::store::{EventLogFilter, Store, SupersedesReport, wiki_path_spellings};
 use crate::vault;
+use crate::vector::VectorIndex;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
@@ -58,20 +63,112 @@ pub(crate) async fn handle_mcp(
     if method.starts_with("notifications/") {
         return StatusCode::ACCEPTED.into_response();
     }
-    let outcome = match method {
+    let outcome: Result<Value, RpcError> = match method {
         "initialize" => Ok(mcp_initialize(&req)),
         "tools/list" => Ok(mcp_tools_list()),
         "ping" => Ok(json!({})),
         "tools/call" => mcp_call(&s, caller, &req).await,
-        other => Err((-32601_i32, format!("method not found: {other}"))),
+        other => Err((-32601_i32, format!("method not found: {other}")).into()),
     };
+    if is_gap_call(&req) {
+        return gap_response(&id, &outcome);
+    }
     let body = match outcome {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-        Err((code, message)) => {
-            json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-        }
+        Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e.body()}),
     };
     Json(body).into_response()
+}
+
+fn is_gap_call(req: &Value) -> bool {
+    req.get("method").and_then(Value::as_str) == Some("tools/call")
+        && req.pointer("/params/name").and_then(Value::as_str) == Some("gap")
+}
+
+/// The Python door writes a gap answer with its keys in insertion order (`door.py` `_mcp_result`,
+/// `_mcp_error`), where a `Value` sorts them. Only gap answers are written this way: the other
+/// tools' doors sort, and their bytes already match.
+fn gap_response(id: &Value, outcome: &Result<Value, RpcError>) -> Response {
+    let payload = outcome.as_ref().map(|result| {
+        result
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    });
+    let wire = gap_wire(id, payload.map_err(|e| (e.code, e.message.as_str())));
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        wire,
+    )
+        .into_response()
+}
+
+/// `payload` is the report's JSON text, already in the report's own key order.
+fn gap_wire(id: &Value, outcome: Result<&str, (i32, &str)>) -> String {
+    #[derive(serde::Serialize)]
+    struct Text<'a> {
+        r#type: &'static str,
+        text: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Answer<'a> {
+        content: [Text<'a>; 1],
+        structured_content: &'a RawValue,
+        is_error: bool,
+    }
+    #[derive(serde::Serialize)]
+    struct Fault<'a> {
+        code: i32,
+        message: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct Reply<'a> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        result: Answer<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct Failure<'a> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        error: Fault<'a>,
+    }
+    match outcome {
+        Ok(text) => match RawValue::from_string(text.to_owned()) {
+            Ok(raw) => serde_json::to_string(&Reply {
+                jsonrpc: "2.0",
+                id,
+                result: Answer {
+                    content: [Text {
+                        r#type: "text",
+                        text,
+                    }],
+                    structured_content: &raw,
+                    is_error: false,
+                },
+            }),
+            Err(e) => serde_json::to_string(&Failure {
+                jsonrpc: "2.0",
+                id,
+                error: Fault {
+                    code: -32603,
+                    message: &format!("gap: {e}"),
+                },
+            }),
+        },
+        Err((code, message)) => serde_json::to_string(&Failure {
+            jsonrpc: "2.0",
+            id,
+            error: Fault { code, message },
+        }),
+    }
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn gap_wire_for_test(id: &Value, outcome: Result<&str, (i32, &str)>) -> String {
+    gap_wire(id, outcome)
 }
 
 fn mcp_initialize(req: &Value) -> Value {
@@ -129,7 +226,7 @@ fn mcp_tools_list() -> Value {
                     "body": {"type": "string", "description": "the curated note body (markdown problem-solving narrative)"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "topical tags (≤6), lowercase, no CJK"},
                     "tools": {"type": "array", "items": {"type": "string"}, "description": "software tools/libraries used (≤6), short canonical names"},
-                    "concepts": {"type": "array", "items": {"type": "string"}, "description": "key technical concepts/patterns (≤6)"},
+                    "concepts": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 6, "description": format!("key technical concepts/patterns (1-6, required). {CONCEPTS_HINT}")},
                     "origin": {"type": "string", "enum": ["personal", "company", "mirror", "community"], "description": "default personal"},
                     "repo": {"type": "string", "description": "optional repo slug → becomes the project + a repo/<slug> tag"},
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "optional vault-local evidence paths for this note, e.g. raw/<file>.md"},
@@ -160,7 +257,7 @@ fn mcp_tools_list() -> Value {
                         }
                     }
                 },
-                "required": ["title", "body"]
+                "required": ["title", "body", "concepts"]
             }
         },
         {
@@ -483,13 +580,16 @@ fn mcp_tools_list() -> Value {
                 },
                 "required": ["session_id", "verdict"]
             }
-        }
+        },
+        crate::gap::tool_definition()
     ]})
 }
 
 enum ToolOut {
     Text(String),
     Structured(Value),
+    /// `Structured` whose text keeps the answer's own key order (a `Value` sorts its keys).
+    Ordered(String, Value),
 }
 
 impl ToolOut {
@@ -500,6 +600,9 @@ impl ToolOut {
             }
             Self::Structured(value) => {
                 let text = serde_json::to_string(&value).unwrap_or_default();
+                Self::Ordered(text, value).into_result()
+            }
+            Self::Ordered(text, value) => {
                 json!({
                     "content": [{"type": "text", "text": text}],
                     "structuredContent": value,
@@ -510,7 +613,7 @@ impl ToolOut {
     }
 }
 
-const MCP_TOOL_NAMES: [&str; 24] = [
+const MCP_TOOL_NAMES: [&str; 25] = [
     "ask",
     "brief",
     "claims",
@@ -524,6 +627,7 @@ const MCP_TOOL_NAMES: [&str; 24] = [
     "decisions",
     "events",
     "forget",
+    "gap",
     "neighbors",
     "next_actions",
     "project_status",
@@ -537,14 +641,71 @@ const MCP_TOOL_NAMES: [&str; 24] = [
     "weekly_brief",
 ];
 
+/// Why a call did not produce its answer. A refusal is a gate's verdict on the request (shape,
+/// standing, PII, empty note) — retrying the same call cannot change it; a failure is the write
+/// or the store breaking. The MCP error carries `data.outcome = "refused"` for refusals only,
+/// the way Python's door does (door.py:781-788); the consumer retries anything without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fault {
+    Refused,
+    Failed,
+}
+
+#[derive(Debug)]
+pub(crate) struct RpcError {
+    pub(crate) code: i32,
+    pub(crate) message: String,
+    pub(crate) fault: Fault,
+}
+
+impl RpcError {
+    fn refused((code, message): (i32, String)) -> Self {
+        Self {
+            code,
+            message,
+            fault: Fault::Refused,
+        }
+    }
+
+    fn body(&self) -> Value {
+        match self.fault {
+            Fault::Refused => {
+                json!({"code": self.code, "message": self.message, "data": {"outcome": "refused"}})
+            }
+            Fault::Failed => json!({"code": self.code, "message": self.message}),
+        }
+    }
+}
+
+/// A bare `(code, message)` is a failure; a refusal must say so with `RpcError::refused`.
+impl From<(i32, String)> for RpcError {
+    fn from((code, message): (i32, String)) -> Self {
+        Self {
+            code,
+            message,
+            fault: Fault::Failed,
+        }
+    }
+}
+
 enum ToolCallError {
     UnknownTool(String),
     Failed(i32, String),
+    Refused(i32, String),
 }
 
 impl From<(i32, String)> for ToolCallError {
     fn from((code, message): (i32, String)) -> Self {
         Self::Failed(code, message)
+    }
+}
+
+impl From<RpcError> for ToolCallError {
+    fn from(e: RpcError) -> Self {
+        match e.fault {
+            Fault::Refused => Self::Refused(e.code, e.message),
+            Fault::Failed => Self::Failed(e.code, e.message),
+        }
     }
 }
 
@@ -569,15 +730,17 @@ fn tool_query_arg(args: Option<&Value>) -> String {
 
 fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
     let raw = match out {
-        Ok(ToolOut::Text(text)) => text.clone(),
+        Ok(ToolOut::Text(text) | ToolOut::Ordered(text, _)) => text.clone(),
         Ok(ToolOut::Structured(value)) => serde_json::to_string(value).unwrap_or_default(),
         Err(ToolCallError::UnknownTool(name)) => format!("unknown tool: {name}"),
-        Err(ToolCallError::Failed(code, message)) => format!("error {code}: {message}"),
+        Err(ToolCallError::Failed(code, message) | ToolCallError::Refused(code, message)) => {
+            format!("error {code}: {message}")
+        }
     };
     raw.chars().take(500).collect()
 }
 
-async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, (i32, String)> {
+async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, RpcError> {
     let started = std::time::Instant::now();
     let params = req.get("params");
     let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
@@ -594,8 +757,11 @@ async fn mcp_call(s: &AppState, caller: Caller, req: &Value) -> Result<Value, (i
     );
     match out {
         Ok(out) => Ok(out.into_result()),
-        Err(ToolCallError::UnknownTool(other)) => Err((-32602, format!("unknown tool: {other}"))),
-        Err(ToolCallError::Failed(code, message)) => Err((code, message)),
+        Err(ToolCallError::UnknownTool(other)) => {
+            Err((-32602, format!("unknown tool: {other}")).into())
+        }
+        Err(ToolCallError::Failed(code, message)) => Err((code, message).into()),
+        Err(ToolCallError::Refused(code, message)) => Err(RpcError::refused((code, message))),
     }
 }
 
@@ -612,7 +778,9 @@ async fn dispatch(
         "sync" => ToolOut::Text(mcp_sync(s).await?),
         "classify_repo" => ToolOut::Text(mcp_classify_repo(s, args)?),
         "config_get" => ToolOut::Structured(
-            serde_json::to_value(&*s.cfg).map_err(|e| (-32603_i32, format!("config: {e}")))?,
+            s.cfg
+                .settings_view(&config::env_set)
+                .map_err(|e| (-32603_i32, format!("config: {e}")))?,
         ),
         "neighbors" => ToolOut::Structured(mcp_neighbors(s, args).await?),
         "corpus_status" => ToolOut::Structured(mcp_corpus_status(s).await?),
@@ -632,6 +800,7 @@ async fn dispatch(
         "stalled" => ToolOut::Structured(mcp_stalled(s, args).await?),
         "recurrences" => ToolOut::Structured(mcp_recurrences(s, args).await?),
         "verdict" => ToolOut::Structured(mcp_verdict(s, args).await?),
+        "gap" => mcp_gap(s, args).await?,
         other => return Err(ToolCallError::UnknownTool(other.to_owned())),
     })
 }
@@ -696,6 +865,9 @@ async fn mcp_code_index_status(s: &AppState, args: Option<&Value>) -> Result<Val
     Ok(json!({"repositories": repositories}))
 }
 
+/// Python `answer._CLAIMS_PER_NOTE`.
+const CLAIMS_PER_NOTE: i64 = 5;
+
 async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -733,22 +905,25 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    let wiki_hits = s
-        .wiki_recall(query, max_results, project, since_hours)
+    let ranked = s
+        .wiki_recall_ranked(query, project, since_hours)
         .map_err(|e| (-32603_i32, format!("wiki recall: {e:#}")))?;
-    let wiki_hits = match s.store.as_ref() {
+    let ranked = match s.store.as_ref() {
+        Some(store) if !ranked.is_empty() => crate::retrieve::net_ranked_wiki(store, ranked)
+            .await
+            .map_err(|e| (-32603_i32, format!("wiki recall verdicts: {e:#}")))?,
+        _ => ranked,
+    };
+    let titles = crate::wiki_recall::pool_titles(&ranked, max_results);
+    let wiki_hits = crate::wiki_recall::select_for_order(&ranked, max_results);
+    let (wiki_hits, facts) = match s.store.as_ref() {
         Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
             .await
             .map_err(|e| (-32603_i32, format!("wiki recall order: {e:#}")))?,
-        _ => wiki_hits,
+        _ => (wiki_hits, HashMap::new()),
     };
-    let lines: Vec<(String, String)> = if !wiki_hits.is_empty() {
-        wiki_hits
-            .into_iter()
-            .map(|h| (h.source_path, h.snippet))
-            .collect()
-    } else if let Some(store) = s.store.as_ref() {
-        crate::retrieve::retrieve_budget(
+    let vector = match s.store.as_ref() {
+        Some(store) => crate::retrieve::retrieve_budget(
             store,
             &s.llm,
             query,
@@ -759,13 +934,15 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             since_hours,
         )
         .await
-        .map_err(|e| (-32603_i32, format!("retrieve: {e:#}")))?
-        .into_iter()
-        .map(|h| (h.source_path, h.content))
-        .collect()
-    } else {
-        Vec::new()
+        .map(|hits| {
+            hits.into_iter()
+                .map(|h| (h.source_path, h.content))
+                .collect::<Vec<_>>()
+        }),
+        None => Ok(Vec::new()),
     };
+    let sunk = sunk_in(s.store.as_deref(), &wiki_hits, &facts, vector.as_ref().ok()).await?;
+    let (lines, failed_tail) = choose_lines(wiki_hits, vector, max_results, &sunk)?;
     if lines.is_empty() {
         return Ok("(no experience recalled)".to_owned());
     }
@@ -784,33 +961,272 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         && let Some(store) = s.store.as_ref()
     {
         let observed_at = chrono::Utc::now().to_rfc3339();
-        if let Err(error) = store
-            .record_handover(session_id, &observed_at, &paths)
-            .await
-        {
+        if let Err(error) = store.handover_in_tx(session_id, &observed_at, &paths).await {
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
-    Ok(recall_text(&lines, &superseded))
+    let (claims, concepts) = claims_and_concepts(s.store.as_deref(), &paths).await?;
+    Ok(refined_text(&lines, &superseded, &claims, &titles, &concepts) + &failed_tail)
 }
 
-fn recall_text(lines: &[(String, String)], superseded: &HashMap<String, Vec<String>>) -> String {
-    let file_name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
-    lines
+type ClaimsAndConcepts = (
+    HashMap<String, crate::store::RegisterRows>,
+    HashMap<String, Vec<String>>,
+);
+
+/// The recall's per-note materials; no store means none.
+async fn claims_and_concepts(
+    store: Option<&crate::store::Store>,
+    paths: &[String],
+) -> Result<ClaimsAndConcepts, (i32, String)> {
+    let Some(store) = store else {
+        return Ok((HashMap::new(), HashMap::new()));
+    };
+    // Python answer.py: both are read, and a claims failure is reported before a concepts one.
+    let claims = store.declared_claims(paths, CLAIMS_PER_NOTE).await;
+    let concepts = store.concepts_of(paths).await;
+    let claims = claims.map_err(|e| (-32603_i32, format!("recall claims: {e:#}")))?;
+    let concepts = concepts.map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?;
+    Ok((claims, concepts))
+}
+
+/// `sunk_paths` against the store's `rank_facts`; no store means nothing to fuse, nothing sunk.
+async fn sunk_in(
+    store: Option<&crate::store::Store>,
+    wiki_hits: &[crate::wiki_recall::WikiHit],
+    wiki_facts: &HashMap<String, crate::store::RankFacts>,
+    vector: Option<&Vec<(String, String)>>,
+) -> Result<std::collections::HashSet<String>, (i32, String)> {
+    match store {
+        Some(store) => {
+            sunk_paths(wiki_hits, wiki_facts, vector, |paths| async move {
+                store.rank_facts(&paths).await
+            })
+            .await
+        }
+        None => Ok(std::collections::HashSet::new()),
+    }
+}
+
+/// Superseded paths among the wiki hits and the vector lines (Python `_fused` `sunk`); nothing
+/// to fuse (no wiki hits, vector failed) means nothing sunk.
+async fn sunk_paths<F, Fut>(
+    wiki_hits: &[crate::wiki_recall::WikiHit],
+    wiki_facts: &HashMap<String, crate::store::RankFacts>,
+    vector: Option<&Vec<(String, String)>>,
+    lookup: F,
+) -> Result<std::collections::HashSet<String>, (i32, String)>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<HashMap<String, crate::store::RankFacts>>>,
+{
+    let (Some(lines), false) = (vector, wiki_hits.is_empty()) else {
+        return Ok(std::collections::HashSet::new());
+    };
+    let wiki_paths: std::collections::HashSet<&str> =
+        wiki_hits.iter().map(|h| h.source_path.as_str()).collect();
+    let mut vector_only: Vec<String> = lines
         .iter()
-        .map(|(path, body)| {
-            let src = file_name(path);
-            let label = superseded
-                .get(path)
-                .map(|newer| {
-                    let newer: Vec<String> = newer.iter().map(|p| file_name(p)).collect();
-                    format!("{src} (superseded by {})", newer.join(", "))
-                })
-                .unwrap_or(src);
-            format!("- [{label}] {body}")
-        })
+        .map(|(path, _)| path.as_str())
+        .filter(|path| !wiki_paths.contains(path))
+        .map(str::to_owned)
+        .collect();
+    vector_only.sort();
+    vector_only.dedup();
+    let vector_facts = if vector_only.is_empty() {
+        HashMap::new()
+    } else {
+        lookup(vector_only).await.map_err(|e| {
+            (
+                -32603_i32,
+                format!("wiki recall order: rank: rank facts lookup: {e:#}"),
+            )
+        })?
+    };
+    Ok(wiki_facts
+        .iter()
+        .chain(vector_facts.iter())
+        .filter(|(_, f)| f.superseded)
+        .map(|(path, _)| path.clone())
+        .collect())
+}
+
+/// Lines to show and the failure tail to append.
+type ChosenLines = (Vec<(String, String)>, String);
+
+/// Python `answer._select`: no wiki hits -> vector only (its failure fails the recall); wiki hits
+/// -> RRF fuse with vector, and a vector failure keeps the wiki answer plus a failure tail.
+fn choose_lines(
+    wiki_hits: Vec<crate::wiki_recall::WikiHit>,
+    vector: anyhow::Result<Vec<(String, String)>>,
+    max_results: usize,
+    sunk: &std::collections::HashSet<String>,
+) -> Result<ChosenLines, (i32, String)> {
+    match (wiki_hits.is_empty(), vector) {
+        (true, Err(e)) => Err((-32603, format!("retrieve: {e:#}"))),
+        (true, Ok(lines)) => Ok((lines, String::new())),
+        (false, Ok(lines)) => crate::wiki_recall::fuse(&wiki_hits, &lines, max_results, sunk)
+            .map(|fused| (fused, String::new()))
+            .map_err(|e| (-32603, format!("wiki recall fuse: {e:#}"))),
+        (false, Err(e)) => Ok((
+            wiki_hits
+                .into_iter()
+                .map(|h| (h.source_path, h.snippet))
+                .collect(),
+            format!("\n\n(vector 길 실패: {e:#})"),
+        )),
+    }
+}
+
+/// Python `answer.FULL_BODY_HINT`.
+const FULL_BODY_HINT: &str =
+    "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)";
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Python `answer.concepts_line`: `\n  concepts: a, b` (at most 6), nothing when empty.
+fn concepts_line(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = names.iter().take(6).map(String::as_str).collect();
+    format!("\n  concepts: {}", shown.join(", "))
+}
+
+/// Python `answer.recall_line`.
+fn recall_line(
+    path: &str,
+    body: &str,
+    superseded: &HashMap<String, Vec<String>>,
+    concepts: &HashMap<String, Vec<String>>,
+) -> String {
+    let label = match superseded.get(path) {
+        Some(newer) if !newer.is_empty() => {
+            let newer: Vec<&str> = newer.iter().map(|p| file_name(p)).collect();
+            format!("{} (superseded by {})", file_name(path), newer.join(", "))
+        }
+        _ => file_name(path).to_owned(),
+    };
+    let names = concepts.get(path).map_or(&[][..], Vec::as_slice);
+    format!("- [{label}] {body}{}", concepts_line(names))
+}
+
+/// Python `answer._refined_entry`: a note with claims becomes head (+title), concepts, claim
+/// lines, `+N more`; a note without keeps its plain block. The bool says "has claims".
+fn refined_entry(
+    path: &str,
+    body: &str,
+    superseded: &HashMap<String, Vec<String>>,
+    claims: &HashMap<String, crate::store::RegisterRows>,
+    titles: &HashMap<String, String>,
+    concepts: &HashMap<String, Vec<String>>,
+) -> (String, bool) {
+    let register = claims.get(path).filter(|r| !r.rows.is_empty());
+    let Some(register) = register else {
+        return (recall_line(path, body, superseded, concepts), false);
+    };
+    let head = recall_line(path, "", superseded, &HashMap::new())
+        .trim_end()
+        .to_owned();
+    let head = match titles.get(path).filter(|t| !t.is_empty()) {
+        Some(title) => format!("{head} {title}"),
+        None => head,
+    };
+    let names = concepts.get(path).map_or(&[][..], Vec::as_slice);
+    let mut out = vec![head];
+    out.extend(
+        concepts_line(names)
+            .trim_start_matches('\n')
+            .lines()
+            .map(str::to_owned),
+    );
+    out.extend(
+        register
+            .rows
+            .iter()
+            .map(|r| format!("  · {} {}/{}: {}", r.kind, r.subject, r.predicate, r.value)),
+    );
+    let hidden = register.total_matching - i64::try_from(register.rows.len()).unwrap_or(i64::MAX);
+    if hidden > 0 {
+        out.push(format!("  · … +{hidden} more"));
+    }
+    (out.join("\n"), true)
+}
+
+/// Python `answer.refined_text`: what the door hands the agent as the recall text.
+fn refined_text(
+    lines: &[(String, String)],
+    superseded: &HashMap<String, Vec<String>>,
+    claims: &HashMap<String, crate::store::RegisterRows>,
+    titles: &HashMap<String, String>,
+    concepts: &HashMap<String, Vec<String>>,
+) -> String {
+    let entries: Vec<(String, bool)> = lines
+        .iter()
+        .map(|(path, body)| refined_entry(path, body, superseded, claims, titles, concepts))
+        .collect();
+    let text = entries
+        .iter()
+        .map(|(entry, _)| entry.as_str())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    if entries.iter().any(|(_, has)| *has) {
+        format!("{text}\n\n{FULL_BODY_HINT}")
+    } else {
+        text
+    }
+}
+
+/// The session node's label for an MCP verdict — always six fractional digits, the door's
+/// `isoformat(timespec="microseconds")` spelling, so either writer leaves the same text.
+fn verdict_label(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+}
+
+/// Why a gap report was not recorded.
+pub(crate) enum GapFault {
+    /// The arguments failed the boundary: the Python door's 400 / -32602 message.
+    Rejected(String),
+    NoStore,
+    /// The write failed (a NUL in a string, the store gone): the Python door's 502 / -32603.
+    Failed(String),
+}
+
+/// Parse and record one gap report — HTTP `POST /gap` and MCP `gap` share this. The store is
+/// checked first, as the Python door does, so a store-less engine never reads the arguments.
+pub(crate) async fn record_gap(
+    s: &AppState,
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<crate::gap::GapReport, GapFault> {
+    let Some(store) = s.store.as_ref() else {
+        return Err(GapFault::NoStore);
+    };
+    let parsed = crate::gap::parse(arguments).map_err(GapFault::Rejected)?;
+    if let Some(refusal) = crate::gap::nul_refusal(&parsed) {
+        return Err(GapFault::Failed(format!("gap failed: {refusal}")));
+    }
+    store
+        .record_gap_in_tx(&parsed, &verdict_label(chrono::Utc::now()))
+        .await
+        .map_err(|e| GapFault::Failed(format!("gap failed: {e:#}")))
+}
+
+async fn mcp_gap(s: &AppState, args: Option<&Value>) -> Result<ToolOut, (i32, String)> {
+    // A non-object `arguments` reads as no arguments, so it is rejected for its first field.
+    let empty = serde_json::Map::new();
+    let arguments = args.and_then(Value::as_object).unwrap_or(&empty);
+    match record_gap(s, arguments).await {
+        Ok(report) => {
+            let text = serde_json::to_string(&report).map_err(|e| (-32603, format!("gap: {e}")))?;
+            let value = serde_json::to_value(&report).map_err(|e| (-32603, format!("gap: {e}")))?;
+            Ok(ToolOut::Ordered(text, value))
+        }
+        Err(GapFault::Rejected(message)) => Err((-32602, message)),
+        Err(GapFault::NoStore) => Err(vec_off_rpc()),
+        Err(GapFault::Failed(message)) => Err((-32603, message)),
+    }
 }
 
 async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, String)> {
@@ -840,8 +1256,16 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     // The verdict applies to exactly what was handed to this session — the caller brings only
     // the thumbs-up/down. An unknown session handed nothing: an empty verdict is a normal
     // response, not an error.
-    let handed = store
-        .handed_paths(session_id)
+    // One request = one transaction: the handed read and the verdict write share the handle.
+    let mut conn = store
+        .conn()
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e}")))?;
+    let handed = Store::handed_paths(&tx, session_id)
         .await
         .map_err(|e| (-32603, format!("handed paths: {e:#}")))?;
     let empty: Vec<String> = Vec::new();
@@ -850,15 +1274,24 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     } else {
         (&empty, &handed)
     };
-    let report = store
-        .record_consumption(
-            session_id,
-            &chrono::Utc::now().to_rfc3339(),
-            used,
-            contested,
-            &[],
-            None,
-        )
+    let report = Store::record_consumption(
+        &tx,
+        session_id,
+        &verdict_label(chrono::Utc::now()),
+        used,
+        contested,
+        &[],
+        None,
+    )
+    .await
+    .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| (-32603, format!("verdict: {e}")))?;
+    store
+        .mirror_surreal(&crate::store::Scope::graph([format!(
+            "session:{session_id}"
+        )]))
         .await
         .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
     Ok(json!({
@@ -1051,11 +1484,11 @@ async fn mcp_claims(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, S
         .into_iter()
         .map(|c| {
             json!({
-                "subject": c.subject,
-                "predicate": c.predicate,
-                "value": c.value,
-                "kind": c.kind(),
-                "confidence": c.confidence(),
+                "subject": c.claim.subject,
+                "predicate": c.claim.predicate,
+                "value": c.claim.value,
+                "kind": c.claim.kind(),
+                "confidence": c.claim.confidence(),
                 "anchor": c.anchor,
                 "era": c.era,
                 "stale_at": c.stale_at.map(system_time_rfc3339),
@@ -1321,13 +1754,26 @@ pub(crate) struct Remembered {
     pub(crate) message: String,
 }
 
+/// Sentence the `remember` tool schema appends to its `concepts` description.
+const CONCEPTS_HINT: &str = "이미 쓰던 개념 이름을 먼저 쓴다(recall·neighbors 결과의 concepts). 영어 slug(예: mutation-testing).";
+
 async fn mcp_remember(
     s: &AppState,
     caller: Caller,
     args: Option<&Value>,
-) -> Result<String, (i32, String)> {
-    Ok(remember_note(s, caller, args).await?.message)
+) -> Result<String, RpcError> {
+    Ok(remember_on(s, caller, args, Route::Mcp).await?.message)
 }
+
+/// Which door a remember came through. Only MCP refuses a note that leaves neither a project nor
+/// a claim (Python writer.py:1426); HTTP `POST /remember` carries corrections that have neither.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Http,
+    Mcp,
+}
+
+const EMPTY_NOTE_REFUSAL: &str = "refused: this note has no project and no claims — add the next step or decision it leaves as claims (kind=next or kind=decision), or pass repo";
 
 /// The write door both MCP `remember` and `POST /remember` go through: one parser, one write
 /// path, one dedup policy. `supersedes` (optional) names the notes this one corrects; after the
@@ -1341,44 +1787,78 @@ pub(crate) async fn remember_note(
     s: &AppState,
     caller: Caller,
     args: Option<&Value>,
-) -> Result<Remembered, (i32, String)> {
+) -> Result<Remembered, RpcError> {
+    remember_on(s, caller, args, Route::Http).await
+}
+
+async fn remember_on(
+    s: &AppState,
+    caller: Caller,
+    args: Option<&Value>,
+    route: Route,
+) -> Result<Remembered, RpcError> {
     let Some(vault_root) = (*s.vault_dir).as_ref() else {
         return Err((
             -32603,
             "BORING_VAULT_DIR not set — no target to write remember notes to".to_owned(),
-        ));
+        )
+            .into());
     };
-    let supersedes = parse_supersedes(args)?;
-    let judge = parse_judge(args)?;
-    let mut note = parse_remember_note(args, &s.cfg)?;
+    // Python's order (writer.py:1423-1430): note, empty-note refusal, judge, then supersedes.
+    let mut note = parse_remember_note(args, &s.cfg).map_err(RpcError::refused)?;
+    if route == Route::Mcp && note.front.project.is_empty() && note.front.claims.is_empty() {
+        return Err(RpcError::refused((-32602, EMPTY_NOTE_REFUSAL.to_owned())));
+    }
+    let judge = parse_judge(args).map_err(RpcError::refused)?;
+    let supersedes = parse_supersedes(args).map_err(RpcError::refused)?;
     let standing = owner::standing(
         caller,
         note.front.author == Author::Owner || judge == Some(Author::Owner),
     )
-    .map_err(|m| (-32602_i32, m))?;
-    let edge_judge = judge.as_ref().unwrap_or(&note.front.author).as_judge();
-    let refused = owner::refused_supersedes(s.store.as_deref(), standing, &supersedes, "remember")
-        .await
-        .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
-    owner::none_refused(&refused).map_err(|m| (-32602_i32, m))?;
+    .map_err(|m| RpcError::refused((-32602_i32, m)))?;
+    let edge_judge = judge.as_ref().unwrap_or(&note.front.author).to_judge();
+    let mut refused =
+        owner::refused_supersedes_logged(s.store.as_deref(), standing, &supersedes, "remember")
+            .await
+            .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    // An owner note saved while a sync held the lock has no `document` row yet, so the table
+    // read above cannot see it; the waiting list can.
+    let waiting = waiting_owner_notes(s, standing, &supersedes);
+    owner::record_supersede_refusals(s.store.as_deref(), &waiting, "remember").await;
+    refused.extend(waiting);
+    owner::none_refused(&refused).map_err(|m| RpcError::refused((-32602_i32, m)))?;
 
-    apply_pii_gate(s.pii.as_ref().as_ref(), &mut note)?;
+    apply_pii_gate(s.pii.as_ref().as_ref(), &mut note).map_err(RpcError::refused)?;
 
     let wiki_dir = vault_root.join("wiki");
     // A correction (supersedes names what it fixes) must land as a new note: a one-word
     // fix of a long note still embeds within DUPLICATE_MAX_DIST, so a corrected note that
     // went through the gate would be skipped as "too similar" and the wrong fact would
     // stay live. Only unmarked notes go through the duplicate gate.
-    let found = if needs_dedup(&supersedes) {
-        check_duplicate(s.store.as_deref(), &s.llm, &note, &wiki_dir)
-            .await
-            .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
+    // The duplicate check and the note write it guards must be one step: without this two
+    // identical requests both see "no duplicate" and both land. Held to the end of the request
+    // (before `sync_lock`, which `finish_remembered_note` takes; nothing takes them the other way).
+    let _remember_turn = s.remember_gate.lock().await;
+    let DedupCheck { found, embedding } = if needs_dedup(&supersedes) {
+        check_duplicate(
+            s.store.as_deref(),
+            &s.llm,
+            &note,
+            &wiki_dir,
+            &s.note_index,
+            &s.deferred,
+        )
+        .await
+        .map_err(|e| (-32603_i32, format!("dedup check: {e:#}")))?
     } else {
-        None
+        DedupCheck::default()
     };
     let gate = dedup_gate(&note, standing, found);
     let telemetry = dedup_decision_event(&note, gate.existing(), gate.outcome());
-    let judge = edge_judge.as_deref();
+    let who = Requester {
+        standing,
+        edge_judge: edge_judge.as_deref(),
+    };
     match gate {
         DedupGate::Skip(existing) => {
             log_dedup_decision(s, &telemetry).await;
@@ -1386,11 +1866,18 @@ pub(crate) async fn remember_note(
         }
         DedupGate::Supersede(existing) => {
             let old = [existing.source_path.clone()];
-            let duplicate = Some(existing.source_path);
-            store_new_note(s, &wiki_dir, note, &old, duplicate, judge, &telemetry).await
+            let trail = DedupTrail {
+                duplicate: Some(existing.source_path),
+                embedding,
+            };
+            Ok(store_new_note(s, &wiki_dir, note, &old, trail, who, &telemetry).await?)
         }
         DedupGate::Fresh => {
-            store_new_note(s, &wiki_dir, note, &supersedes, None, judge, &telemetry).await
+            let trail = DedupTrail {
+                duplicate: None,
+                embedding,
+            };
+            Ok(store_new_note(s, &wiki_dir, note, &supersedes, trail, who, &telemetry).await?)
         }
     }
 }
@@ -1449,16 +1936,37 @@ fn skipped_duplicate(skipped_path: String) -> Remembered {
     }
 }
 
+/// Who is asking, as the write needs it: whether it speaks as the owner, and whose judgement its
+/// `supersedes` edges carry.
+#[derive(Clone, Copy)]
+struct Requester<'a> {
+    standing: owner::Standing,
+    edge_judge: Option<&'a str>,
+}
+
+/// What the duplicate check leaves for the write that follows it.
+#[derive(Default)]
+struct DedupTrail {
+    duplicate: Option<String>,
+    /// The incoming note's embedding, when the check computed one.
+    embedding: Option<Vec<f32>>,
+}
+
 /// The only path that writes a note file, always at a freshly allocated `wiki-NNNN`.
 async fn store_new_note(
     s: &AppState,
     wiki_dir: &std::path::Path,
     note: RememberNote,
     supersedes: &[String],
-    duplicate: Option<String>,
-    edge_judge: Option<&str>,
+    trail: DedupTrail,
+    who: Requester<'_>,
     telemetry: &Value,
 ) -> Result<Remembered, (i32, String)> {
+    let DedupTrail {
+        duplicate,
+        embedding,
+    } = trail;
+    let resolved = resolve_supersedes(s.store.as_deref(), supersedes).await?;
     let db_ids = existing_wiki_ids(s).await?;
     let (wiki_id, path) = vault::allocate_wiki_path(wiki_dir, Some(&db_ids))
         .map_err(|e| (-32603_i32, format!("wiki id: {e:#}")))?;
@@ -1475,16 +1983,33 @@ async fn store_new_note(
         .map(|old| format!(" (supersedes wiki/{old}.md)"))
         .unwrap_or_default();
     let label = format!("wiki/{wiki_id}.md{dup_suffix}");
-    let message = finish_remembered_note(s, &path, &label, &front).await?;
-    let supersedes_report =
-        write_supersedes_edges(s, &front.source_path, supersedes, edge_judge).await?;
+    let job = IndexJob {
+        path,
+        label,
+        front,
+        supersedes: supersedes.to_vec(),
+        edge_judge: who.edge_judge.map(str::to_owned),
+        standing: who.standing,
+    };
+    let (message, supersedes_report) = match s.store.as_ref() {
+        None => finish_without_store(&job.label, &resolved),
+        Some(store) => match indexing_turn(s) {
+            IndexingTurn::Now(lock) => {
+                let done = finish_remembered_note(s, store, &job, &resolved, &lock).await?;
+                (done.message, done.report)
+            }
+            IndexingTurn::Later(sync) => {
+                return defer_indexing(s, job, embedding, duplicate, sync).await;
+            }
+        },
+    };
     let message = format!(
         "{}{}",
         message,
         supersedes_suffix(supersedes, &supersedes_report)
     );
     Ok(Remembered {
-        source_path: front.source_path.clone(),
+        source_path: job.front.source_path.clone(),
         wiki_id,
         duplicate,
         supersedes: supersedes_report.supersedes,
@@ -1495,7 +2020,7 @@ async fn store_new_note(
 
 /// Wiki ids already taken, on disk and in the vector store — `allocate_wiki_path` picks the
 /// next free `wiki-NNNN` from the union.
-async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> {
+async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u64>, (i32, String)> {
     let mut db_ids = HashSet::new();
     if let Some(store) = s.store.as_ref() {
         for p in store.all_doc_paths().await.map_err(|e| {
@@ -1507,7 +2032,7 @@ async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> 
             if let Some(stem) = crate::vault::wiki_stem(&p)
                 && let Some(n) = stem
                     .strip_prefix("wiki-")
-                    .and_then(|s| s.parse::<u32>().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
             {
                 db_ids.insert(n);
             }
@@ -1516,33 +2041,37 @@ async fn existing_wiki_ids(s: &AppState) -> Result<HashSet<u32>, (i32, String)> 
     Ok(db_ids)
 }
 
-/// After the note is on disk and ingested, one `supersedes` edge per corrected path. Vector off
-/// (no store): nothing can be written — the whole list reports as `unknown` with the paths
-/// named, and that is not a failure; the wiki note itself is already recallable.
-async fn write_supersedes_edges(
-    s: &AppState,
-    new_path: &str,
-    supersedes: &[String],
-    judge: Option<&str>,
-) -> Result<SupersedesReport, (i32, String)> {
-    if supersedes.is_empty() {
-        return Ok(SupersedesReport::default());
+/// Vector off (no store): no `supersedes` edge can be written — the whole list reports as
+/// `unknown` with the paths named, and that is not a failure; the wiki note itself is already
+/// recallable.
+fn supersedes_unwritten(supersedes: &[String]) -> SupersedesReport {
+    SupersedesReport {
+        supersedes: 0,
+        unknown: supersedes.len(),
+        unknown_paths: supersedes.to_vec(),
+        retired: Vec::new(),
     }
-    let Some(store) = s.store.as_ref() else {
-        return Ok(SupersedesReport {
-            supersedes: 0,
-            unknown: supersedes.len(),
-            unknown_paths: supersedes.to_vec(),
-        });
+}
+
+/// Each old path of one `supersedes` list folded to the spelling the `document` table keys.
+/// Runs before a number is taken or a file is written (Python's `_gate` order), so a failing
+/// lookup leaves nothing behind. Without a store the list passes through untouched.
+async fn resolve_supersedes(
+    store: Option<&Store>,
+    supersedes: &[String],
+) -> Result<Vec<String>, (i32, String)> {
+    let Some(store) = store else {
+        return Ok(supersedes.to_vec());
     };
-    let pairs: Vec<[String; 2]> = supersedes
-        .iter()
-        .map(|old| [new_path.to_owned(), old.clone()])
-        .collect();
-    store
-        .record_supersedes(&pairs, judge)
-        .await
-        .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))
+    let mut resolved = Vec::with_capacity(supersedes.len());
+    for old in supersedes {
+        resolved.push(
+            resolve_document_path(store, old)
+                .await
+                .map_err(|e| (-32603_i32, format!("supersedes lookup: {e:#}")))?,
+        );
+    }
+    Ok(resolved)
 }
 
 /// The `remember` text says when a named correction did not link — a bare "remembered" line
@@ -1554,45 +2083,280 @@ fn supersedes_suffix(supersedes: &[String], report: &SupersedesReport) -> String
     if supersedes.is_empty() {
         return String::new();
     }
-    if report.unknown == 0 {
-        return format!(" · supersedes linked {}", report.supersedes);
+    let head = if report.unknown == 0 {
+        format!(" · supersedes linked {}", report.supersedes)
+    } else {
+        format!(
+            " · supersedes linked {}, not found {} ({})",
+            report.supersedes,
+            report.unknown,
+            report.unknown_paths.join(", ")
+        )
+    };
+    let slots: Vec<String> = report
+        .retired
+        .iter()
+        .map(|(subject, predicate)| format!("{subject}/{predicate}"))
+        .collect();
+    let closed = if slots.is_empty() {
+        "none".to_owned()
+    } else {
+        slots.join(", ")
+    };
+    format!("{head} · retired claims: {closed}")
+}
+
+/// The named notes that are owner notes still waiting to be indexed, when the request is not the
+/// owner's. Each is spelled as `resolve_document_path` would try it, as the list keys on the
+/// path the note was written at.
+fn waiting_owner_notes(
+    s: &AppState,
+    standing: owner::Standing,
+    supersedes: &[String],
+) -> Vec<String> {
+    match standing {
+        owner::Standing::Owner => Vec::new(),
+        owner::Standing::NotOwner => supersedes
+            .iter()
+            .filter(|named| {
+                wiki_path_spellings(named)
+                    .iter()
+                    .any(|spelled| s.deferred.is_owner_note(spelled))
+            })
+            .cloned()
+            .collect(),
     }
-    format!(
-        " · supersedes linked {}, not found {} ({})",
-        report.supersedes,
-        report.unknown,
-        report.unknown_paths.join(", ")
+}
+
+/// Vector off (no store): the note is on disk and recallable now; nothing can be indexed or linked.
+fn finish_without_store(label: &str, supersedes: &[String]) -> (String, SupersedesReport) {
+    (
+        format!("remembered → {label} (vector off — wiki is first-class memory; recallable now)"),
+        if supersedes.is_empty() {
+            SupersedesReport::default()
+        } else {
+            supersedes_unwritten(supersedes)
+        },
     )
 }
 
+/// Who indexes the note just written. `Now` holds `sync_lock`, as the request always did before;
+/// `Later` carries why it could not: a sync holds the lock (`Running`), or older deferred notes
+/// are still waiting and this one must come after them (`Idle`).
+enum IndexingTurn<'a> {
+    Now(tokio::sync::MutexGuard<'a, ()>),
+    Later(SyncState),
+}
+
+fn indexing_turn(s: &AppState) -> IndexingTurn<'_> {
+    match (s.deferred.has_backlog(), s.sync_lock.try_lock()) {
+        (false, Ok(lock)) => IndexingTurn::Now(lock),
+        (true, Ok(_)) => IndexingTurn::Later(SyncState::Idle),
+        (_, Err(_)) => IndexingTurn::Later(SyncState::Running),
+    }
+}
+
+/// What indexing one note produced: the answer text, the `supersedes` edges written, and the
+/// named notes a non-owner request was refused because their author is the owner.
+struct Indexed {
+    message: String,
+    report: SupersedesReport,
+    refused: Vec<String>,
+}
+
+/// Ingest the note just written and link the notes it corrects — one transaction for the whole
+/// request, so a failure anywhere leaves no document, chunk, claim, node or edge row (the note
+/// file stays on disk and the next sync ingests it, as after a failed Python `run_write`).
+/// `relates_to` is projected after the commit: it reads committed rows and rewrites only the file.
+/// `_lock` is the proof that the caller holds `sync_lock`.
 async fn finish_remembered_note(
     s: &AppState,
-    path: &std::path::Path,
-    label: &str,
-    front: &FrontMatter,
-) -> Result<String, (i32, String)> {
-    let Some(store) = s.store.as_ref() else {
-        return Ok(format!(
-            "remembered → {label} (vector off — wiki is first-class memory; recallable now)"
-        ));
-    };
-
-    let _guard = s.sync_lock.lock().await;
-    let mut stats = ingest::Stats::default();
-    ingest::ingest_file(store, &s.llm, &s.cfg, &front.source_path, &mut stats)
-        .await
-        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
-    let relates = match vault::project_note(store, path, 6).await {
+    store: &Store,
+    job: &IndexJob,
+    supersedes: &[String],
+    _lock: &tokio::sync::MutexGuard<'_, ()>,
+) -> Result<Indexed, (i32, String)> {
+    let mut refused = Vec::new();
+    let linked = index_in_tx(s, store, job, supersedes, &mut refused).await;
+    // The transaction handle and its connection are gone: the refusal is recorded for a commit
+    // and a rollback alike.
+    owner::record_supersede_refusals(Some(store), &refused, "remember").await;
+    let (stats, report) = linked?;
+    let relates = match vault::project_note(store, &job.path, 6).await {
         Ok(_) => "",
         Err(e) => {
             eprintln!("[remember] project_note warning (ignored): {e:#}");
             " · relates_to deferred to next sync"
         }
     };
-    Ok(format!(
-        "remembered → {label} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
-        stats.chunks, stats.tools, stats.concepts, stats.claims
-    ))
+    let message = format!(
+        "remembered → {} · chunks {} · graph(tools {} concepts {} claims {}){relates} — recallable now",
+        job.label, stats.chunks, stats.tools, stats.concepts, stats.claims
+    );
+    Ok(Indexed {
+        message,
+        report,
+        refused,
+    })
+}
+
+/// The transaction of `finish_remembered_note`. The owner check runs on this transaction's handle
+/// right before the edges are written, so it sees every note indexed ahead of this one; a refused
+/// target gets no edge. `refused` is filled before anything that can fail after it.
+async fn index_in_tx(
+    s: &AppState,
+    store: &Store,
+    job: &IndexJob,
+    supersedes: &[String],
+    refused: &mut Vec<String>,
+) -> Result<(ingest::Stats, SupersedesReport), (i32, String)> {
+    let front = &job.front;
+    let mut conn = store
+        .conn()
+        .await
+        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| (-32603_i32, format!("begin remember transaction: {e:#}")))?;
+    let (_, stats) = ingest::ingest_file_in_tx(store, &tx, &s.llm, &s.cfg, &front.source_path)
+        .await
+        .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
+    *refused = owner::refused_supersedes(&tx, job.standing, supersedes)
+        .await
+        .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
+    let pairs: Vec<[String; 2]> = supersedes
+        .iter()
+        .filter(|old| !refused.contains(old))
+        .map(|old| [front.source_path.clone(), old.clone()])
+        .collect();
+    let report = if pairs.is_empty() {
+        SupersedesReport::default()
+    } else {
+        Store::remember_supersedes(&tx, &pairs, job.edge_judge.as_deref())
+            .await
+            .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?
+    };
+    tx.commit()
+        .await
+        .map_err(|e| (-32603_i32, format!("commit remember transaction: {e:#}")))?;
+    // The new note's rows, and the notes it retired: their open claims just closed.
+    let written =
+        std::iter::once(front.source_path.clone()).chain(pairs.iter().map(|[_, old]| old.clone()));
+    store
+        .mirror_surreal(&crate::store::Scope::notes(written))
+        .await
+        .map_err(|e| (-32603_i32, format!("remember: {e:#}")))?;
+    Ok((stats, report))
+}
+
+/// The note is saved; its indexing waits in the one queue. Called with `remember_gate` held, so
+/// the note is listed as waiting in the same step as its file write, and the next remember's
+/// duplicate check sees it.
+async fn defer_indexing(
+    s: &AppState,
+    job: IndexJob,
+    embedding: Option<Vec<f32>>,
+    duplicate: Option<String>,
+    sync: SyncState,
+) -> Result<Remembered, (i32, String)> {
+    let source_path = job.front.source_path.clone();
+    let wiki_id = vault::wiki_stem(&source_path).unwrap_or_default();
+    let message = format!(
+        "remembered → {} · saved, indexing deferred (sync {}) — recallable after it finishes",
+        job.label,
+        sync.as_str()
+    );
+    s.deferred.add(
+        source_path.clone(),
+        job.front.author == Author::Owner,
+        embedding,
+    );
+    let queue = s.deferred.queue.get_or_init(|| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(drain_deferred(s.clone(), rx));
+        tx
+    });
+    // Before the send: once the job is queued the worker may finish it at once, and its finished
+    // line must not come first.
+    log_indexing_event(s, "indexing_deferred", "deferred", &source_path, None, &[]).await;
+    if let Err(e) = queue.send(job) {
+        s.deferred.remove(&source_path);
+        let why = "worker gone";
+        log_indexing_event(
+            s,
+            "indexing_finished",
+            "failed",
+            &source_path,
+            Some(why),
+            &[],
+        )
+        .await;
+        return Err((
+            -32603_i32,
+            format!("deferred indexing worker is gone — note saved, next sync ingests it: {e}"),
+        ));
+    }
+    Ok(Remembered {
+        source_path,
+        wiki_id,
+        duplicate,
+        supersedes: 0,
+        unknown: 0,
+        message,
+    })
+}
+
+/// The one worker: takes deferred notes in the order they were queued and runs each under
+/// `sync_lock` as the locked path does. One note at a time, so queue order is index order.
+async fn drain_deferred(s: AppState, mut queue: tokio::sync::mpsc::UnboundedReceiver<IndexJob>) {
+    while let Some(job) = queue.recv().await {
+        let source_path = job.front.source_path.clone();
+        let outcome = index_deferred(&s, &job).await;
+        s.deferred.remove(&source_path);
+        match outcome {
+            Ok(refused) => {
+                let (e, st) = ("indexing_finished", "finished");
+                log_indexing_event(&s, e, st, &source_path, None, &refused).await;
+            }
+            Err((_, why)) => {
+                let (e, st) = ("indexing_finished", "failed");
+                log_indexing_event(&s, e, st, &source_path, Some(&why), &[]).await;
+            }
+        }
+    }
+}
+
+/// Index one deferred note; the answer is the targets a non-owner note was refused.
+async fn index_deferred(s: &AppState, job: &IndexJob) -> Result<Vec<String>, (i32, String)> {
+    let Some(store) = s.store.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let lock = s.sync_lock.lock().await;
+    let resolved = resolve_supersedes(Some(store), &job.supersedes).await?;
+    finish_remembered_note(s, store, job, &resolved, &lock)
+        .await
+        .map(|done| done.refused)
+}
+
+/// One line per deferral and one per finish; a deferral with no finish is work a restart lost.
+async fn log_indexing_event(
+    s: &AppState,
+    event: &str,
+    status: &str,
+    source_path: &str,
+    error: Option<&str>,
+    refused: &[String],
+) {
+    let line = json!({
+        "component": "drudge.mcp.remember",
+        "event": event,
+        "status": status,
+        "source_path": source_path,
+        "error": error,
+        "refused": refused,
+    });
+    log_dedup_decision(s, &line).await;
 }
 
 fn apply_pii_gate(
@@ -1677,6 +2441,8 @@ const SESSION_DUP_TITLE_MIN: (usize, usize) = (1, 5);
 const SESSION_DUP_BODY_MIN: (usize, usize) = (1, 5);
 const SESSION_DUP_SEMANTIC_MIN: (usize, usize) = (9, 20);
 const DUPLICATE_REPLACE_MIN_DELTA: usize = 8;
+/// Incoming claims carried on `dedup_decision` — same cap as the distiller (C-DEDUPKEEP1).
+const DEDUP_EVENT_MAX_CLAIMS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DuplicateReason {
@@ -1700,12 +2466,86 @@ struct NoteQuality {
     evidence_signal: bool,
 }
 
+/// What the duplicate check found, and the incoming note's embedding when it computed one (the
+/// store is on and no file already matched) — kept so a deferred note can be listed with it.
+#[derive(Default)]
+struct DedupCheck {
+    found: Option<DuplicateMatch>,
+    embedding: Option<Vec<f32>>,
+}
+
 async fn check_duplicate(
     store: Option<&crate::store::Store>,
     llm: &crate::llm::Llm,
     note: &RememberNote,
     wiki_dir: &std::path::Path,
-) -> anyhow::Result<Option<DuplicateMatch>> {
+    index: &super::note_index::NoteIndex,
+    deferred: &DeferredNotes,
+) -> anyhow::Result<DedupCheck> {
+    let indexed = index.with_synced(wiki_dir, |notes| {
+        notes
+            .filter_map(|(path, n)| file_duplicate(note, path, &n.front, &n.body))
+            .collect::<Vec<_>>()
+    })?;
+    let matches = match indexed {
+        Some(found) => found,
+        None => scan_duplicates(note, wiki_dir)?,
+    };
+    if let Some(found) = pick_duplicate(matches) {
+        return Ok(DedupCheck {
+            found: Some(found),
+            embedding: None,
+        });
+    }
+
+    let Some(store) = store else {
+        return Ok(DedupCheck::default());
+    };
+    let title = note.front.title.as_deref().unwrap_or("");
+    let text = format!("{}\n\n{}", title, note.body);
+    let emb = llm.embed(&text).await?;
+    // A note saved while a sync held the lock has no chunk rows yet; the waiting list stands in.
+    let nearest = match store.nearest_document(&emb, DUPLICATE_MAX_DIST).await? {
+        Some((source_path, _dist)) => Some(source_path),
+        None => deferred.nearest(&emb, DUPLICATE_MAX_DIST),
+    };
+    let found = nearest.map(|source_path| DuplicateMatch {
+        source_path,
+        reason: DuplicateReason::Embedding,
+        front: FrontMatter::default(),
+        body: String::new(),
+    });
+    Ok(DedupCheck {
+        found,
+        embedding: Some(emb),
+    })
+}
+
+/// The old way, kept for the moments the index is not ready: read and parse every note.
+fn scan_duplicates(
+    note: &RememberNote,
+    wiki_dir: &std::path::Path,
+) -> anyhow::Result<Vec<DuplicateMatch>> {
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(wiki_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed = super::note_index::parse_note(&content);
+        matches.extend(file_duplicate(note, &path, &parsed.front, &parsed.body));
+    }
+    Ok(matches)
+}
+
+/// Does one existing note duplicate the incoming one, and why.
+fn file_duplicate(
+    note: &RememberNote,
+    path: &std::path::Path,
+    fm: &FrontMatter,
+    existing_body: &str,
+) -> Option<DuplicateMatch> {
     let target_session = note.front.omb_session_id.as_deref();
     let target_title = note
         .front
@@ -1714,52 +2554,35 @@ async fn check_duplicate(
         .unwrap_or("")
         .trim()
         .to_lowercase();
+    let same_session = target_session.is_some()
+        && fm.omb_session_id.as_deref() == target_session
+        && !continues_after(note.front.omb_session_since, fm.omb_session_since);
+    let same_title = !target_title.is_empty()
+        && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
+    let reason = match (
+        same_session,
+        probable_session_duplicate(note, fm, existing_body),
+        same_title,
+    ) {
+        (true, _, _) => Some(DuplicateReason::SameSession),
+        (false, true, _) => Some(DuplicateReason::ProbableSession),
+        (false, false, true) => Some(DuplicateReason::ExactTitle),
+        (false, false, false) => None,
+    };
+    reason.map(|r| duplicate_match(path, r, fm.clone(), existing_body))
+}
 
-    let mut matches = Vec::new();
-    for entry in std::fs::read_dir(wiki_dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let (yaml, existing_body) = crate::vault::split_frontmatter(&content).unwrap_or(("", ""));
-        let fm: crate::frontmatter::FrontMatter = serde_yaml::from_str(yaml).unwrap_or_default();
-        let same_session =
-            target_session.is_some() && fm.omb_session_id.as_deref() == target_session;
-        let same_title = !target_title.is_empty()
-            && fm.title.as_deref().unwrap_or("").trim().to_lowercase() == target_title;
-        let reason = match (
-            same_session,
-            probable_session_duplicate(note, &fm, existing_body),
-            same_title,
-        ) {
-            (true, _, _) => Some(DuplicateReason::SameSession),
-            (false, true, _) => Some(DuplicateReason::ProbableSession),
-            (false, false, true) => Some(DuplicateReason::ExactTitle),
-            (false, false, false) => None,
-        };
-        matches.extend(reason.map(|r| duplicate_match(&path, r, fm, existing_body)));
+/// Does the incoming note hold conversation past what the existing note of the same session
+/// covers? No `since` on the incoming note means it starts at the session start, so no; an
+/// existing note without one is the session start, so any `since` continues it. An equal
+/// `since` is filtered as before. Without this a re-run of a finished session is dropped as a
+/// duplicate of its own first note.
+fn continues_after(incoming: Option<u64>, existing: Option<u64>) -> bool {
+    match (incoming, existing) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(i), Some(e)) => i > e,
     }
-    if let Some(found) = pick_duplicate(matches) {
-        return Ok(Some(found));
-    }
-
-    if let Some(store) = store {
-        let title = note.front.title.as_deref().unwrap_or("");
-        let text = format!("{}\n\n{}", title, note.body);
-        let emb = llm.embed(&text).await?;
-        if let Some((source_path, _dist)) = store.nearest_document(&emb, DUPLICATE_MAX_DIST).await?
-        {
-            return Ok(Some(DuplicateMatch {
-                source_path,
-                reason: DuplicateReason::Embedding,
-                front: FrontMatter::default(),
-                body: String::new(),
-            }));
-        }
-    }
-
-    Ok(None)
 }
 
 fn duplicate_match(
@@ -1791,7 +2614,7 @@ fn newest_match(matches: Vec<DuplicateMatch>) -> Option<DuplicateMatch> {
         .max_by_key(|m| wiki_number(&m.source_path))
 }
 
-fn wiki_number(source_path: &str) -> Option<u32> {
+fn wiki_number(source_path: &str) -> Option<u64> {
     crate::vault::wiki_stem(source_path)?
         .strip_prefix("wiki-")?
         .parse()
@@ -1891,6 +2714,12 @@ fn dedup_decision_event(
         "replace_min_delta": DUPLICATE_REPLACE_MIN_DELTA,
         "omb_session_id": note.front.omb_session_id.as_deref(),
         "existing_source_path": existing.map(|m| m.source_path.as_str()),
+        "incoming_title": note.front.title.as_deref(),
+        "incoming_claims": note.front.claims.iter().take(DEDUP_EVENT_MAX_CLAIMS)
+            .map(|c| json!({"subject": c.subject, "predicate": c.predicate, "value": c.value}))
+            .collect::<Vec<_>>(),
+        "incoming_claim_count": note.front.claims.len(),
+        "claims_truncated": note.front.claims.len() > DEDUP_EVENT_MAX_CLAIMS,
     })
 }
 
@@ -2047,6 +2876,17 @@ fn parse_supersedes(args: Option<&Value>) -> Result<Vec<String>, (i32, String)> 
     Ok(out)
 }
 
+/// The `document` key a `supersedes` entry names: the spelling that exists, else the entry as
+/// given (it then counts as unknown, which the answer says).
+async fn resolve_document_path(store: &crate::store::Store, path: &str) -> anyhow::Result<String> {
+    for candidate in wiki_path_spellings(path) {
+        if store.get_doc_sha(&candidate).await?.is_some() {
+            return Ok(candidate);
+        }
+    }
+    Ok(path.to_owned())
+}
+
 /// One spelling of the note being corrected, folded to the canonical `/vault/wiki/…` form the
 /// `document` table keys — agents pass what they saw (`wiki/wiki-1759.md`, sometimes bare
 /// `wiki-1759.md`), and the lookup keys on this exact form. Anything that is not one of these
@@ -2131,7 +2971,7 @@ fn parse_remember_note(
     } else {
         origin_in
             .parse::<config::Origin>()
-            .map_err(|e| (-32602_i32, e))?
+            .map_err(|e| (-32602_i32, e.to_string()))?
     }
     .as_str()
     .to_owned();
@@ -2174,6 +3014,9 @@ fn parse_remember_note(
         })
         .collect();
 
+    let omb_session_since = parse_session_since(&get_str("omb_session_since"))?;
+    let author = parse_author(args)?;
+
     let front = FrontMatter {
         origin,
         project: repo,
@@ -2187,9 +3030,22 @@ fn parse_remember_note(
         sources: get_arr("sources").iter().map(|s| scrub(s.trim())).collect(),
         claims,
         omb_session_id,
-        author: parse_author(args)?,
+        omb_session_since,
+        author,
     };
     Ok(RememberNote { front, body })
+}
+
+/// The moment a continued session's note starts, epoch seconds as digits; empty means absent.
+fn parse_session_since(raw: &str) -> Result<Option<u64>, (i32, String)> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || (-32602, format!("invalid omb_session_since: {raw}"));
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    raw.parse().map(Some).map_err(|_| invalid())
 }
 
 fn parse_claim(v: &Value) -> Result<Option<Claim>, (i32, String)> {
@@ -2225,7 +3081,7 @@ fn mcp_classify_repo(s: &AppState, args: Option<&Value>) -> Result<String, (i32,
         .ok_or((-32602, "missing argument: origin".to_owned()))?;
     let origin = origin
         .parse::<config::Origin>()
-        .map_err(|e| (-32602_i32, e))?
+        .map_err(|e| (-32602_i32, e.to_string()))?
         .as_str();
     let name = g("name").filter(|v| !v.is_empty());
 
@@ -2277,18 +3133,106 @@ async fn mcp_sync(s: &AppState) -> Result<String, (i32, String)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,
-        ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_tools_list,
-        needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
-        probable_session_duplicate, remember_note, should_replace_duplicate, supersedes_suffix,
-        tool_outcome_snippet, tool_query_arg,
+        ToolOut, apply_pii_gate, dedup_decision_event, mcp_endpoint_tag, mcp_remember,
+        mcp_tools_list, needs_dedup, parse_remember_note, parse_supersedes, pick_duplicate,
+        probable_session_duplicate, refined_text, remember_note, should_replace_duplicate,
+        supersedes_suffix, tool_outcome_snippet, tool_query_arg, verdict_label,
+        wiki_path_spellings,
     };
+
+    fn wiki_hit(path: &str) -> crate::wiki_recall::WikiHit {
+        crate::wiki_recall::WikiHit {
+            id: path.to_owned(),
+            title: String::new(),
+            source_path: path.to_owned(),
+            snippet: String::new(),
+            score: 1.0,
+            exact_title: false,
+        }
+    }
+
+    fn facts(superseded: bool) -> crate::store::RankFacts {
+        crate::store::RankFacts {
+            superseded,
+            authorship: crate::store::Authorship::Other,
+        }
+    }
+
+    fn vector_lines(paths: &[&str]) -> Vec<(String, String)> {
+        paths
+            .iter()
+            .map(|p| ((*p).to_owned(), String::new()))
+            .collect()
+    }
+
+    // Counts lookups and records the paths each one asked for.
+    async fn run_sunk(
+        wiki: &[&str],
+        wiki_superseded: &[&str],
+        vector: &[&str],
+        answer: &[(&str, bool)],
+    ) -> (std::collections::HashSet<String>, Vec<Vec<String>>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let hits: Vec<_> = wiki.iter().map(|p| wiki_hit(p)).collect();
+        let wiki_facts: HashMap<String, crate::store::RankFacts> = wiki
+            .iter()
+            .map(|p| ((*p).to_owned(), facts(wiki_superseded.contains(p))))
+            .collect();
+        let answer: HashMap<String, crate::store::RankFacts> = answer
+            .iter()
+            .map(|(p, s)| ((*p).to_owned(), facts(*s)))
+            .collect();
+        let sunk = super::sunk_paths(&hits, &wiki_facts, Some(&vector_lines(vector)), |paths| {
+            calls.borrow_mut().push(paths);
+            async move { Ok(answer) }
+        })
+        .await
+        .unwrap();
+        (sunk, calls.into_inner())
+    }
+
+    #[tokio::test]
+    async fn sunk_lookup_is_skipped_when_every_vector_path_is_a_wiki_path() {
+        let (sunk, calls) = run_sunk(&["a", "b"], &["a"], &["b", "a"], &[]).await;
+        assert!(calls.is_empty(), "lookups: {calls:?}");
+        assert_eq!(sunk, ["a".to_owned()].into());
+        let (_, calls) = run_sunk(&["a"], &[], &[], &[]).await;
+        assert!(calls.is_empty(), "lookups: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn sunk_lookup_asks_once_for_vector_only_paths() {
+        let (sunk, calls) = run_sunk(
+            &["a", "b"],
+            &["a"],
+            &["b", "v2", "v1"],
+            &[("v1", true), ("v2", false)],
+        )
+        .await;
+        assert_eq!(calls, vec![vec!["v1".to_owned(), "v2".to_owned()]]);
+        assert_eq!(sunk, ["a".to_owned(), "v1".to_owned()].into());
+    }
+
+    // Same instants and same strings as agents/door/test_door.py VerdictLabelTests.
+    #[test]
+    fn verdict_label_has_six_fractional_digits() {
+        use chrono::TimeZone;
+        let whole = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 27, 13, 53, 56)
+            .unwrap();
+        assert_eq!(verdict_label(whole), "2026-10-27T13:53:56.000000+00:00");
+        let nanos = whole + chrono::Duration::nanoseconds(123_456_789);
+        assert_eq!(verdict_label(nanos), "2026-10-27T13:53:56.123456+00:00");
+    }
     use crate::config::BoringConfig;
     use crate::frontmatter::FrontMatter;
     use crate::serve::owner::{self, Caller};
+    use crate::serve::remember_defer::DeferredNotes;
     use serde_json::{Value, json};
 
     const VECTOR_REQUIRED_TOOLS: [&str; 13] = [
@@ -2404,22 +3348,27 @@ mod tests {
         let none: Vec<String> = Vec::new();
         assert_eq!(supersedes_suffix(&none, &SupersedesReport::default()), "");
 
+        // Python test_writer.py:675 and :718 — the tail names the closed slots, or says none.
         let all_linked = SupersedesReport {
             supersedes: 2,
             ..SupersedesReport::default()
         };
         assert_eq!(
             supersedes_suffix(&["/vault/wiki/a.md".to_owned()], &all_linked),
-            " · supersedes linked 2"
+            " · supersedes linked 2 · retired claims: none"
         );
         let missed = SupersedesReport {
             supersedes: 1,
             unknown: 1,
             unknown_paths: vec!["/vault/wiki/ghost.md".to_owned()],
+            retired: vec![
+                ("slot a".to_owned(), "state".to_owned()),
+                ("slot b".to_owned(), "state".to_owned()),
+            ],
         };
         assert_eq!(
             supersedes_suffix(&["/vault/wiki/a.md".to_owned()], &missed),
-            " · supersedes linked 1, not found 1 (/vault/wiki/ghost.md)"
+            " · supersedes linked 1, not found 1 (/vault/wiki/ghost.md) · retired claims: slot a/state, slot b/state"
         );
     }
 
@@ -2445,11 +3394,100 @@ mod tests {
             cfg: std::sync::Arc::new(cfg),
             cfg_path: std::sync::Arc::new(None),
             sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
             wiki_index: std::sync::Arc::default(),
             last_compact: std::sync::Arc::default(),
             compact_failure: std::sync::Arc::default(),
             db_healthy_last: std::sync::Arc::default(),
             owner_token: std::sync::Arc::new(Some(DOOR_TOKEN.to_owned())),
+        }
+    }
+
+    fn body<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> crate::serve::RegisterJson<T> {
+        crate::serve::RegisterJson(serde_json::from_value(v).unwrap())
+    }
+
+    async fn query_log_count(store: &crate::store::Store, endpoint: &str) -> usize {
+        store
+            .recent_queries(1_000_000)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.endpoint == endpoint)
+            .count()
+    }
+
+    /// Register reads (HTTP and MCP) write no query_log row; a non-register MCP call still does.
+    /// The logger is fire-and-forget, so the non-register row is awaited first — the register
+    /// calls were spawned before it.
+    #[tokio::test]
+    async fn register_reads_write_no_query_log_row() {
+        use crate::serve::http;
+        use axum::extract::State;
+
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = std::sync::Arc::new(crate::store::Store::open(&dsn, 1024).await.unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        s.store = Some(std::sync::Arc::clone(&store));
+
+        let mcp_tools = [
+            "decisions",
+            "risks",
+            "next_actions",
+            "stalled",
+            "recurrences",
+            "context",
+            "project_status",
+        ];
+        let mut tags: Vec<String> = mcp_tools.iter().map(|t| format!("mcp.{t}")).collect();
+        tags.extend(
+            [
+                "decisions",
+                "risks",
+                "next_actions",
+                "stalled",
+                "recurrences",
+                "status",
+            ]
+            .map(str::to_owned),
+        );
+        let mut before = Vec::new();
+        for tag in &tags {
+            before.push(query_log_count(&store, tag).await);
+        }
+        let probe_before = query_log_count(&store, "mcp.corpus_status").await;
+
+        for tool in mcp_tools {
+            let req =
+                json!({"params": {"name": tool, "arguments": {"project": "p", "query": "q"}}});
+            let _ = super::mcp_call(&s, Caller::Unverified, &req).await;
+        }
+        let _ = http::handle_decisions(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_risks(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_next_actions(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_stalled(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_recurrences(State(s.clone()), body(json!({}))).await;
+        let _ = http::handle_project_status(State(s.clone()), body(json!({"project": "p"}))).await;
+
+        let probe = json!({"params": {"name": "corpus_status", "arguments": {}}});
+        super::mcp_call(&s, Caller::Unverified, &probe)
+            .await
+            .unwrap();
+        let mut waited = 0;
+        while query_log_count(&store, "mcp.corpus_status").await == probe_before {
+            waited += 1;
+            assert!(waited < 500, "non-register call never reached query_log");
+            tokio::task::yield_now().await;
+        }
+
+        for (tag, was) in tags.iter().zip(before) {
+            assert_eq!(query_log_count(&store, tag).await, was, "{tag} logged");
         }
     }
 
@@ -2493,6 +3531,157 @@ mod tests {
         .unwrap();
         assert_eq!(fix.duplicate, None, "a correction skips the gate");
         assert_ne!(fix.source_path, first.source_path);
+    }
+
+    fn register(rows: &[(&str, &str, &str, &str)], total: i64) -> crate::store::RegisterRows {
+        crate::store::RegisterRows {
+            rows: rows
+                .iter()
+                .map(|(kind, subject, predicate, value)| {
+                    crate::store::RegisterRow::new(
+                        (*subject).to_owned(),
+                        (*predicate).to_owned(),
+                        (*value).to_owned(),
+                        (*kind).to_owned(),
+                        "high".to_owned(),
+                        std::time::SystemTime::UNIX_EPOCH,
+                        "p".to_owned(),
+                    )
+                })
+                .collect(),
+            total_matching: total,
+        }
+    }
+
+    // Expected values: Python answer.refined_text (python3 -I, same inputs), 2026-10-28.
+    #[test]
+    fn refined_text_matches_python_refined_text() {
+        const HINT: &str =
+            "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)";
+        let (a, b, c, d) = (
+            "/vault/wiki/a.md".to_owned(),
+            "/vault/wiki/b.md".to_owned(),
+            "/vault/wiki/c.md".to_owned(),
+            "/vault/wiki/d.md".to_owned(),
+        );
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let claims_a = || {
+            register(
+                &[
+                    ("decision", "rop", "fold", "접는다"),
+                    ("fact", "db", "engine", "pg"),
+                ],
+                4,
+            )
+        };
+        let claims_c = || register(&[("risk", "x", "y", "z")], 1);
+        let none = HashMap::new();
+        let sup_c = HashMap::from([(c.clone(), vec![d.clone()])]);
+
+        // claims + title + concepts + hidden count
+        let got = refined_text(
+            &[(a.clone(), "본문A".to_owned())],
+            &none,
+            &HashMap::from([(a.clone(), claims_a())]),
+            &HashMap::from([(a.clone(), "노트 A".to_owned())]),
+            &HashMap::from([(a.clone(), names(&["rop", "fold"]))]),
+        );
+        assert_eq!(
+            got,
+            format!(
+                "- [a.md] 노트 A\n  concepts: rop, fold\n  · decision rop/fold: 접는다\n  · fact db/engine: pg\n  · … +2 more\n\n{HINT}"
+            )
+        );
+
+        // no claims anywhere: plain block, no hint
+        let got = refined_text(
+            &[(b.clone(), "본문B".to_owned())],
+            &none,
+            &HashMap::new(),
+            &HashMap::from([(b.clone(), "노트 B".to_owned())]),
+            &HashMap::from([(b.clone(), names(&["rop"]))]),
+        );
+        assert_eq!(got, "- [b.md] 본문B\n  concepts: rop");
+
+        // superseded label in head, no title, no concepts
+        let got = refined_text(
+            &[(c.clone(), "본문C".to_owned())],
+            &sup_c,
+            &HashMap::from([(c.clone(), claims_c())]),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            got,
+            format!("- [c.md (superseded by d.md)]\n  · risk x/y: z\n\n{HINT}")
+        );
+
+        // mixed: plain, refined, superseded; hint once at the end
+        let got = refined_text(
+            &[
+                (b.clone(), "본문B".to_owned()),
+                (a.clone(), "본문A".to_owned()),
+                (c.clone(), "본문C".to_owned()),
+            ],
+            &sup_c,
+            &HashMap::from([(a.clone(), claims_a()), (c.clone(), claims_c())]),
+            &HashMap::from([(a.clone(), "노트 A".to_owned())]),
+            &HashMap::from([(a.clone(), names(&["rop"])), (b.clone(), names(&["q"]))]),
+        );
+        assert_eq!(
+            got,
+            format!(
+                "- [b.md] 본문B\n  concepts: q\n\n- [a.md] 노트 A\n  concepts: rop\n  · decision rop/fold: 접는다\n  · fact db/engine: pg\n  · … +2 more\n\n- [c.md (superseded by d.md)]\n  · risk x/y: z\n\n{HINT}"
+            )
+        );
+    }
+
+    #[test]
+    fn refined_text_caps_concepts_at_six() {
+        let a = "/vault/wiki/a.md".to_owned();
+        let seven: Vec<String> = (1..=7).map(|n| format!("c{n}")).collect();
+        let got = refined_text(
+            &[(a.clone(), "본문".to_owned())],
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(a, seven)]),
+        );
+        assert_eq!(got, "- [a.md] 본문\n  concepts: c1, c2, c3, c4, c5, c6");
+    }
+
+    #[test]
+    fn remember_tool_schema_lists_concepts_as_required_one_to_six() {
+        let tools = super::mcp_tools_list();
+        let remember = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remember")
+            .unwrap();
+        let schema = &remember["inputSchema"];
+        assert_eq!(schema["required"], json!(["title", "body", "concepts"]));
+        assert_eq!(schema["properties"]["concepts"]["minItems"], 1);
+        assert_eq!(schema["properties"]["concepts"]["maxItems"], 6);
+    }
+
+    #[tokio::test]
+    async fn mcp_remember_still_accepts_missing_empty_and_korean_only_concepts() {
+        // The live distiller calls `tools/call remember` without the tool schema; refusing any
+        // of these would drop its notes. The schema says required, the server does not enforce.
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        for (n, concepts) in [None, Some(json!([])), Some(json!(["테스트", "개념"]))]
+            .into_iter()
+            .enumerate()
+        {
+            let mut args = json!({"title": format!("t{n}"), "body": format!("b{n}"), "omb_session_id": "s1", "repo": "p"});
+            if let Some(c) = concepts {
+                args["concepts"] = c;
+            }
+            let out = mcp_remember(&s, Caller::Unverified, Some(&args)).await;
+            assert!(out.is_ok(), "case {n} must be accepted: {out:?}");
+        }
     }
 
     #[tokio::test]
@@ -2566,7 +3755,7 @@ mod tests {
         ] {
             let err = remember_note(&s, caller, Some(args)).await.unwrap_err();
             assert_eq!(
-                err.0, -32602,
+                err.code, -32602,
                 "{label}: owner without the door token is a 400"
             );
         }
@@ -2735,6 +3924,421 @@ mod tests {
         );
     }
 
+    // Python: parse.py:296-298 — a non-numeric omb_session_since is a refused request (-32602).
+    #[tokio::test]
+    async fn mcp_remember_refuses_a_non_numeric_omb_session_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        for bad in ["abc", "12x", "-5", "1.5"] {
+            let reply = mcp_remember_reply(
+                &s,
+                json!({"title": "t", "body": "b", "repo": "p", "omb_session_since": bad}),
+            )
+            .await;
+            assert_eq!(
+                reply["error"],
+                json!({"code": -32602, "message": format!("invalid omb_session_since: {bad}"), "data": {"outcome": "refused"}}),
+                "{bad}"
+            );
+        }
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    // Python: parse.py:299-301 (digits → int) and render.py:51-52 (written as a quoted string,
+    // between omb_session_id and author).
+    #[tokio::test]
+    async fn omb_session_since_is_written_to_the_frontmatter_as_a_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let got = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&json!({"title": "t", "body": "b", "repo": "p", "omb_session_id": "sess-1", "omb_session_since": " 0001792713141 "})),
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(&got.source_path).unwrap();
+        assert!(
+            text.contains(
+                "omb_session_id: sess-1\nomb_session_since: '1792713141'\nauthor: unknown\n"
+            ),
+            "{text}"
+        );
+        let plain = remember_note(
+            &s,
+            Caller::Unverified,
+            Some(&json!({"title": "t2", "body": "b2", "repo": "p"})),
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(&plain.source_path).unwrap();
+        assert!(!text.contains("omb_session_since"), "{text}");
+    }
+
+    /// Writes one existing note carrying session `sess-1` (and `since` when given), then asks the
+    /// duplicate gate about an incoming note of the same session — its reason, or none.
+    async fn dedup_reason(
+        existing_since: Option<&str>,
+        incoming_since: Option<u64>,
+        same_title: bool,
+    ) -> Option<DuplicateReason> {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        let since_line = existing_since
+            .map(|v| format!("omb_session_since: '{v}'\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            wiki.join("wiki-0100.md"),
+            format!(
+                "---\nid: wiki-0100\ntitle: 다른 제목\nkind: note\norigin: personal\nproject: ''\ndate: '2026-10-01'\ntags: []\ntools: []\nconcepts: []\nclaims: []\nrelates_to: []\nsources: []\nomb_session_id: sess-1\n{since_line}author: unknown\n---\n다른 본문\n"
+            ),
+        )
+        .unwrap();
+        let cfg = BoringConfig::default();
+        let note = super::RememberNote {
+            front: FrontMatter {
+                title: Some(
+                    if same_title {
+                        "다른 제목"
+                    } else {
+                        "배포"
+                    }
+                    .to_owned(),
+                ),
+                kind: "note".to_owned(),
+                origin: "personal".to_owned(),
+                omb_session_id: Some("sess-1".to_owned()),
+                omb_session_since: incoming_since,
+                ..FrontMatter::default()
+            },
+            body: "배포 본문".to_owned(),
+        };
+        let llm = crate::llm::Llm::from_config(&cfg);
+        super::check_duplicate(
+            None,
+            &llm,
+            &note,
+            &wiki,
+            &crate::serve::note_index::NoteIndex::default(),
+            &DeferredNotes::default(),
+        )
+        .await
+        .unwrap()
+        .found
+        .map(|m| m.reason)
+    }
+
+    fn note_text(
+        id: &str,
+        title: &str,
+        session: Option<&str>,
+        since: Option<&str>,
+        body: &str,
+    ) -> String {
+        let session_line = session
+            .map(|v| format!("omb_session_id: {v}\n"))
+            .unwrap_or_default();
+        let since_line = since
+            .map(|v| format!("omb_session_since: '{v}'\n"))
+            .unwrap_or_default();
+        format!(
+            "---\nid: {id}\ntitle: {title}\nkind: note\norigin: personal\nproject: ''\ndate: '2026-10-01'\ntags: []\ntools: []\nconcepts: []\nclaims: []\nrelates_to: []\nsources: []\n{session_line}{since_line}author: unknown\n---\n{body}\n"
+        )
+    }
+
+    fn incoming(
+        title: &str,
+        session: Option<&str>,
+        since: Option<u64>,
+        body: &str,
+    ) -> super::RememberNote {
+        super::RememberNote {
+            front: FrontMatter {
+                title: Some(title.to_owned()),
+                kind: "note".to_owned(),
+                origin: "personal".to_owned(),
+                omb_session_id: session.map(str::to_owned),
+                omb_session_since: since,
+                ..FrontMatter::default()
+            },
+            body: body.to_owned(),
+        }
+    }
+
+    /// What the decision is, as a comparable value: which note, why.
+    fn verdict(found: Option<DuplicateMatch>) -> Option<(String, DuplicateReason)> {
+        found.map(|m| (m.source_path, m.reason))
+    }
+
+    async fn decide_both_ways(
+        note: &super::RememberNote,
+        wiki: &std::path::Path,
+        index: &crate::serve::note_index::NoteIndex,
+    ) -> (
+        Option<(String, DuplicateReason)>,
+        Option<(String, DuplicateReason)>,
+    ) {
+        let llm = crate::llm::Llm::from_config(&BoringConfig::default());
+        let indexed =
+            super::check_duplicate(None, &llm, note, wiki, index, &DeferredNotes::default())
+                .await
+                .unwrap()
+                .found;
+        let scanned = super::check_duplicate(
+            None,
+            &llm,
+            note,
+            wiki,
+            &crate::serve::note_index::NoteIndex::default(),
+            &DeferredNotes::default(),
+        )
+        .await
+        .unwrap()
+        .found;
+        (verdict(indexed), verdict(scanned))
+    }
+
+    fn fixture_notes() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "wiki-0001",
+                note_text(
+                    "wiki-0001",
+                    "배포 점검",
+                    Some("sess-a"),
+                    None,
+                    "배포 점검 본문",
+                ),
+            ),
+            (
+                "wiki-0002",
+                note_text(
+                    "wiki-0002",
+                    "다른 제목",
+                    Some("sess-b"),
+                    Some("100"),
+                    "세션 b 본문 하나 둘 셋",
+                ),
+            ),
+            (
+                "wiki-0003",
+                note_text("wiki-0003", "Exact Title", None, None, "정확한 제목 본문"),
+            ),
+            (
+                "wiki-0004",
+                note_text("wiki-0004", "무관", None, None, "관계 없는 내용"),
+            ),
+        ]
+    }
+
+    fn incoming_cases() -> Vec<super::RememberNote> {
+        vec![
+            incoming("새 제목", Some("sess-a"), None, "다른 본문"),
+            incoming("배포 점검", Some("sess-x"), None, "배포 점검 본문"),
+            incoming("exact title", None, None, "전혀 다른"),
+            incoming("후속", Some("sess-b"), Some(200), "이어진 본문"),
+            incoming("후속", Some("sess-b"), Some(100), "같은 시점"),
+            incoming("아무와도 안 겹침", None, None, "유일한 본문"),
+        ]
+    }
+
+    /// The index never changes a decision: for same_session, probable_session, exact_title,
+    /// continued-session and no-match cases, a note changed on disk between two writes, and a
+    /// deleted note, the indexed answer is the full scan's answer.
+    #[tokio::test]
+    async fn indexed_duplicate_decision_equals_the_full_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        for (id, text) in fixture_notes() {
+            std::fs::write(wiki.join(format!("{id}.md")), text).unwrap();
+        }
+        let index = crate::serve::note_index::NoteIndex::default();
+        index.prefill(&wiki).unwrap();
+        let mut seen = 0;
+        for round in 0..3 {
+            if round == 1 {
+                // changed between two writes: same title, now a longer body and new session
+                std::fs::write(
+                    wiki.join("wiki-0004.md"),
+                    note_text(
+                        "wiki-0004",
+                        "배포 점검 2",
+                        Some("sess-x"),
+                        None,
+                        "바뀐 뒤 더 긴 본문입니다",
+                    ),
+                )
+                .unwrap();
+            }
+            if round == 2 {
+                std::fs::remove_file(wiki.join("wiki-0001.md")).unwrap();
+            }
+            for case in incoming_cases() {
+                let (indexed, scanned) = decide_both_ways(&case, &wiki, &index).await;
+                assert_eq!(
+                    indexed, scanned,
+                    "round {round}, incoming {:?}",
+                    case.front.title
+                );
+                seen += usize::from(scanned.is_some());
+            }
+        }
+        assert!(seen >= 6, "fixture must hit duplicates, saw {seen}");
+    }
+
+    /// The point of the index: a write re-reads only notes that changed or are new.
+    #[tokio::test]
+    async fn indexed_path_reads_only_changed_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        for (id, text) in fixture_notes() {
+            std::fs::write(wiki.join(format!("{id}.md")), text).unwrap();
+        }
+        let index = crate::serve::note_index::NoteIndex::default();
+        index.prefill(&wiki).unwrap();
+        assert_eq!(index.parse_count(), 4);
+        let llm = crate::llm::Llm::from_config(&BoringConfig::default());
+        let case = incoming("없음", None, None, "없음");
+        super::check_duplicate(None, &llm, &case, &wiki, &index, &DeferredNotes::default())
+            .await
+            .unwrap();
+        assert_eq!(index.parse_count(), 4, "unchanged vault: nothing re-read");
+        std::fs::write(
+            wiki.join("wiki-0004.md"),
+            note_text("wiki-0004", "무관", None, None, "바뀐 본문이 더 깁니다"),
+        )
+        .unwrap();
+        std::fs::write(
+            wiki.join("wiki-0005.md"),
+            note_text("wiki-0005", "새", None, None, "새 노트"),
+        )
+        .unwrap();
+        super::check_duplicate(None, &llm, &case, &wiki, &index, &DeferredNotes::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            index.parse_count(),
+            6,
+            "one changed + one new note re-read, no more"
+        );
+    }
+
+    /// While the index is still filling, a write takes the old disk read and decides the same.
+    #[tokio::test]
+    async fn requests_during_prefill_fall_back_to_the_disk_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        for (id, text) in fixture_notes() {
+            std::fs::write(wiki.join(format!("{id}.md")), text).unwrap();
+        }
+        let index = crate::serve::note_index::NoteIndex::default();
+        assert!(!index.is_ready());
+        for case in incoming_cases() {
+            let (during, scanned) = decide_both_ways(&case, &wiki, &index).await;
+            assert_eq!(during, scanned, "{:?}", case.front.title);
+        }
+        assert_eq!(
+            index.parse_count(),
+            0,
+            "not-ready index reads nothing itself"
+        );
+        assert!(index.with_synced(&wiki, |_| ()).unwrap().is_none());
+        index.prefill(&wiki).unwrap();
+        assert!(index.is_ready());
+        assert!(index.with_synced(&wiki, |_| ()).unwrap().is_some());
+    }
+
+    /// Overlapping remembers while the index refreshes: the same note sent twice at once lands
+    /// once (one of the two is the duplicate), and the distinct notes beside it all land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overlapping_remembers_keep_the_full_scan_decision() {
+        const ROUNDS: usize = 50;
+        let mut pair_caught = 0;
+        for round in 0..ROUNDS {
+            let tmp = tempfile::tempdir().unwrap();
+            let s = vault_state(tmp.path());
+            for (id, text) in fixture_notes() {
+                std::fs::write(tmp.path().join("wiki").join(format!("{id}.md")), text).unwrap();
+            }
+            s.note_index.prefill(&tmp.path().join("wiki")).unwrap();
+            let send = |title: &'static str| {
+                let s = s.clone();
+                tokio::spawn(async move {
+                    remember_note(
+                        &s,
+                        Caller::Unverified,
+                        Some(
+                            &json!({"title": title, "body": format!("{title} 본문"), "repo": "p"}),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                })
+            };
+            let tasks = [
+                send("겹침"),
+                send("겹침"),
+                send("따로 하나"),
+                send("따로 둘"),
+            ];
+            let mut got = Vec::new();
+            for t in tasks {
+                got.push(t.await.unwrap());
+            }
+            let skipped_pair = got[..2].iter().filter(|r| r.duplicate.is_some()).count();
+            assert_eq!(
+                skipped_pair, 1,
+                "round {round}: exactly one of the pair is the duplicate"
+            );
+            assert!(
+                got[2..].iter().all(|r| r.duplicate.is_none()),
+                "round {round}"
+            );
+            assert_eq!(
+                wiki_notes(tmp.path()),
+                fixture_notes().len() + 3,
+                "round {round}"
+            );
+            pair_caught += skipped_pair;
+        }
+        assert_eq!(pair_caught, ROUNDS);
+    }
+
+    // Python: test_dedup.py:304 (continuation_of_same_session_is_not_its_duplicate) and
+    // dedup.py:369-376 `_continues_after` — same input, same decision and reason.
+    #[tokio::test]
+    async fn a_continued_session_note_is_not_a_same_session_duplicate() {
+        use DuplicateReason::{ExactTitle, SameSession};
+        // incoming has no since: from the session start, so same_session as before.
+        assert_eq!(dedup_reason(None, None, false).await, Some(SameSession));
+        assert_eq!(
+            dedup_reason(Some("100"), None, false).await,
+            Some(SameSession)
+        );
+        // incoming since, existing none: the existing note is the session start, so this continues it.
+        assert_eq!(dedup_reason(None, Some(1_792_713_141), false).await, None);
+        // later since than the existing note's: continues it.
+        assert_eq!(dedup_reason(Some("100"), Some(200), false).await, None);
+        // same or earlier since: filtered as before.
+        assert_eq!(
+            dedup_reason(Some("200"), Some(200), false).await,
+            Some(SameSession)
+        );
+        assert_eq!(
+            dedup_reason(Some("200"), Some(100), false).await,
+            Some(SameSession)
+        );
+        // a continuation still falls through to the title branch.
+        assert_eq!(
+            dedup_reason(None, Some(1_792_713_141), true).await,
+            Some(ExactTitle)
+        );
+    }
+
     fn dup_match(path: &str, reason: DuplicateReason) -> DuplicateMatch {
         DuplicateMatch {
             source_path: path.to_owned(),
@@ -2757,6 +4361,41 @@ mod tests {
                 assert_eq!(found.source_path, b, "{reason:?} {order:?}");
             }
         }
+    }
+
+    #[test]
+    fn newest_match_compares_wiki_numbers_by_value_past_u32() {
+        let small = "/v/wiki/wiki-0002.md";
+        let big = "/v/wiki/wiki-05000000000.md";
+        let found = pick_duplicate(
+            [small, big]
+                .map(|p| dup_match(p, DuplicateReason::SameSession))
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(found.source_path, big);
+    }
+
+    #[test]
+    fn wiki_path_spellings_cover_four_and_eleven_digit_names_of_one_number() {
+        assert_eq!(
+            wiki_path_spellings("/vault/wiki/wiki-9572.md"),
+            vec![
+                "/vault/wiki/wiki-9572.md".to_owned(),
+                "/vault/wiki/wiki-00000009572.md".to_owned()
+            ]
+        );
+        assert_eq!(
+            wiki_path_spellings("/vault/wiki/wiki-00000009572.md"),
+            vec![
+                "/vault/wiki/wiki-00000009572.md".to_owned(),
+                "/vault/wiki/wiki-9572.md".to_owned()
+            ]
+        );
+        assert_eq!(
+            wiki_path_spellings("/vault/wiki/ghost-note.md"),
+            vec!["/vault/wiki/ghost-note.md".to_owned()]
+        );
     }
 
     #[test]
@@ -2857,6 +4496,225 @@ mod tests {
         assert_eq!(wiki_notes(tmp.path()), 3);
         assert_eq!(std::fs::read(&a.source_path).unwrap(), a_bytes);
         assert_eq!(std::fs::read(&b.source_path).unwrap(), b_bytes);
+    }
+
+    /// Embeddings stub: 1024 zeros, or 3 for any input carrying `BREAKS` — the claim upsert's
+    /// dimension guard rejects that after the note's document, chunks and tool/concept edges
+    /// are already written.
+    async fn embeddings_stub() -> String {
+        use axum::{Json, Router, routing::post};
+        async fn embed(Json(req): Json<Value>) -> Json<Value> {
+            let breaks = req["input"].as_str().is_some_and(|t| t.contains("BREAKS"));
+            let dim = if breaks { 3 } else { 1024 };
+            Json(json!({"data": [{"embedding": vec![0.0_f32; dim]}]}))
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/embeddings", post(embed));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    /// document, chunk, claim, node, edge rows that one note (path + token) owns.
+    async fn note_rows(store: &crate::store::Store, path: &str, token: &str) -> [i64; 5] {
+        let like = format!("%{token}%");
+        let row = store
+            .conn()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT (SELECT count(*) FROM document WHERE source_path = $1),
+                        (SELECT count(*) FROM chunk WHERE source_path = $1),
+                        (SELECT count(*) FROM claim WHERE source_path = $1),
+                        (SELECT count(*) FROM node WHERE id LIKE $2),
+                        (SELECT count(*) FROM edge WHERE src = $3 OR src LIKE $2 OR dst LIKE $2);",
+                &[&path, &like, &format!("doc:{path}")],
+            )
+            .await
+            .unwrap();
+        [0, 1, 2, 3, 4].map(|i| row.get::<_, i64>(i))
+    }
+
+    /// C-PORT3b: a remember that fails after part of its rows are written leaves none of them —
+    /// document row included. The note file stays on disk, as Python's writer leaves it
+    /// (`writer.py` unlinks nothing); the next sync ingests it.
+    #[tokio::test]
+    async fn a_remember_that_fails_midway_leaves_no_rows() {
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = std::sync::Arc::new(crate::store::Store::open(&dsn, 1024).await.unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        let mut cfg = BoringConfig::default();
+        cfg.llm.base_url = embeddings_stub().await;
+        s.llm = std::sync::Arc::new(crate::llm::Llm::from_config(&cfg));
+        s.cfg = std::sync::Arc::new(cfg);
+        s.store = Some(std::sync::Arc::clone(&store));
+        let token = format!(
+            "p3brem{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = json!({
+            "title": "midway", "body": "an ordinary body",
+            "tools": [token], "concepts": [token], "tags": [token],
+            "claims": [{"subject": token, "predicate": "axis", "value": "BREAKS the claim step"}],
+            // a correction skips the duplicate gate, which would embed the title and fail first
+            "supersedes": ["/vault/wiki/ghost.md"],
+        });
+
+        let failed = remember_note(&s, Caller::Unverified, Some(&args)).await;
+
+        assert!(failed.is_err(), "the claim step failed");
+        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 1, "the note file stays on disk");
+        assert_eq!(
+            note_rows(&store, &files[0], &token).await,
+            [0; 5],
+            "document, chunk, claim, node, edge rows of the failed remember"
+        );
+    }
+
+    /// C-VECADAPT2 2b: on `backend=surreal` a remember whose Surreal write fails after pg
+    /// committed answers with the error that says pg has the note, so the caller does not send
+    /// the same note again. Nothing listens on port 1.
+    #[tokio::test]
+    #[ignore = "needs BORING_TEST_DATABASE_URL"]
+    async fn a_remember_whose_surreal_write_fails_says_pg_has_the_note() {
+        let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+        let dead: crate::config::SurrealConfig = serde_json::from_value(
+            json!({"url": "http://127.0.0.1:1", "namespace": "dead", "database": "dead"}),
+        )
+        .unwrap();
+        let password_only = |name: &str| (name == dead.password_env).then(|| "x".to_owned());
+        let client =
+            crate::store::SurrealClient::new(dead.settings(&password_only).unwrap()).unwrap();
+        let store = std::sync::Arc::new(
+            crate::store::Store::open(&dsn, 1024)
+                .await
+                .unwrap()
+                .with_vector_route(crate::store::VectorRoute::Surreal(client)),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        let mut cfg = BoringConfig::default();
+        cfg.llm.base_url = embeddings_stub().await;
+        s.llm = std::sync::Arc::new(crate::llm::Llm::from_config(&cfg));
+        s.cfg = std::sync::Arc::new(cfg);
+        s.store = Some(std::sync::Arc::clone(&store));
+        let token = format!(
+            "vs2brem{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = json!({
+            "title": "surreal behind", "body": "an ordinary body",
+            "tools": [token], "concepts": [token], "tags": [token],
+            "claims": [{"subject": token, "predicate": "axis", "value": "a plain value"}],
+            // a correction skips the duplicate check, which would read Surreal and fail first
+            "supersedes": ["/vault/wiki/ghost.md"],
+        });
+
+        let failed = remember_note(&s, Caller::Unverified, Some(&args))
+            .await
+            .expect_err("a dead Surreal must fail the remember, not pass silently");
+
+        assert!(
+            failed.message.contains(crate::store::SURREAL_BEHIND),
+            "{}",
+            failed.message
+        );
+        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let [documents, chunks, claims, ..] = note_rows(&store, &files[0], &token).await;
+        assert_eq!(
+            [documents, chunks, claims],
+            [1, 1, 1],
+            "pg committed the note"
+        );
+    }
+
+    /// C-PORT3b: Python resolves `supersedes` before it takes a number or writes the file
+    /// (`writer.py` `_gate` then `_store_new_note`), so a failing lookup leaves no note file and no
+    /// rows. A NUL in the path makes Postgres reject the `get_doc_sha` parameter: the lookup fails
+    /// and nothing else does. The owner caller skips the owner guard, which would fail first.
+    #[tokio::test]
+    async fn a_remember_whose_supersedes_lookup_fails_writes_no_file() {
+        let Some(dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+            eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+            return;
+        };
+        let store = std::sync::Arc::new(crate::store::Store::open(&dsn, 1024).await.unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        let mut cfg = BoringConfig::default();
+        cfg.llm.base_url = embeddings_stub().await;
+        s.llm = std::sync::Arc::new(crate::llm::Llm::from_config(&cfg));
+        s.cfg = std::sync::Arc::new(cfg);
+        s.store = Some(std::sync::Arc::clone(&store));
+        let token = format!(
+            "p3dlook{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = json!({
+            "title": "lookup", "body": "an ordinary body", "author": "owner",
+            "tools": [token], "concepts": [token], "tags": [token],
+            "claims": [{"subject": token, "predicate": "axis", "value": "a plain value"}],
+            "supersedes": ["/vault/wiki/bad\u{0}path.md"],
+        });
+
+        let failed = remember_note(&s, Caller::Owner, Some(&args))
+            .await
+            .expect_err("the supersedes lookup failed");
+
+        assert_eq!(failed.code, -32603);
+        assert!(
+            failed.message.starts_with("supersedes lookup:"),
+            "{}",
+            failed.message
+        );
+        assert!(
+            failed.body().get("data").is_none(),
+            "a failure, not a refusal"
+        );
+        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 0, "no note file before the lookup succeeded");
+        let like = format!("%{token}%");
+        let rows = store
+            .conn()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT (SELECT count(*) FROM document WHERE source_path LIKE '%/wiki/wiki-%' AND title = 'lookup'),
+                        (SELECT count(*) FROM node WHERE id LIKE $1),
+                        (SELECT count(*) FROM edge WHERE src LIKE $1 OR dst LIKE $1);",
+                &[&like],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            [0, 1, 2].map(|i| rows.get::<_, i64>(i)),
+            [0; 3],
+            "document, node, edge rows"
+        );
     }
 
     #[test]
@@ -3537,6 +5395,20 @@ mod tests {
 
         assert_eq!(event["status"], "skipped");
         assert_eq!(event["reason"], "probable_session");
+        assert_eq!(
+            event["incoming_title"],
+            note.front.title.as_deref().unwrap()
+        );
+        assert_eq!(
+            event["incoming_claims"],
+            json!([{
+                "subject": note.front.claims[0].subject,
+                "predicate": note.front.claims[0].predicate,
+                "value": note.front.claims[0].value,
+            }])
+        );
+        assert_eq!(event["incoming_claim_count"], 1);
+        assert_eq!(event["claims_truncated"], false);
         assert!(event["incoming_score"].is_u64());
         assert!(event["existing_score"].is_u64());
         assert!(event["score_delta"].is_i64());
@@ -3658,5 +5530,109 @@ rules:
         assert_eq!(note.front.claims[0].subject, "[EMAIL]");
         assert_eq!(note.front.claims[0].value, "ABC-123");
         assert!(note.front.tags.contains(&"pii-flag".to_owned()));
+    }
+
+    // --- remember 거절 갈래: error.data.outcome 은 거절에만 (Python door.py:781-788) ---
+
+    async fn mcp_remember_reply(s: &crate::serve::AppState, args: Value) -> Value {
+        let req = json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "remember", "arguments": args},
+        });
+        let res = super::handle_mcp(
+            axum::extract::State(s.clone()),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn pii_state(root: &std::path::Path) -> crate::serve::AppState {
+        let rules = root.join("pii.yaml");
+        std::fs::write(
+            &rules,
+            r#"
+version: "1.0"
+rules:
+  - name: rrn
+    regex: '\b\d{6}-[1-4]\d{6}\b'
+    action: block
+    severity: critical
+    reason: resident registration number
+"#,
+        )
+        .unwrap();
+        let mut s = vault_state(root);
+        let scanner = crate::pii::PiiScanner::load(Some(&rules), None)
+            .unwrap()
+            .unwrap();
+        s.pii = std::sync::Arc::new(Some(scanner));
+        s
+    }
+
+    const PII_TAG_REFUSAL: &str = "PII gate blocked by rule 'rrn' (critical): resident registration number — matched sensitive text omitted";
+    const EMPTY_NOTE_REFUSAL: &str = "refused: this note has no project and no claims — add the next step or decision it leaves as claims (kind=next or kind=decision), or pass repo";
+
+    // Python: test_writer.py:778 (PII block = Refused -32603), test_door.py:1550 (refused flag).
+    #[tokio::test]
+    async fn mcp_remember_refuses_pii_that_sits_only_in_a_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = pii_state(tmp.path());
+        let reply = mcp_remember_reply(
+            &s,
+            json!({"title": "t", "body": "b", "repo": "p", "tags": ["900101-1234567"]}),
+        )
+        .await;
+        assert_eq!(
+            reply["error"],
+            json!({"code": -32603, "message": PII_TAG_REFUSAL, "data": {"outcome": "refused"}})
+        );
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    // Python: test_writer.py:754 (empty note refused on mcp), test_door.py:1567 (refused flag).
+    #[tokio::test]
+    async fn mcp_remember_refuses_a_note_with_no_project_and_no_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let reply = mcp_remember_reply(&s, json!({"title": "t", "body": "b"})).await;
+        assert_eq!(
+            reply["error"],
+            json!({"code": -32602, "message": EMPTY_NOTE_REFUSAL, "data": {"outcome": "refused"}})
+        );
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    // Control — Python: test_writer.py:772. HTTP /remember shares remember_note and keeps accepting.
+    #[tokio::test]
+    async fn http_remember_still_accepts_a_note_with_no_project_and_no_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let out = crate::serve::http::handle_remember(
+            axum::extract::State(s),
+            axum::http::HeaderMap::new(),
+            axum::Json(json!({"title": "t", "body": "b"})),
+        )
+        .await;
+        assert!(out.is_ok(), "HTTP route must accept an empty note");
+        assert_eq!(wiki_notes(tmp.path()), 1);
+    }
+
+    // Control — Python: test_door.py:1580 (a write failure carries no data field).
+    #[tokio::test]
+    async fn mcp_remember_write_failure_carries_no_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = vault_state(tmp.path());
+        s.vault_dir = std::sync::Arc::new(None);
+        let reply = mcp_remember_reply(&s, json!({"title": "t", "body": "b", "repo": "p"})).await;
+        assert_eq!(reply["error"]["code"], -32603);
+        assert!(
+            reply["error"].get("data").is_none(),
+            "a failure must not claim to be a refusal: {reply}"
+        );
     }
 }

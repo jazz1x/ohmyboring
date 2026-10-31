@@ -40,12 +40,12 @@ run_maintenance() {
     load_dot_env
     echo "=== oh-my-boring maintenance started at $(date) ==="
     echo "--- data-steward ---"
-    python3 scripts/data-steward.py --fix --yes
+    uv run --locked python scripts/data-steward.py --fix --yes
     # --fix cannot repair this one: which repo a folder-named project belongs to takes the
     # session's cwd, and `re-work` fronted two repos (2026-09-28). So it reports, and says so.
     # Where checkouts live is boring.json's checkout_roots; unset is "not scanned", not zero.
-    splits=$(python3 scripts/data-steward.py --json |
-        python3 -c 'import json, sys; s = json.load(sys.stdin)["folder_slug_splits"]; print("-" if s is None else ", ".join("%s(%d)→%s" % (x["project"], x["notes"], "/".join(x["repos"])) for x in s))') ||
+    splits=$(uv run --locked python scripts/data-steward.py --json |
+        uv run --locked python -c 'import json, sys; s = json.load(sys.stdin)["folder_slug_splits"]; print("-" if s is None else ", ".join("%s(%d)→%s" % (x["project"], x["notes"], "/".join(x["repos"])) for x in s))') ||
         splits="?"
     case "$splits" in
         -) echo "folder-name check: not scanned (boring.json checkout_roots unset)" ;;
@@ -57,7 +57,7 @@ run_maintenance() {
             ;;
     esac
     echo "--- retention ---"
-    python3 scripts/retention.py --apply --yes
+    uv run --locked python scripts/retention.py --apply --yes
     # Injection precision is the product's first-class metric and it cannot be computed from
     # distances — only from labels on real injections. Collecting them by hand never happened,
     # so the daily run takes a bounded sample. Bounded on purpose: the local model judges 24
@@ -65,11 +65,19 @@ run_maintenance() {
     # must not fail housekeeping — a missing day of labels is a smaller loss than a skipped
     # retention pass.
     echo "--- recall labels ---"
-    python3 scripts/label-recall.py --judge --queries 8 --hits 3 || echo "(label pass failed — continuing)"
+    uv run --locked python scripts/label-recall.py --judge --queries 8 --hits 3 || echo "(label pass failed — continuing)"
     # The code index is a separate corpus and it goes stale silently — nothing else re-runs it,
     # and doctor only notices after the fact. Failure must not fail housekeeping either.
     echo "--- code-sync ---"
     ./drudge/target/release/drudge code-sync || echo "(code-sync failed — continuing)"
+    # Surreal's HNSW index loses recall after delete/overwrite churn; rebuild it by swap-in (a new
+    # index is defined and confirmed built before the old one goes) when rows changed. Not
+    # `|| continuing` like the steps above: a failed swap is a ✗ the run must show — it still
+    # runs doctor, then exits non-zero. No-op on pgvector.
+    echo "--- vector-swap ---"
+    swap_rc=0
+    ./drudge/target/release/drudge vector-swap || swap_rc=$?
+    [ "$swap_rc" -eq 0 ] || notify_slack "새벽 점검: vector-swap 실패(rc=${swap_rc}) — 옛 인덱스는 그대로"
     # Close the loop this job used to leave open: twice (2026-09-21 hermes Slack socket failed
     # 267,201 times over ten days; 2026-09-26→27 ~20 h of reconnect loop) doctor could have
     # caught it — but nothing ran doctor at 03:00, so nobody was told. Strict and read-only:
@@ -90,6 +98,7 @@ run_maintenance() {
         fi
     fi
     echo "=== maintenance finished at $(date) ==="
+    [ "$swap_rc" -eq 0 ] || exit 1
 }
 
 escaped_boring_home() {
@@ -101,9 +110,11 @@ install_macos() {
     mkdir -p "$HOME/Library/LaunchAgents"
     # launchd's PATH is /usr/bin:/bin:/usr/sbin:/sbin — python3 there is Xcode's 3.9, and
     # every nested python3/rg/docker call in the run and in doctor resolves through it.
-    python3_bin="$(command -v python3 || true)"
-    if [ -z "$python3_bin" ]; then
-        echo "✗ no python3 on PATH — cannot resolve the interpreter the job should run"
+    # The job's python is `uv run --locked python` (pyproject.toml's version, not the system's),
+    # so the directory put in front of the plist PATH is uv's.
+    uv_bin="$(command -v uv || true)"
+    if [ -z "$uv_bin" ]; then
+        echo "✗ no uv on PATH — cannot resolve the runner the job should use"
         exit 1
     fi
     cat > "$plist" <<EOF
@@ -122,7 +133,7 @@ install_macos() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$(dirname "$python3_bin"):${PATH}</string>
+        <string>$(dirname "$uv_bin"):${PATH}</string>
         <key>BORING_HOME</key>
         <string>${BORING_HOME}</string>
     </dict>

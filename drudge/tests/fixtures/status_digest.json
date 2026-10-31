@@ -1,0 +1,90 @@
+[
+  {
+    "name": "docs_and_claims_ko",
+    "lang": "ko",
+    "docs": [
+      {
+        "source_path": "/w/a.md",
+        "content": "# Title line\nbody one\n## sub\nend"
+      },
+      {
+        "source_path": "/w/b.md",
+        "content": "plain body\nsecond line\n"
+      }
+    ],
+    "claims": [
+      {
+        "subject": "alpha",
+        "predicate": "ships",
+        "value": "friday",
+        "kind": "next",
+        "confidence": "high"
+      },
+      {
+        "subject": "beta",
+        "predicate": "todo",
+        "value": "None.",
+        "kind": "next",
+        "confidence": " "
+      },
+      {
+        "subject": "gamma",
+        "predicate": "is",
+        "value": "fast",
+        "kind": "",
+        "confidence": "medium"
+      }
+    ],
+    "expected_answer": "# Recent work records (last 30 days)\n\n## [0] /w/a.md\n # Title line\nbody one\n ## sub\nend\n\n## [1] /w/b.md\nplain body\nsecond line\n\n# Current project facts\n\n- [next|high] alpha ships friday\n- [fact|unknown] beta todo None.\n- [fact|medium] gamma is fast\n\n(한국어 요약은 생성 모델 경로에서만 나온다 — 이 답은 읽기 재료 그대로의 digest 이다.)"
+  },
+  {
+    "name": "docs_and_claims_en",
+    "lang": "en",
+    "docs": [
+      {
+        "source_path": "/w/a.md",
+        "content": "# Title line\nbody one\n## sub\nend"
+      },
+      {
+        "source_path": "/w/b.md",
+        "content": "plain body\nsecond line\n"
+      }
+    ],
+    "claims": [
+      {
+        "subject": "alpha",
+        "predicate": "ships",
+        "value": "friday",
+        "kind": "next",
+        "confidence": "high"
+      },
+      {
+        "subject": "beta",
+        "predicate": "todo",
+        "value": "None.",
+        "kind": "next",
+        "confidence": " "
+      },
+      {
+        "subject": "gamma",
+        "predicate": "is",
+        "value": "fast",
+        "kind": "",
+        "confidence": "medium"
+      }
+    ],
+    "expected_answer": "# Recent work records (last 30 days)\n\n## [0] /w/a.md\n # Title line\nbody one\n ## sub\nend\n\n## [1] /w/b.md\nplain body\nsecond line\n\n# Current project facts\n\n- [next|high] alpha ships friday\n- [fact|unknown] beta todo None.\n- [fact|medium] gamma is fast"
+  },
+  {
+    "name": "docs_only_en",
+    "lang": "en",
+    "docs": [
+      {
+        "source_path": "/w/b.md",
+        "content": "plain body\nsecond line\n"
+      }
+    ],
+    "claims": [],
+    "expected_answer": "# Recent work records (last 30 days)\n\n## [0] /w/b.md\nplain body\nsecond line"
+  }
+]

@@ -38,6 +38,21 @@ services:
     ports:
       - "127.0.0.1:5432:5432"             # for DataGrip / direct connection
 
+  # ─────────────────────────── SurrealDB (vector.backend=surreal) ───────────────
+  # Opt-in: `--profile surreal`. Not part of any default start; the engine only talks to it when
+  # boring.json says vector.backend=surreal. Image = the digest the stage-0 measurement ran on.
+  boring-surreal:
+    profiles: ["surreal"]
+    image: surrealdb/surrealdb:v3.3.5@sha256:3db515b88e79737aa828c05fbf1515748004ba57495ff89a013851cc3f1ad4b9
+    container_name: boring-surreal
+    restart: unless-stopped
+    user: root
+    command: start --user root --pass ${BORING_SURREAL_PASSWORD:-boring} --log warn rocksdb:/data/db
+    volumes:
+      - ./data/surrealdata:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+
   # ─────────────────────────── ohmyboring (Rust engine) ─────────────────────────
   # Deterministic kernel: embed + ingest, recall (ask/graph), audit, and the remember MCP tool over HTTP + cron.
   boring-drudge:
@@ -70,8 +85,10 @@ services:
       BORING_CONFIG: /config/boring.json  # policy: note language, repo rules, source dirs
       BORING_VAULT_DIR: /vault                # remember target + sync corpus (/vault/wiki)
       BORING_VECTOR: ${BORING_VECTOR:-off} # off = wiki-first direct read. on = vector+graph (boring-postgres alongside via --profile vector)
-      BORING_SYNC_HOURS: "4"
-      BORING_BRIEF_HOUR: "8"               # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md
+      BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-}  # empty = boring.json schedule.sync_hours
+      BORING_SYNC_DISABLED: ${BORING_SYNC_DISABLED:-0}  # 1 = the engine skips the vault sync (startup + periodic); compact and the brief keep running
+      BORING_COMPACT_DISABLED: ${BORING_COMPACT_DISABLED:-0}  # 1 = the engine skips the tick-loop compact; sync and the brief keep running
+      BORING_BRIEF_HOUR: ${BORING_ENGINE_BRIEF_HOUR:-}  # local time (TZ) when the engine writes vault/wiki/daily-brief-YYYY-MM-DD.md; off = the engine brief scheduler is not started (not an hour 0..=23; empty falls back to boring.json schedule.brief_hour)
       TZ: Asia/Seoul
     volumes:
       - ${HOME}/.claude/projects:/host/.claude/projects:ro  # CC session transcripts (narrowed: drudge's source_dirs only reads ~/.claude/projects)
@@ -89,8 +106,7 @@ services:
   # Same FastAPI app as `make door`, packaged to stand next to the engine: the image
   # (agents/door/Dockerfile, uid 10001, no code mounts) reads the engine by compose service
   # name. /health relays the engine's, so the door goes unhealthy with the engine.
-  # The door also RUNS the two card programs (POST /run/morning-card · /run/weekly-card —
-  # the tools launchd used to fire): same image, same requirements.txt, with the env below.
+  # The card programs run in hermes cron now (agents/hermes/card_runner.py), not in the door.
   boring-door:
     build:
       context: .
@@ -104,11 +120,10 @@ services:
       DOOR_UPSTREAM: http://boring-drudge:7700
       DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
-      # The card programs post with the bot token and need the target channel; both arrive
-      # from .env like they do for the secretary. SECRETARY_OWNER_ID rides along for the
+      # The door rewrites a card row after a merge (door.py _slack_client) with the bot token,
+      # from .env like the secretary. SECRETARY_OWNER_ID rides along for the
       # same card surface (the button plugin refuses presses without it).
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
-      SLACK_CARD_CHANNEL: ${SLACK_CARD_CHANNEL:-}
       SECRETARY_OWNER_ID: ${SECRETARY_OWNER_ID:-}
       # The tools call back into the door itself (127.0.0.1:7710) for /claim-source·/approved·
       # /repairs and reach the engine by service name; the ollama client honors OLLAMA_HOST.
@@ -125,7 +140,16 @@ services:
       DOOR_REGISTER_READER: ${DOOR_REGISTER_READER:-python}
       DOOR_RECALL_READER: ${DOOR_RECALL_READER:-python}
       DOOR_VERDICT_WRITER: ${DOOR_VERDICT_WRITER:-engine}
+      DOOR_MEMORY_READER: ${DOOR_MEMORY_READER:-python}
+      DOOR_SEARCH_READER: ${DOOR_SEARCH_READER:-python}
+      DOOR_LINK_WRITER: ${DOOR_LINK_WRITER:-engine}
       DOOR_EVENTS_OWNER: ${DOOR_EVENTS_OWNER:-engine}
+      DOOR_SYNC_OWNER: ${DOOR_SYNC_OWNER:-engine} # python = door thread re-ingests the vault every BORING_SYNC_HOURS (engine sync clock stays on until the engine is stopped)
+      BORING_SYNC_HOURS: ${BORING_SYNC_HOURS:-}
+      DOOR_COMPACT_OWNER: ${DOOR_COMPACT_OWNER:-engine} # python = door thread runs compact every BORING_COMPACT_HOURS (set BORING_COMPACT_DISABLED=1 on the engine first)
+      BORING_COMPACT_HOURS: ${BORING_COMPACT_HOURS:-}
+      DOOR_BRIEF_OWNER: ${DOOR_BRIEF_OWNER:-engine} # python = door thread writes the daily brief note at BORING_BRIEF_HOUR (set BORING_ENGINE_BRIEF_HOUR=off on the engine first)
+      BORING_BRIEF_HOUR: ${BORING_BRIEF_HOUR:-}
     volumes:
       - ./vault:/vault                   # remember writes notes here when DOOR_REMEMBER_WRITER=python
       # The folder, not the file: an editor that saves by rename swaps the inode, and a file
@@ -170,6 +194,9 @@ services:
       # The card cron jobs' trigger scripts reach the door by service name (config.door_url
       # reads this; the localhost default is wrong inside the container).
       BORING_DOOR_URL: http://boring-door:7710
+      BORING_VAULT_DIR: /vault  # card_live._vault_dir() reads note bodies here; unset → ~/oh-my-boring/vault (missing)
+      # The card jobs' model calls (ChatOllama, no base_url) read OLLAMA_HOST; same value as the door.
+      OLLAMA_HOST: http://host.docker.internal:11434
       # Tell host-side adapters they are running inside the hermes container and where the repo is.
       BORING_IN_CONTAINER: "1"
       BORING_HOME: /host/oh-my-boring

@@ -22,6 +22,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -56,7 +57,7 @@ REVISE_HEAD = "아래 두 문장을 다시 쓴다."
 _L = r"(?<![A-Za-z0-9_\-])"
 _R = r"(?![A-Za-z0-9_\-])"
 _PATTERNS = (
-    re.compile(rf"{_L}wiki-\d{{3,4}}"),
+    re.compile(rf"{_L}wiki-\d{{3,}}"),
     re.compile(r"(?:^|[\s(\"'])(?:/[\w.\-]+){2,}"),
     re.compile(rf"{_L}[\w\-]+(?:/[\w.\-]+)+\.[A-Za-z]{{1,5}}{_R}"),
     re.compile(rf"{_L}[\w\-]+\.(?:py|rs|md|json|toml|sh|ts|yml|yaml){_R}"),
@@ -212,6 +213,16 @@ def main() -> int:
         print("[advice-write] BORING_DOOR_URL must be set — 조언은 문을 통해 읽고 쓴다", file=sys.stderr)
         return 2
     import card
+    import card_live
+
+    vault = card_live._vault_dir()
+    note_count = sum(1 for _ in Path(vault).rglob("*.md")) if os.path.isdir(vault) else 0
+    if note_count == 0:
+        print(
+            f"[advice-write] vault {vault!r} 에 노트(.md)가 {note_count}개 — 마운트·BORING_VAULT_DIR 확인",
+            file=sys.stderr,
+        )
+        return 4
 
     try:
         state = card.build_advice_graph().invoke({})

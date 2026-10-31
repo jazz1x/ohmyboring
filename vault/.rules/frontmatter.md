@@ -55,7 +55,7 @@ Use `decision` for concrete choices, `risk` for open uncertainties, `blocked` fo
 
 ## ID rules
 
-- Pattern: `^wiki-\d{4,5}$` (4–5 digits). Filename stem == frontmatter `id`.
+- Pattern: `^wiki-\d{11}$` (11 digits; the seed note `wiki-0000` is the one exception). Filename stem == frontmatter `id`.
 - Monotonically increasing. Once assigned, an ID is never reused.
 - On deletion: instead of deleting the file, tombstone it — empty the body and leave `superseded_by`.
 

@@ -18,7 +18,7 @@ README 는 **설치하고 쓰는 법**이다. 이 파일은 **이미 돌고 있�
 | 서비스 | 하는 일 | 죽으면 |
 |---|---|---|
 | `boring-drudge` | 엔진. 임베드·저장·그래프·`/search`·MCP | 회수와 쓰기 둘 다 멈춘다. 훅은 조용히 no-op |
-| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다. 그리고 카드 둘을 직접 돌린다(`POST /run/morning-card`·`/run/weekly-card` — 같은 이미지 안의 카드 프로그램을 서브프로세스로) | 아침 카드가 `schedule-card.sh run` 과 hermes 크론 둘 다 실패하고(문의 run 라우트가 안 뜨면), Claude Code SessionStart 훅이 넣는 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
+| `boring-door` | 문. 엔진 앞 프록시(:7710) — 엔진 경로를 대신 전달하고 `/approved`·`/claim-source`·`/claim-sources`·`/projects?active_days=`·`/repairs/split-subjects` 는 스스로 답한다. 카드는 돌리지 않는다(hermes 크론의 `card_runner.py` 가 돌린다) | Claude Code SessionStart 훅이 넣는 「오늘 승인한 것」 절이 빠진다. 엔진 자체는 뒤의 `:7700` 에 살아 있다 |
 | `boring-postgres` | pgvector 저장소 | 엔진이 못 뜬다 |
 | `boring-agent` | hermes — 크론 잡의 실행기 | 브리핑·수집 워커가 전부 안 돈다 |
 
@@ -34,7 +34,7 @@ make agent-logs    # hermes 로그 (MCP 연결 진단)
 | `com.ohmyboring.codex-ingest` | 20분 | Codex 세션 하나를 집어 증류·저장 |
 | `com.ohmyboring.maintenance` | 매일 | `scripts/schedule-maintenance.sh run` — data-steward + retention |
 | `com.ohmyboring.night-drain` | 03:20 | 밀린 Codex·Claude 세션을 한 번에 최대 40개 |
-| `com.ohmyboring.morning-card` (launchd 잡 — 2026-09-28 에 지움) | 매일 08:00 | 아침 카드는 이제 hermes 크론 `morning-card`((다) 아래)만 돌린다 — 문의 `POST /run/morning-card` 로. 문(:7710)이 살아 있어야 돌고, 실행·성패 기록은 `~/.hermes/cron/output/<job-id>/` 의 최신 파일(파일 이름이 시각) |
+| `com.ohmyboring.morning-card` (launchd 잡 — 2026-09-28 에 지움) | 매일 08:00 | 아침 카드는 이제 hermes 크론 `morning-card`((다) 아래)만 돌린다 — `card_runner.py` 로. 실행·성패 기록은 `~/.hermes/cron/output/<job-id>/` 의 최신 파일(파일 이름이 시각) |
 | `com.ohmyboring.weekly-card` | 월 09:00 | `scripts/schedule-card.sh run weekly` — 주간 브리핑 카드. 볼트의 매일 브리핑을 먼저 읽어서 문이 필요 없고, 로그는 `/tmp/com.ohmyboring.weekly-card.log`. 이주 중 잡 — hermes 크론 `weekly-card` 가 같은 도구를 문에 시킨다 |
 
 ```bash
@@ -48,8 +48,8 @@ make maintenance                     # 지금 한 번 돌린다
 | 잡 | 주기 | 스크립트 |
 |---|---|---|
 | `memory-ingest-worker` | 20분 | `ingest-worker.py` — 창 훑기가 적격 세션을 공유 증류 큐에 넣고, 한 틱에 큐에서 QUEUE_PER_TICK(기본 3)개를 랭그래프 엔진으로 증류 |
-| `morning-card` | 매일 08:00 | `run-morning-card.py` — 문의 `POST /run/morning-card` 에 부탁해 아침 카드 프로그램을 돌린다. deliver `local`(카드가 스스로 슬랙에 올리니 hermes 가 배달할 것 없음) |
-| `weekly-card` | 월 09:00 | `run-weekly-card.py` — 문의 `POST /run/weekly-card` 에 부탁해 주간 카드 프로그램을 돌린다. deliver `local` |
+| `morning-card` | 매일 08:00 | `run-morning-card.py` — `card_runner.py` 로 아침 카드 프로그램을 돌린다. deliver `local`(카드가 스스로 슬랙에 올리니 hermes 가 배달할 것 없음) |
+| `weekly-card` | 월 09:00 | `run-weekly-card.py` — `card_runner.py` 로 주간 카드 프로그램을 돌린다. deliver `local` |
 | `morning-briefing` | — | 지금 운영 상태로 꺼져 있다(`~/.hermes/cron/jobs.json` 의 `enabled: false`) — 아침 카드가 그 자리를 한다 |
 | `weekly-briefing` | — | 여전히 멈춰 있다(#425) — 주간은 이제 `weekly-card` 가 문에 시켜 올린다. 예전 hermes 크론 래퍼(「Cronjob Response」 머리말과 마크다운 재변환)는 쓰지 않는다 |
 
@@ -70,7 +70,7 @@ make maintenance                     # 지금 한 번 돌린다
 
 | 바꾼 것 | 해야 하는 것 |
 |---|---|
-| Python·훅·hermes 스크립트 | `python3 agents/shared/agent_wiring.py --install --boring-home "$PWD"` |
+| Python·훅·hermes 스크립트 | `uv run --locked --project "$PWD" python agents/shared/agent_wiring.py --install --boring-home "$PWD"` |
 | Rust | `make build` 후 `docker compose up -d` |
 | 둘 다 | 위 둘 다, 순서 무관 |
 
@@ -101,7 +101,7 @@ sh scripts/doctor.sh          # ✗ 가 0개인지
 | 크론 잡이 안 돈다 | `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | **최신 파일의 시각**. 개수는 50에서 회전하므로 신호가 아니다 |
 | 그 파일이 머리말(~155 바이트)뿐이다 | `curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker'` | **유휴인지 고장인지는 여기서 갈린다** (§4) |
 | 브리핑이 안 온다 | `make agent-logs` | hermes 가 스크립트를 찾았는지, 경로가 막혔는지 |
-| 카드가 안 왔다 | `./scripts/schedule-card.sh status` 와 `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | hermes 크론 `morning-card` 의 최신 출력 파일 — 이름이 시각이고, 안의 `[run-morning-card]` 줄이 성패(`ok … posted_ts=` 는 게시, `FAILED` 는 실패). launchd 는 09-28 에 지워 더는 안 찍히고, 출력이 없으면 문 `POST /run/morning-card` 의 응답을 본다 |
+| 카드가 안 왔다 | `./scripts/schedule-card.sh status` 와 `ls -t ~/.hermes/cron/output/<job-id>/ \| head -1` | hermes 크론 `morning-card` 의 최신 출력 파일 — 이름이 시각이고, 안의 `[run-morning-card]` 줄이 성패(`ok … posted_ts=` 는 게시, `FAILED` 는 실패). launchd 는 09-28 에 지워 더는 안 찍히고, 출력이 없으면 `~/.hermes/cron/jobs.json` 의 `morning-card` 항목(script·enabled)을 본다 |
 | 주간 카드가 안 왔다 | `./scripts/schedule-card.sh status weekly` 와 hermes 크론 `weekly-card` 의 최신 출력 | 위와 같다 (`/tmp/com.ohmyboring.weekly-card.log`) |
 | 무엇이 정체돼 있나 | `make doctor` | `readiness_issue` 줄 |
 | 판정 창 상태 | `make peek` | 표본·바닥·판정 (localhost 전용) |
@@ -136,7 +136,7 @@ ls -t ~/.hermes/cron/output/cc33a556631a/ | head -3   # memory-ingest-worker
 
 ```bash
 curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker' \
-  | python3 -c 'import json,sys; [print(e["observed_at"], e["event"], e["status"]) for e in json.load(sys.stdin)["entries"]]'
+  | jq -r '.entries[] | "\(.observed_at) \(.event) \(.status)"'
 ```
 
 응답의 최상위 키는 `entries` 다. `events` 로 읽으면 언제나 빈손이고, 그건 계기가 죽은 것처럼
@@ -155,10 +155,16 @@ tail -20 /tmp/com.ohmyboring.codex-ingest.log
 ```bash
 echo '{"prompt":"어떻게 했더라, 다시 하기 전에","session_id":"probe"}' \
   | BORING_INJECTION_LEDGER=/tmp/probe-ledger.jsonl BORING_EVENT_SINK=spool \
-    RECALL_SESSION_THROTTLE_SECONDS=0 python3 hooks/recall.py
+    RECALL_SESSION_THROTTLE_SECONDS=0 uv run --locked python hooks/recall.py
 ```
 
 끝나면 `/tmp/probe-ledger.jsonl` 을 지운다.
+
+**기록 방식 안내** (차단이 아니라 권유):
+
+- 계약·인계·판정 같은 기록은 로컬 `.md` 파일 대신 `remember` 로 남긴다.
+- 새 판은 `supersedes` 로 앞 판을 가리킨다.
+- `remember` 가 시간 초과로 보이면, 다시 쓰기 전에 볼트에서 제목으로 저장 여부를 본다: `rg -l --no-ignore '<제목 일부>' vault/wiki`.
 
 ---
 

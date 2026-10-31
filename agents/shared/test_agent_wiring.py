@@ -655,7 +655,7 @@ def test_install_codex_host_worker_macos_writes_launch_agent():
         assert str(collector) in text
         assert "<integer>1200</integer>" in text
         assert "CODEX_INCLUDE_ROLLOUTS=1" in text
-        assert "COLLECT_STABLE_AGE_SECONDS=1800" in text
+        assert "COLLECT_STABLE_AGE_SECONDS" not in text
         assert text == agent_wiring._codex_host_worker_plist(str(omb))
 
 

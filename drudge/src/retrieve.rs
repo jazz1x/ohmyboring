@@ -11,7 +11,9 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 
 use crate::llm::Llm;
-use crate::store::{Authorship, Hit, RankFacts, Store};
+use crate::pg_detail::{Staged, stage};
+use crate::store::{Authorship, ConsumptionCounts, Hit, RankFacts, Store};
+use crate::vector::VectorIndex;
 use crate::wiki_recall::WikiHit;
 
 const RRF_K: f64 = 60.0; // RRF denominator constant (de facto standard)
@@ -25,7 +27,7 @@ const FEEDBACK_STEP: f64 = 1.0 / (RRF_K + 1.0) - 1.0 / (RRF_K + 2.0);
 const FEEDBACK_NET_MAX: i64 = 3;
 
 /// Compute an RRF term. rank is 1-based (0 not allowed). Err if usize → f64 conversion fails.
-fn rrf_term(rank: usize) -> Result<f64> {
+pub(crate) fn rrf_term(rank: usize) -> Result<f64> {
     // pool is at most a few hundred — exceeding u32 range is practically impossible, but the type must be the evidence.
     let r = f64::from(u32::try_from(rank).context("rrf rank to u32")?);
     Ok(1.0 / (RRF_K + r))
@@ -55,33 +57,51 @@ fn apply_net(fused: &mut HashMap<String, f64>, byid: &HashMap<String, Hit>, path
     }
 }
 
+/// What a failed verdict-count read does to a retrieval. The caller picks: the door's `/search`
+/// answers 502 `feedback: …`; every other caller keeps ranking without feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackRead {
+    Lenient,
+    Strict,
+}
+
 /// Fold document-level consumption verdicts (`used`/`contested` edges) into the fused RRF
 /// scores: `score += clamp(used − contested, ±FEEDBACK_NET_MAX) × FEEDBACK_STEP`. Runs once per
-/// retrieval, before the single sort, so every caller — `/search`, MCP `recall`, `/ask` + brief,
-/// CLI — ranks with the feedback in. A failed count read is a one-line log and a plain ranking,
-/// never a dead search.
+/// retrieval, before the single sort. A failed count read follows `read`: `Lenient` is a
+/// one-line log and a plain ranking, `Strict` is the failure.
 async fn apply_feedback(
     store: &Store,
     fused: &mut HashMap<String, f64>,
     byid: &HashMap<String, Hit>,
+    read: FeedbackRead,
 ) -> Result<HashMap<String, i64>> {
-    let mut nets: HashMap<String, i64> = HashMap::new();
     let mut paths: Vec<String> = byid.values().map(|h| h.source_path.clone()).collect();
     paths.sort_unstable();
     paths.dedup();
-    let counts = match store.ranking_feedback_counts(&paths).await {
-        Ok(counts) => counts,
-        Err(e) => {
+    let counts = store.ranking_feedback_counts(&paths).await;
+    fold_feedback(counts, read, fused, byid)
+}
+
+fn fold_feedback(
+    counts: Result<HashMap<String, ConsumptionCounts>>,
+    read: FeedbackRead,
+    fused: &mut HashMap<String, f64>,
+    byid: &HashMap<String, Hit>,
+) -> Result<HashMap<String, i64>> {
+    let mut nets: HashMap<String, i64> = HashMap::new();
+    let counts = match (counts, read) {
+        (Ok(counts), _) => counts,
+        (Err(e), FeedbackRead::Strict) => return Err(e),
+        (Err(e), FeedbackRead::Lenient) => {
             eprintln!(
                 "apply_feedback: ranking_feedback_counts failed ({e:#}); ranking without verdict feedback"
             );
             return Ok(nets);
         }
     };
-    for (path, c) in &counts {
-        let net = net_feedback(c.used, c.contested);
-        apply_net(fused, byid, path, net);
-        nets.insert(path.clone(), net);
+    for (path, net) in nets_of(&counts) {
+        apply_net(fused, byid, &path, net);
+        nets.insert(path, net);
     }
     Ok(nets)
 }
@@ -93,9 +113,10 @@ async fn merge_hits(
     vec_hits: Vec<Hit>,
     txt_hits: Vec<Hit>,
     exclude_origins: &[String],
+    read: FeedbackRead,
 ) -> Result<Vec<Scored>> {
     let (mut fused, byid) = fuse_rrf(vec_hits, txt_hits)?;
-    let nets = apply_feedback(store, &mut fused, &byid).await?;
+    let nets = apply_feedback(store, &mut fused, &byid, read).await?;
 
     let mut merged: Vec<Scored> = byid
         .into_values()
@@ -185,7 +206,20 @@ impl InSet for WikiHit {
 
 /// Membership is decided by score first; only then is the returned set ordered by `rank_key`.
 /// A note outside the cut is never pulled in, and a superseded note is demoted, never cut.
-async fn order_within_set<T, F, Fut>(mut set: Vec<T>, lookup: F) -> Result<Vec<T>>
+async fn order_within_set<T, F, Fut>(set: Vec<T>, lookup: F) -> Result<Vec<T>>
+where
+    T: InSet,
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, RankFacts>>>,
+{
+    Ok(order_with_facts(set, lookup).await?.0)
+}
+
+/// `order_within_set`, also returning the facts it read so a caller needs no second lookup.
+async fn order_with_facts<T, F, Fut>(
+    mut set: Vec<T>,
+    lookup: F,
+) -> Result<(Vec<T>, HashMap<String, RankFacts>)>
 where
     T: InSet,
     F: FnOnce(Vec<String>) -> Fut,
@@ -200,12 +234,46 @@ where
             .cmp(&rank_key(facts.get(b.path())))
             .then_with(|| b.score().total_cmp(&a.score()))
     });
-    Ok(set)
+    Ok((set, facts))
 }
 
-/// The wiki recall set, already cut by word overlap, in the same in-set order as `retrieve`.
-pub async fn order_wiki_hits(store: &Store, hits: Vec<WikiHit>) -> Result<Vec<WikiHit>> {
-    order_within_set(hits, |paths| async move { store.rank_facts(&paths).await }).await
+/// The MCP recall's wiki list with the same verdict nets `/search` ranks by: the same count
+/// read (`ranking_feedback_counts`) and the same `net_feedback` clamp, every judge weighted
+/// alike. Applied to the uncut list, before the pool is chosen.
+pub async fn net_ranked_wiki(store: &Store, ranked: Vec<WikiHit>) -> Result<Vec<WikiHit>> {
+    lift_with_counts(ranked, |paths| async move {
+        store.ranking_feedback_counts(&paths).await
+    })
+    .await
+}
+
+async fn lift_with_counts<F, Fut>(ranked: Vec<WikiHit>, lookup: F) -> Result<Vec<WikiHit>>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, ConsumptionCounts>>>,
+{
+    let mut paths: Vec<String> = ranked.iter().map(|h| h.source_path.clone()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    let counts = lookup(paths).await.context("wiki recall: verdict counts")?;
+    Ok(crate::wiki_recall::lift_by_nets(ranked, &nets_of(&counts)))
+}
+
+/// Per-document nets from raw counts — the one place counts become a net, for both paths.
+fn nets_of(counts: &HashMap<String, ConsumptionCounts>) -> HashMap<String, i64> {
+    counts
+        .iter()
+        .map(|(path, c)| (path.clone(), net_feedback(c.used, c.contested)))
+        .collect()
+}
+
+/// The wiki recall set, already cut by word overlap, in the same in-set order as `retrieve`,
+/// with the rank facts it read.
+pub async fn order_wiki_hits(
+    store: &Store,
+    hits: Vec<WikiHit>,
+) -> Result<(Vec<WikiHit>, HashMap<String, RankFacts>)> {
+    order_with_facts(hits, |paths| async move { store.rank_facts(&paths).await }).await
 }
 
 async fn top_k_ranked<F, Fut>(mut merged: Vec<Scored>, top_k: usize, lookup: F) -> Result<Vec<Hit>>
@@ -278,7 +346,14 @@ pub async fn retrieve(
     let txt_hits = store
         .text_search_filtered(query, pool, project, since_hours)
         .await?;
-    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
+    let merged = merge_hits(
+        store,
+        vec_hits,
+        txt_hits,
+        exclude_origins,
+        FeedbackRead::Lenient,
+    )
+    .await?;
     top_k_ranked(merged, top_k, |paths| async move {
         store.rank_facts(&paths).await
     })
@@ -301,22 +376,55 @@ pub async fn retrieve_budget(
     project: Option<&str>,
     since_hours: Option<i32>,
 ) -> Result<Vec<Hit>> {
+    retrieve_budget_staged(
+        store,
+        llm,
+        query,
+        max_results,
+        max_chars,
+        exclude_origins,
+        project,
+        since_hours,
+        FeedbackRead::Lenient,
+    )
+    .await
+    .map_err(|staged| staged.error)
+}
+
+#[allow(clippy::too_many_arguments)] // same surface as `retrieve_budget`.
+/// `retrieve_budget` whose failure says which stage failed — the door's `/search` 502 names it.
+pub async fn retrieve_budget_staged(
+    store: &Store,
+    llm: &Llm,
+    query: &str,
+    max_results: usize,
+    max_chars: usize,
+    exclude_origins: &[String],
+    project: Option<&str>,
+    since_hours: Option<i32>,
+    read: FeedbackRead,
+) -> Result<Vec<Hit>, Staged> {
     if max_results == 0 || max_chars == 0 {
         return Ok(Vec::new());
     }
     let pool = (max_results * 4).max(20);
-    let qe = llm.embed(query).await?;
+    let qe = llm.embed(query).await.map_err(stage("embed"))?;
     let vec_hits = store
         .vector_search_filtered(&qe, pool, project, since_hours)
-        .await?;
+        .await
+        .map_err(stage("vector"))?;
     let txt_hits = store
         .text_search_filtered(query, pool, project, since_hours)
-        .await?;
-    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins).await?;
+        .await
+        .map_err(stage("text"))?;
+    let merged = merge_hits(store, vec_hits, txt_hits, exclude_origins, read)
+        .await
+        .map_err(stage("feedback"))?;
     budget_ranked(merged, max_results, max_chars, |paths| async move {
         store.rank_facts(&paths).await
     })
     .await
+    .map_err(stage("rank_facts"))
 }
 
 #[cfg(test)]
@@ -344,6 +452,16 @@ mod tests {
     }
 
     #[test]
+    fn failed_count_read_follows_the_callers_mode() {
+        let byid = HashMap::new();
+        let down = || Err(anyhow::anyhow!("db down"));
+        let strict = fold_feedback(down(), FeedbackRead::Strict, &mut HashMap::new(), &byid);
+        assert_eq!(strict.unwrap_err().to_string(), "db down");
+        let lenient = fold_feedback(down(), FeedbackRead::Lenient, &mut HashMap::new(), &byid);
+        assert!(lenient.unwrap().is_empty());
+    }
+
+    #[test]
     fn net_feedback_clamps_used_minus_contested() {
         assert_eq!(net_feedback(0, 0), 0);
         assert_eq!(net_feedback(1, 0), 1);
@@ -359,6 +477,71 @@ mod tests {
         assert_eq!(
             FEEDBACK_STEP, step,
             "one 👍 = one rank step in a single list"
+        );
+    }
+
+    fn wiki(n: usize, exact: bool) -> WikiHit {
+        WikiHit {
+            id: format!("wiki-{n}"),
+            title: format!("t{n}"),
+            source_path: format!("/vault/wiki/wiki-{n}.md"),
+            snippet: String::new(),
+            score: f32::from(u8::try_from(10 - n).unwrap()),
+            exact_title: exact,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_wiki_recall_reads_the_same_nets_as_search_and_a_used_note_just_outside_k_enters() {
+        let counts = || -> HashMap<String, ConsumptionCounts> {
+            HashMap::from([
+                (
+                    "/vault/wiki/wiki-2.md".to_owned(),
+                    ConsumptionCounts {
+                        used: 9,
+                        contested: 0,
+                    },
+                ),
+                (
+                    "/vault/wiki/wiki-1.md".to_owned(),
+                    ConsumptionCounts {
+                        used: 0,
+                        contested: 1,
+                    },
+                ),
+            ])
+        };
+        let search_nets = fold_feedback(
+            Ok(counts()),
+            FeedbackRead::Strict,
+            &mut HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(nets_of(&counts()), search_nets, "one count-to-net function");
+        assert_eq!(
+            search_nets["/vault/wiki/wiki-2.md"], 3,
+            "clamped like /search"
+        );
+
+        // exact-title note 0 pinned; 1, 2, 3 by score; k = 2 cuts after the pinned note + one.
+        let ranked = vec![
+            wiki(0, true),
+            wiki(1, false),
+            wiki(2, false),
+            wiki(3, false),
+        ];
+        let plain = crate::wiki_recall::select_for_order(&ranked, 2);
+        assert_eq!(plain[1].id, "wiki-1");
+        let lifted = lift_with_counts(ranked, |_| async { Ok(counts()) })
+            .await
+            .unwrap();
+        let picked = crate::wiki_recall::select_for_order(&lifted, 2);
+        let got: Vec<&str> = picked.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            got,
+            ["wiki-0", "wiki-2"],
+            "pin stays first; net +3 note enters the cut"
         );
     }
 

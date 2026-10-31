@@ -6,33 +6,38 @@ use std::time::SystemTime;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use serde_json::{Value, json};
 
 use crate::serve::owner;
+use crate::serve::search_route;
 
 use crate::ask;
 use crate::audit;
 use crate::graph;
 use std::path::PathBuf;
 
+use crate::pg_detail::{Staged, stage};
 use crate::retrieve;
 use crate::serve::{
     AppError, AppState, AskReq, AskResp, CompactResp, EventIngestResp, EventLogEntry, EventLogReq,
     EventLogResp, GraphReq, GraphResp, HealthResp, MCP_MAX_RESULTS, MCP_MAX_TOKENS, ProjectsResp,
     QueryLogEntry, QueryLogReq, QueryLogResp, RecallLabelEntry, RecallLabelJudgeStats,
     RecallLabelReq, RecallLabelStatsResp, RecallLabelsReq, RecallLabelsResp, RecurrencesReq,
-    RecurrencesResp, RelatedNote, SearchHit, SearchResp, StalledReq, SyncResp, SyncState,
-    count_wiki_notes, recurrences_days, recurrences_limit, register_limit, spawn_query_log,
-    vector_disabled,
+    RecurrencesResp, RelatedNote, SearchHit, StalledReq, SyncResp, SyncState, count_wiki_notes,
+    recurrences_days, recurrences_limit, register_limit, spawn_query_log, vector_disabled,
 };
 use crate::store::{EventLogFilter, LoggedHit, Store};
+use crate::vector::VectorIndex;
 use std::collections::HashSet;
 
 const EVENT_LOG_MAX_LIMIT: i64 = 1000;
 const EVENT_INGEST_MAX_BATCH: usize = 100;
 /// Same cap `ask` uses for graph context — enough of an older note to recognise the thread.
 const RELATED_SNIPPET_CHARS: usize = 1200;
+/// /search is 2: score-1 related were used 1/1,300 (C-RELATED0, 10-27). The briefing keeps 1 for its old reason.
+const SEARCH_RELATED_MIN_SHARED: i64 = 2;
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<HealthResp> {
     // Non-blocking: try_lock reveals whether a sync is mid-flight without ever waiting on it. The
@@ -194,7 +199,7 @@ pub(crate) async fn handle_weekly(
 /// Project status — last 30 days for a single project.
 pub(crate) async fn handle_project_status(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::StatusReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::StatusReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -219,7 +224,7 @@ pub(crate) async fn handle_project_status(
 /// Decision register — recent decision claims.
 pub(crate) async fn handle_decisions(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::DecisionsReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::DecisionsReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -250,7 +255,7 @@ pub(crate) async fn handle_decisions(
 /// Risk register — recent risk/assumption/blocked claims.
 pub(crate) async fn handle_risks(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::RisksReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::RisksReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -281,7 +286,7 @@ pub(crate) async fn handle_risks(
 /// Next-action register — recent `next` claims plus active `blocked` claims.
 pub(crate) async fn handle_next_actions(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::NextActionsReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::NextActionsReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -312,7 +317,7 @@ pub(crate) async fn handle_next_actions(
 /// Stalled register — `next`/`blocked` claims older than N days (default 7).
 pub(crate) async fn handle_stalled(
     State(s): State<AppState>,
-    Json(req): Json<StalledReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<StalledReq>,
 ) -> Result<Json<AskResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -345,7 +350,7 @@ pub(crate) async fn handle_stalled(
 /// from a different note ("the same mistake again"). Rows only, no LLM.
 pub(crate) async fn handle_recurrences(
     State(s): State<AppState>,
-    Json(req): Json<RecurrencesReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<RecurrencesReq>,
 ) -> Result<Json<RecurrencesResp>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
@@ -375,7 +380,7 @@ pub(crate) async fn handle_recurrences(
 /// Uses recency ordering (no vector search), so it works when BORING_VECTOR=off.
 pub(crate) async fn handle_context(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::ContextReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::ContextReq>,
 ) -> Result<Json<ask::ContextCard>, AppError> {
     // Context can be served from the vault even when the vector backend is off, because it only
     // needs current claims by recency. Fall back to an empty card if no store is available.
@@ -404,11 +409,20 @@ pub(crate) async fn handle_context(
 /// Consumption counts beside every hit — `used`/`contested` edges and `superseded_by` (the newer
 /// docs that declared themselves the replacement) and `said_by_owner`, three grouped queries for
 /// the whole response, never one per hit.
-async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), AppError> {
+async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(), Staged> {
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
-    let counts = store.consumption_counts(&paths).await?;
-    let said = store.said_by_owner_counts(&paths).await?;
-    let superseded = store.superseded_by(&paths).await?;
+    let counts = store
+        .consumption_counts(&paths)
+        .await
+        .map_err(stage("consumption"))?;
+    let said = store
+        .said_by_owner_counts(&paths)
+        .await
+        .map_err(stage("said_by_owner"))?;
+    let superseded = store
+        .superseded_by(&paths)
+        .await
+        .map_err(stage("superseded_by"))?;
     for hit in hits.iter_mut() {
         let c = counts.get(&hit.source_path).copied().unwrap_or_default();
         hit.used_count = c.used;
@@ -426,16 +440,16 @@ async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(),
 /// for the whole response, never one per hit. At `0` — absent or explicit — nothing is attached
 /// and no query runs: the response stays byte-identical to what the freeze window measures.
 /// No store (wiki-recall fallback): hits keep empty `claims`, no error — same contract as `related`.
-async fn attach_claims(
-    store: &Store,
-    hits: &mut [SearchHit],
-    per_hit: u32,
-) -> Result<(), AppError> {
+async fn attach_claims(store: &Store, hits: &mut [SearchHit], per_hit: u32) -> Result<(), Staged> {
     if per_hit == 0 {
         return Ok(());
     }
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
-    let declared = store.declared_claims(&paths, i64::from(per_hit)).await?;
+    // /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
+    let declared = store
+        .declared_claims(&paths, i64::from(per_hit))
+        .await
+        .map_err(stage("claims"))?;
     for hit in hits.iter_mut() {
         let rows = declared.get(&hit.source_path);
         hit.claims_total = Some(rows.map_or(0, |r| r.total_matching));
@@ -446,109 +460,76 @@ async fn attach_claims(
     Ok(())
 }
 
-pub(crate) async fn handle_search(
-    State(s): State<AppState>,
-    Json(req): Json<crate::serve::SearchReq>,
-) -> Result<Json<SearchResp>, AppError> {
-    let started = Instant::now();
+/// Everything between "the body parsed and the store exists" and the response rows: retrieval,
+/// the per-hit enrichments and the opt-in related walk. Any failure here is a search failure.
+async fn search_hits(
+    store: &Store,
+    s: &AppState,
+    req: &crate::serve::SearchReq,
+) -> Result<Vec<SearchHit>, String> {
+    search_hits_inner(store, s, req)
+        .await
+        .map_err(|staged| store.door_staged(&staged))
+}
+
+async fn search_hits_inner(
+    store: &Store,
+    s: &AppState,
+    req: &crate::serve::SearchReq,
+) -> Result<Vec<SearchHit>, Staged> {
     let max_results = req.max_results.clamp(1, MCP_MAX_RESULTS);
     let max_tokens = req.max_tokens.clamp(1, MCP_MAX_TOKENS);
     let max_chars = max_tokens.saturating_mul(4);
-    let project = req.project.as_deref();
-    let since_hours = req.since_hours;
-    // vector-first: /search is the external accuracy contract (eval gate). Use the strongest
-    // retriever when available; fall back to direct wiki reads only when vector is off.
-    let related = req.related();
-    let mut mapped: Vec<SearchHit> = if let Some(store) = s.store.as_ref() {
-        retrieve::retrieve_budget(
-            store,
-            &s.llm,
-            &req.query,
-            max_results,
-            max_chars,
-            &[],
-            project,
-            since_hours,
-        )
-        .await?
-        .into_iter()
-        .map(|h| SearchHit {
-            id: h.id,
-            origin: h.origin,
-            project: h.project,
-            source_path: h.source_path,
-            snippet: h.content,
-            dist: Some(h.dist),
-            dist_kind: Some(h.dist_kind),
-            related: Vec::new(),
-            superseded_by: Vec::new(),
-            used_count: 0,
-            contested_count: 0,
-            said_by_owner: 0,
-            claims: Vec::new(),
-            claims_total: None,
-        })
-        .collect()
-    } else {
-        // wiki-recall's WikiHit.score is a term-overlap heuristic (higher-is-better, unbounded) —
-        // a third, incomparable scale on top of vector cosine distance and text ts_rank. Rather than
-        // pretend it fits the same dist/dist_kind contract, this path honestly reports "no comparable
-        // relevance signal" and leaves filtering to the caller's own judgment.
-        s.wiki_recall(&req.query, max_results, project, since_hours)?
-            .into_iter()
-            .map(|h| SearchHit {
-                id: h.id,
-                origin: String::new(),
-                project: String::new(),
-                source_path: h.source_path,
-                snippet: h.snippet,
-                dist: None,
-                dist_kind: None,
-                related: Vec::new(),
-                superseded_by: Vec::new(),
-                used_count: 0,
-                contested_count: 0,
-                said_by_owner: 0,
-                claims: Vec::new(),
-                claims_total: None,
-            })
-            .collect()
-    };
+    // vector-first: /search is the external accuracy contract (eval gate).
+    let mut mapped: Vec<SearchHit> = retrieve::retrieve_budget_staged(
+        store,
+        &s.llm,
+        &req.query,
+        max_results,
+        max_chars,
+        &[],
+        req.project.as_deref(),
+        req.since_hours,
+        // /search is the one caller that fails (502 `feedback: …`) when the verdict-count read fails.
+        retrieve::FeedbackRead::Strict,
+    )
+    .await?
+    .into_iter()
+    .map(|h| SearchHit {
+        id: h.id,
+        origin: h.origin,
+        project: h.project,
+        source_path: h.source_path,
+        snippet: h.content,
+        dist: Some(h.dist),
+        dist_kind: Some(h.dist_kind),
+        related: Vec::new(),
+        superseded_by: Vec::new(),
+        used_count: 0,
+        contested_count: 0,
+        said_by_owner: 0,
+        claims: Vec::new(),
+        claims_total: None,
+    })
+    .collect();
     // Graph-backed enrichments beside every hit — one grouped query each (consumption counts,
-    // and the opt-in claims handover). Both no-op where the graph cannot speak: no store, or `claims=0` — the §5-R6 frozen shape.
-    if let Some(store) = s.store.as_ref() {
-        attach_consumption(store, &mut mapped).await?;
-        attach_claims(store, &mut mapped, req.claims()).await?;
-    }
-    // Opt-in handover: name the session and everything /search just showed is recorded as handed
-    // to it (`session:<id>` -[handed]-> doc) — the write side of the feedback door. A failure
-    // must never fail the search: a lost handover only means a later bare verdict has nothing
-    // to apply to.
-    if let Some(session_id) = req.session_id()
-        && let Some(store) = s.store.as_ref()
-    {
-        let paths: Vec<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
-        let observed_at = chrono::Utc::now().to_rfc3339();
-        if let Err(error) = store
-            .record_handover(session_id, &observed_at, &paths)
-            .await
-        {
-            eprintln!("[search] handover for session {session_id} failed: {error:#}");
-        }
-    }
+    // and the opt-in claims handover). `claims=0` is the §5-R6 frozen shape: no query runs.
+    attach_consumption(store, &mut mapped).await?;
+    attach_claims(store, &mut mapped, req.claims()).await?;
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
     // shared nodes between recent notes are almost all `tool:*`, so the node walk links everything
-    // to everything. No store (wiki-recall fallback): hits keep empty `related`, no error.
-    if related > 0
-        && let Some(store) = s.store.as_ref()
-    {
+    // to everything.
+    let related = req.related();
+    if related > 0 {
         let mut seen: HashSet<String> = mapped.iter().map(|h| h.source_path.clone()).collect();
+        // `related()` clamps to 0..=3, so the conversion cannot wrap.
+        let per_head = i64::try_from(related).unwrap_or(3);
         for hit in mapped.iter_mut().take(req.related_heads(max_results)) {
             for older in store
-                // `related()` clamps to 0..=3, so the conversion cannot wrap.
-                .related_by_shared_ground(&hit.source_path, i64::try_from(related).unwrap_or(3))
-                .await?
+                .related_by_shared_ground(&hit.source_path, per_head, SEARCH_RELATED_MIN_SHARED)
+                .await
+                .map_err(stage("related"))?
             {
                 if !seen.insert(older.source_path.clone()) {
                     continue;
@@ -560,52 +541,106 @@ pub(crate) async fn handle_search(
             }
         }
     }
-    log_search_query(&s, &req, &mapped, started);
-    Ok(Json(SearchResp { hits: mapped }))
+    Ok(mapped)
 }
 
-/// Query-log row for a finished /search: one line per hit, best snippet as the answer preview.
-fn log_search_query(
-    s: &AppState,
+/// 502 body of the read routes. Field order is the wire order (`error` then `detail`, the door's
+/// JSONResponse); `json!` sorts keys, so the order lives in this struct.
+#[derive(serde::Serialize)]
+struct StoreUnreachable {
+    error: &'static str,
+    detail: String,
+}
+
+impl StoreUnreachable {
+    fn of(store: &Store, e: &anyhow::Error) -> Self {
+        Self {
+            error: "store unreachable",
+            detail: store.door_detail(e),
+        }
+    }
+}
+
+/// POST /search — answers like the Python door (`_search`): the body is parsed once at the
+/// boundary (400), no store is 503, a failed search or handover is 502, and the query_log row is
+/// written before the response and only for a search that fully succeeded.
+pub(crate) async fn handle_search(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    match search_route::parse_search_body(&body) {
+        Err(message) => search_route::error_response(StatusCode::BAD_REQUEST, &message),
+        Ok(req) => match s.store.as_deref() {
+            None => search_route::error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "store not configured",
+            ),
+            Some(store) => run_search(&s, store, &req).await,
+        },
+    }
+}
+
+async fn run_search(s: &AppState, store: &Store, req: &crate::serve::SearchReq) -> Response {
+    let started = Instant::now();
+    let outcome = search_route::search_flow(
+        req.session_id(),
+        search_hits(store, s, req),
+        // Opt-in handover: everything /search just showed is recorded as handed to the session —
+        // the write side of the feedback door. A failure fails the request (the door's 502).
+        |session, paths| async move {
+            let observed_at = chrono::Utc::now().to_rfc3339();
+            store
+                .handover_in_tx(&session, &observed_at, &paths)
+                .await
+                .map(|_| ())
+                .map_err(|e| store.door_detail(&e))
+        },
+        |row| write_search_log(store, req, row, started),
+    )
+    .await;
+    match outcome {
+        Ok(hits) => search_route::search_ok_response(hits),
+        Err(failure) => search_route::error_response(StatusCode::BAD_GATEWAY, &failure.message()),
+    }
+}
+
+/// The query_log row, awaited before the response. A logging failure is reported on stderr and
+/// does not fail the search, the way the door's `_search_log_query` does.
+async fn write_search_log(
+    store: &Store,
     req: &crate::serve::SearchReq,
-    mapped: &[SearchHit],
+    row: search_route::LogRow,
     started: Instant,
 ) {
-    let hits: Vec<LoggedHit> = mapped
-        .iter()
-        .map(|h| match (h.dist, h.dist_kind) {
-            (Some(dist), Some(kind)) => LoggedHit::with_distance(h.source_path.clone(), dist, kind),
-            _ => LoggedHit::without_distance(h.source_path.clone()),
-        })
-        .collect();
-    spawn_query_log(
-        s.store.clone(),
-        "search",
-        req.query.clone(),
-        hits,
-        vec![],
-        mapped
-            .first()
-            .map(|h| h.snippet.chars().take(200).collect())
-            .unwrap_or_default(),
-        started.elapsed(),
-    );
+    let latency_ms = i32::try_from(started.elapsed().as_millis()).ok();
+    if let Err(e) = store
+        .log_query(
+            "search",
+            &req.query,
+            &row.hits,
+            &[],
+            &row.answer_snippet,
+            latency_ms,
+        )
+        .await
+    {
+        eprintln!("[query_log] {e:#}");
+    }
 }
 
-pub(crate) async fn handle_consumption(
-    State(s): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<crate::serve::ConsumptionReq>,
-) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
-    let judge = crate::serve::validate_consumption_req(&req)?;
-    let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
-    let standing = owner::standing(caller, judge == Some(crate::frontmatter::Author::Owner))
-        .map_err(AppError::bad_request)?;
-    let judge = judge.and_then(|j| j.as_judge());
-    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+/// One `/consumption` request = one transaction: the owner-authored lookup, the bare-verdict
+/// `handed_paths` read and the verdict write all run on the same handle. `refused` is filled as
+/// soon as it is read so the caller can record the refusal after the handle is released, whether
+/// the transaction commits or rolls back. Returns the report and the pairs that were kept.
+async fn consume_in_tx(
+    store: &crate::store::Store,
+    req: &crate::serve::ConsumptionReq,
+    standing: owner::Standing,
+    judge: Option<&str>,
+    refused: &mut Vec<String>,
+) -> anyhow::Result<(crate::store::ConsumptionReport, Vec<[String; 2]>)> {
+    use crate::store::Store;
+    let mut conn = store.conn().await?;
+    let tx = conn.transaction().await?;
     let old_paths: Vec<String> = req.supersedes.iter().map(|[_, old]| old.clone()).collect();
-    let refused =
-        owner::refused_supersedes(Some(store), standing, &old_paths, "consumption").await?;
+    *refused = owner::refused_supersedes(&tx, standing, &old_paths).await?;
     let kept_pairs: Vec<[String; 2]> = req
         .supersedes
         .iter()
@@ -617,37 +652,64 @@ pub(crate) async fn handle_consumption(
     // nothing: empty verdict list, normal response — not an error.
     let report = match req.verdict() {
         Some(verdict) => {
-            let handed = store.handed_paths(&req.session_id).await?;
+            let handed = Store::handed_paths(&tx, &req.session_id).await?;
             let empty: Vec<String> = Vec::new();
             let (used, contested) = if verdict == "used" {
                 (&handed, &empty)
             } else {
                 (&empty, &handed)
             };
-            store
-                .record_consumption(
-                    &req.session_id,
-                    &req.observed_at,
-                    used,
-                    contested,
-                    &kept_pairs,
-                    judge.as_deref(),
-                )
-                .await?
+            Store::record_consumption(
+                &tx,
+                &req.session_id,
+                &req.observed_at,
+                used,
+                contested,
+                &kept_pairs,
+                judge,
+            )
+            .await?
         }
         None => {
-            store
-                .record_consumption(
-                    &req.session_id,
-                    &req.observed_at,
-                    &req.used,
-                    &req.contested,
-                    &kept_pairs,
-                    judge.as_deref(),
-                )
-                .await?
+            Store::record_consumption(
+                &tx,
+                &req.session_id,
+                &req.observed_at,
+                &req.used,
+                &req.contested,
+                &kept_pairs,
+                judge,
+            )
+            .await?
         }
     };
+    tx.commit().await?;
+    store
+        .mirror_surreal(
+            &crate::store::Scope::notes(kept_pairs.iter().flatten().cloned())
+                .with_nodes([format!("session:{}", req.session_id)]),
+        )
+        .await?;
+    Ok((report, kept_pairs))
+}
+
+pub(crate) async fn handle_consumption(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::ConsumptionReq>,
+) -> Result<Json<crate::serve::ConsumptionResp>, AppError> {
+    let judge = crate::serve::validate_consumption_req(&req)?;
+    let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
+    let standing = owner::standing(caller, judge == Some(crate::frontmatter::Author::Owner))
+        .map_err(AppError::bad_request)?;
+    let judge = judge.and_then(|j| j.to_judge());
+    let store = s.store.as_ref().ok_or_else(vector_disabled)?;
+    let mut refused: Vec<String> = Vec::new();
+    let outcome = consume_in_tx(store, &req, standing, judge.as_deref(), &mut refused).await;
+    // The transaction handle is gone here, committed or rolled back: the refusal event is its
+    // own fact and stands either way.
+    owner::record_supersede_refusals(Some(store), &refused, "consumption").await;
+    let (report, kept_pairs) = outcome?;
     Ok(Json(crate::serve::ConsumptionResp {
         session: format!("session:{}", req.session_id),
         used: report.used,
@@ -660,12 +722,12 @@ pub(crate) async fn handle_consumption(
 
 pub(crate) async fn handle_handover(
     State(s): State<AppState>,
-    Json(req): Json<crate::serve::HandoverReq>,
+    crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::HandoverReq>,
 ) -> Result<Json<crate::serve::HandoverResp>, AppError> {
     crate::serve::validate_handover_req(&req)?;
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let report = store
-        .record_handover(&req.session_id, &req.observed_at, &req.paths)
+        .handover_in_tx(&req.session_id, &req.observed_at, &req.paths)
         .await?;
     Ok(Json(crate::serve::HandoverResp {
         session: format!("session:{}", req.session_id),
@@ -687,11 +749,11 @@ pub(crate) async fn handle_remember(
     let caller = owner::Caller::from_headers((*s.owner_token).as_deref(), &headers);
     let remembered = crate::serve::mcp::remember_note(&s, caller, Some(&req))
         .await
-        .map_err(|(code, msg)| {
-            if code == -32602 {
-                AppError::bad_request(msg)
+        .map_err(|e| {
+            if e.code == -32602 {
+                AppError::bad_request(e.message)
             } else {
-                AppError::from(anyhow::anyhow!(msg))
+                AppError::from(anyhow::anyhow!(e.message))
             }
         })?;
     Ok(Json(crate::serve::RememberResp {
@@ -905,13 +967,400 @@ pub(crate) async fn handle_recall_labels(
 ///
 /// Read-only and unfiltered on purpose: the caller is asking "is this string a project we know",
 /// and a filtered answer would make a real project look invented.
-pub(crate) async fn handle_projects(
-    State(s): State<AppState>,
-) -> Result<Json<ProjectsResp>, AppError> {
+async fn project_names_response(s: &AppState) -> Result<Json<ProjectsResp>, AppError> {
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     Ok(Json(ProjectsResp {
         projects: store.project_names().await?,
     }))
+}
+
+/// `GET /projects` — same wire as the Python door's `_projects`. The query is parsed once; no
+/// `active_days` key keeps the plain name list. With `active_days`: 400 `{error}` (checked before
+/// the store), 503 without a store, 502 `{error, detail}` when it can't be reached, else 200.
+pub(crate) async fn handle_projects(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::projects::ProjectsQuery;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    match crate::projects::parse_query(uri.query()) {
+        ProjectsQuery::Names => project_names_response(&s).await.into_response(),
+        ProjectsQuery::Rejected(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+        }
+        ProjectsQuery::ActiveDays(days) => {
+            let Some(store) = s.store.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "store not configured"})),
+                )
+                    .into_response();
+            };
+            match store.active_project_counts(days).await {
+                Ok(rows) => Json(crate::projects::active_payload(rows, days)).into_response(),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(StoreUnreachable::of(store, &e)),
+                )
+                    .into_response(),
+            }
+        }
+    }
+}
+
+/// The owner's standing corrections, grouped for the trigger hook — same wire as the Python
+/// door's `GET /rules`: 503 without a store, 502 `{error, detail}` when it can't be reached.
+pub(crate) async fn handle_rules(State(s): State<AppState>) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.rule_rows().await {
+        Ok(rows) => Json(crate::rules::group_rules(rows)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
+/// A subject's current claim — same wire as the Python door's `GET /claim-source`: 400 for a
+/// blank or NUL-bearing subject (checked before the store), 503 without a store, 502
+/// `{error, detail}` when it can't be reached, 404 when no claim is current.
+pub(crate) async fn handle_claim_source(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::claim_source::{SubjectCheck, check_subject, pick_current};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let subject = match check_subject(uri.query()) {
+        SubjectCheck::Blank => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "subject query param is required"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Nul => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "subject must not contain NUL"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Valid(subject) => subject,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.claim_source_rows(&subject).await {
+        Ok(rows) => match pick_current(&subject, rows) {
+            Some(found) => Json(found).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no current claim for subject"})),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
+/// Every subject's current claim under one predicate — same wire as the Python door's
+/// `GET /claim-sources`: 400 for a blank or NUL-bearing predicate (checked before the store),
+/// 503 without a store, 502 `{error, detail}` when it can't be reached, 200 even with no rows.
+pub(crate) async fn handle_claim_sources(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::claim_source::{SubjectCheck, check_param, group_current};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let predicate = match check_param(uri.query(), "predicate") {
+        SubjectCheck::Blank => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "predicate query param is required"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Nul => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "predicate must not contain NUL"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Valid(predicate) => predicate,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.claim_source_list_rows(&predicate).await {
+        Ok(rows) => Json(group_current(&predicate, rows)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
+/// What each current claim of one note replaced: 400 for a blank or NUL-bearing `source`
+/// (checked before the store), 503 without a store, 502 `{error, detail}` when it can't be
+/// reached, 200 even when the note has no claims.
+pub(crate) async fn handle_claim_priors(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use crate::claim_priors::ClaimPriors;
+    use crate::claim_source::{SubjectCheck, check_param};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let source = match check_param(uri.query(), "source") {
+        SubjectCheck::Blank => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "source query param is required"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Nul => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "source must not contain NUL"})),
+            )
+                .into_response();
+        }
+        SubjectCheck::Valid(source) => source,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.claim_priors(&source).await {
+        Ok(claims) => Json(ClaimPriors { source, claims }).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
+fn json_response(status: StatusCode, body: Value) -> Response {
+    use axum::response::IntoResponse;
+    (status, Json(body)).into_response()
+}
+
+fn no_store() -> Response {
+    json_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"error": "store not configured"}),
+    )
+}
+
+fn store_unreachable(e: &anyhow::Error) -> Response {
+    json_response(
+        StatusCode::BAD_GATEWAY,
+        json!({"error": "store unreachable", "detail": format!("{e:#}")}),
+    )
+}
+
+/// `GET /repairs/split-subjects` — same wire as the Python door: 400 for a bad `limit` (before the
+/// store), 503 without a store, 502 `{error, detail}` when it can't be reached, else 200.
+pub(crate) async fn handle_split_subjects(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> Response {
+    use axum::response::IntoResponse;
+    let limit = match crate::split_subjects::parse_limit(uri.query()) {
+        Ok(limit) => limit,
+        Err(message) => return json_response(StatusCode::BAD_REQUEST, json!({"error": message})),
+    };
+    let Some(store) = s.store.as_ref() else {
+        return no_store();
+    };
+    match store.split_subject_rows().await {
+        Ok(rows) => {
+            let groups = crate::split_subjects::group_split_subjects(&rows);
+            Json(crate::split_subjects::page(groups, limit)).into_response()
+        }
+        Err(e) => store_unreachable(&e),
+    }
+}
+
+/// `GET /repairs/split-subjects/samples` — 400 unless 1..=10 non-blank `variant`s, 503 without a
+/// store, 502 when it can't be reached. A NUL in a variant is what the Python door crashes on
+/// (psycopg refuses the string): its bare 500 text is kept so the bytes stay the same.
+pub(crate) async fn handle_split_samples(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> Response {
+    use crate::split_subjects::{Samples, VARIANT_ERROR, Variants, parse_variants};
+    use axum::response::IntoResponse;
+    let variants = match parse_variants(uri.query()) {
+        Variants::Valid(variants) => variants,
+        Variants::WrongCount => {
+            return json_response(StatusCode::BAD_REQUEST, json!({"error": VARIANT_ERROR}));
+        }
+        Variants::Nul => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                "Internal Server Error",
+            )
+                .into_response();
+        }
+    };
+    let Some(store) = s.store.as_ref() else {
+        return no_store();
+    };
+    match store.split_samples(&variants).await {
+        Ok(samples) => Json(Samples { samples }).into_response(),
+        Err(e) => store_unreachable(&e),
+    }
+}
+
+/// `POST /repairs/split-subjects` — same wire as the Python door minus what the door adds: 400 for a
+/// body that is not JSON or has no usable `subject`, 503 without a store, 404 when no group has
+/// that subject, 502 when the store fails, else 202. Only the owner token keeps the owner's own
+/// notes in the merge; the `row` the door validates is none of the engine's business.
+pub(crate) async fn handle_split_merge(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use axum::response::IntoResponse;
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "body must be JSON"}),
+        );
+    };
+    let subject = match crate::split_subjects::parse_subject(&body) {
+        crate::split_subjects::Subject::Missing => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "subject is required"}),
+            );
+        }
+        crate::split_subjects::Subject::Text(text) => Some(text),
+        crate::split_subjects::Subject::NotText => None,
+    };
+    let Some(store) = s.store.as_ref() else {
+        return no_store();
+    };
+    let Some(subject) = subject else {
+        return no_group();
+    };
+    let standing = match owner::Caller::from_headers((*s.owner_token).as_deref(), &headers) {
+        owner::Caller::Owner => owner::Standing::Owner,
+        owner::Caller::Unverified => owner::Standing::NotOwner,
+    };
+    match store.merge_split_subject(&subject, standing).await {
+        Ok(Some(merged)) => (StatusCode::ACCEPTED, Json(merged)).into_response(),
+        Ok(None) => no_group(),
+        Err(e) => store_unreachable(&e),
+    }
+}
+
+/// `POST /gap` — same wire as the Python door: 400 for a body that is no JSON object or fails the
+/// gap boundary, 503 without a store, 502 `{error: "gap failed: …"}` when the write fails, else
+/// 200 `{gap, kind, handed, unknown}`.
+pub(crate) async fn handle_gap(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    use crate::serve::mcp::{GapFault, record_gap};
+    use axum::response::IntoResponse;
+    let Ok(Value::Object(arguments)) = serde_json::from_slice::<Value>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "body must be a JSON object"}),
+        );
+    };
+    match record_gap(&s, &arguments).await {
+        Ok(report) => Json(report).into_response(),
+        Err(GapFault::Rejected(message)) => {
+            json_response(StatusCode::BAD_REQUEST, json!({"error": message}))
+        }
+        Err(GapFault::NoStore) => no_store(),
+        Err(GapFault::Failed(message)) => {
+            json_response(StatusCode::BAD_GATEWAY, json!({"error": message}))
+        }
+    }
+}
+
+fn no_group() -> Response {
+    json_response(
+        StatusCode::NOT_FOUND,
+        json!({"error": "no split-subject group for that subject"}),
+    )
+}
+
+/// What the card sessions approved or contested — same wire as the Python door's `GET /approved`:
+/// 400 `{error}` for a bad `since_hours` (checked before the store), 503 without a store, 502
+/// `{error, detail}` when it can't be reached, else 200. Skipped rows are logged, only counted on the wire.
+pub(crate) async fn handle_approved(
+    State(s): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let since_hours = match crate::approved::check_since_hours(uri.query()) {
+        Ok(hours) => hours,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response();
+        }
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.approved_edges().await {
+        Ok(rows) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+            let selection = crate::approved::select_approved(&rows, since_hours, now);
+            for item in &selection.skipped {
+                eprintln!("[approved] skipped {}: {}", item.session, item.reason);
+            }
+            Json(selection.payload).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
 }
 
 /// Per-judge counts, per-judge precision, and llm/human agreement over hits both decided.
@@ -1031,6 +1480,7 @@ pub(crate) async fn handle_compact(
         gc_concept: summary.report.gc_concept,
         gc_claim_nodes: summary.report.gc_claim_nodes,
         gc_claim_edges: summary.report.gc_claim_edges,
+        skipped_lock_timeout: summary.report.skipped_lock_timeout,
         total_ms: summary.total_ms,
     }))
 }
@@ -1164,6 +1614,66 @@ mod tests {
             !without.contains("\"claims\":") && !without.contains("claims_total"),
             "the frozen response carries no claim payload: {without}"
         );
+        assert_fact_only_note_gets_a_claim(&store).await;
+
+        store.delete_document(&path).await.expect("cleanup");
+    }
+
+    /// C-DSHAPE2: a note whose only live claim is a `fact` still gets a claim line on /search,
+    /// and attaching claims leaves the hit itself (path, id) as it was.
+    /// Called from the freeze test below, which already owns the one store a parallel run may
+    /// open (two `Store::open` at once deadlock on the schema DDL).
+    async fn assert_fact_only_note_gets_a_claim(store: &super::Store) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!("/vault/wiki/fact-only-{ts}.md");
+        let (subject, predicate) = (format!("fact-subject-{ts}"), "stack".to_owned());
+        let front = crate::frontmatter::FrontMatter {
+            origin: "personal".to_owned(),
+            project: format!("fact-project-{ts}"),
+            kind: "note".to_owned(),
+            source_path: path.clone(),
+            ..Default::default()
+        };
+        store
+            .upsert_document(&front, "sha-fact-only", std::time::SystemTime::now())
+            .await
+            .expect("upsert document");
+        let claim = crate::frontmatter::Claim {
+            subject: subject.clone(),
+            predicate: predicate.clone(),
+            value: "runs on pgvector".to_owned(),
+            kind: "fact".to_owned(),
+            confidence: "high".to_owned(),
+            said_by: None,
+        };
+        let embedding = vec![0.0_f32; 1024];
+        let now = std::time::SystemTime::now();
+        store
+            .upsert_claim(
+                &subject,
+                &predicate,
+                &claim.value,
+                &path,
+                now,
+                &embedding,
+                "fact",
+                "high",
+            )
+            .await
+            .expect("upsert claim");
+        store
+            .upsert_claim_node(&path, &front.project, &subject, &predicate, &claim)
+            .await
+            .expect("upsert claim node");
+
+        let body = search_response(store, r#"{"query":"x","claims":1}"#, &path).await;
+        let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(resp["hits"][0]["source_path"], path.as_str());
+        assert_eq!(resp["hits"][0]["claims"][0]["kind"], "fact", "{body}");
+        assert_eq!(resp["hits"][0]["claims_total"], 1);
 
         store.delete_document(&path).await.expect("cleanup");
     }

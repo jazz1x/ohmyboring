@@ -6,8 +6,9 @@
 //!     migration (`prune_skipped` event).
 //!   - **Graph is deterministic** (kernel A): semantic nodes/edges (tool·concept·claim) come from the
 //!     note's frontmatter — agent-curated — NOT from an LLM extraction pass. drudge only embeds (bge-m3)
-//!     and links. `ingest_file` is the SSOT per-file pipeline shared by `run` (walk) and `remember` (one file).
-use anyhow::Result;
+//!     and links. `ingest_steps` is the SSOT per-file pipeline shared by `run` (walk) and `remember` (one file).
+use anyhow::{Context, Result};
+use deadpool_postgres::Transaction;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -114,10 +115,13 @@ impl Embed for Llm {
 // ─────────────────────────────────────────────────────────────
 
 /// Strategy for extracting the semantic graph (tools/concepts/claims) from a parsed note.
+/// Writes go through `tx`, the file's transaction — `store` only lends its dimension guard.
 pub trait GraphExtractor: Send + Sync + Default {
+    #[allow(clippy::too_many_arguments)]
     fn extract<'a, E: Embed>(
         &'a self,
         store: &'a Store,
+        tx: &'a Transaction<'_>,
         llm: &'a E,
         cfg: &'a config::BoringConfig,
         front: &'a FrontMatter,
@@ -161,6 +165,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
     async fn extract<E: Embed>(
         &self,
         store: &Store,
+        tx: &Transaction<'_>,
         llm: &E,
         cfg: &config::BoringConfig,
         front: &FrontMatter,
@@ -168,38 +173,23 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         stats: &mut Stats,
     ) -> Result<()> {
         let path = &front.source_path;
-        store.clear_semantic_edges(path).await?;
+        Store::clear_semantic_edges_on(tx, path).await?;
 
+        // Rows shared between notes (tool, concept, claim and speaker nodes) are locked in one
+        // order for every file — tools, concepts, speaker, then claims by slot, each sorted — so
+        // two files in flight wait on each other instead of deadlocking.
         // tool nodes + uses edges (Han drift filter + slug dedup + cap)
-        let mut seen_tool = HashSet::new();
-        for t in front.tools.iter().take(self.cap) {
-            let t = t.trim();
-            if t.is_empty() || has_han(t) {
-                continue;
-            }
-            let slug = slugify(t);
-            if slug.is_empty() || !seen_tool.insert(slug.clone()) {
-                continue;
-            }
-            store.upsert_tool(&slug, t).await?;
-            store.relate_doc_tool(path, &slug).await?;
+        for (slug, t) in named_slugs(&front.tools, self.cap) {
+            Store::upsert_tool_on(tx, &slug, t).await?;
+            Store::relate_doc_tool_on(tx, path, &slug).await?;
             stats.tools += 1;
             stats.edges += 1;
         }
 
         // concept nodes + about edges
-        let mut seen_concept = HashSet::new();
-        for c in front.concepts.iter().take(self.cap) {
-            let c = c.trim();
-            if c.is_empty() || has_han(c) {
-                continue;
-            }
-            let slug = slugify(c);
-            if slug.is_empty() || !seen_concept.insert(slug.clone()) {
-                continue;
-            }
-            store.upsert_concept(&slug, c).await?;
-            store.relate_doc_concept(path, &slug).await?;
+        for (slug, c) in named_slugs(&front.concepts, self.cap) {
+            Store::upsert_concept_on(tx, &slug, c).await?;
+            Store::relate_doc_concept_on(tx, path, &slug).await?;
             stats.concepts += 1;
             stats.edges += 1;
         }
@@ -207,24 +197,15 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         // temporal-fact claims — (subject,predicate)→value, a new value supersedes the old.
         // valid_from = document mtime (chronological ordering). value embedding via bge-m3 (no generation).
         if !front.claims.is_empty() {
-            let valid_from = store.doc_updated_at(path).await?;
+            let valid_from = Store::doc_updated_at_on(tx, path).await?;
             let note_anchors = if front.project.is_empty() {
                 Vec::new()
             } else {
                 crate::anchor::from_note_body(&front.project, body)
             };
-            for cl in &front.claims {
-                let subject = canon(&cl.subject);
-                let predicate = canon(&cl.predicate);
+            lock_speaker_node(tx, front).await?;
+            for ((subject, predicate), cl) in sorted_claims(front) {
                 let value = cl.value.trim();
-                if subject.is_empty()
-                    || predicate.is_empty()
-                    || value.is_empty()
-                    || has_han(&subject)
-                    || has_han(value)
-                {
-                    continue;
-                }
                 let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
                 let anchor_db = anchor.as_ref().map(crate::anchor::Anchor::to_db_string);
                 // Nothing changed for this axis, so there is nothing to embed and nothing to
@@ -233,17 +214,17 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                 // row. Leaving the existing row alone also keeps its `valid_from`, which is
                 // the first time this value was true rather than the last time the note was
                 // touched — the more honest of the two.
-                if store
-                    .claim_is_unchanged(
-                        &subject,
-                        &predicate,
-                        value,
-                        path,
-                        cl.kind(),
-                        cl.confidence(),
-                        anchor_db.as_deref(),
-                    )
-                    .await?
+                if Store::claim_is_unchanged_on(
+                    tx,
+                    &subject,
+                    &predicate,
+                    value,
+                    path,
+                    cl.kind(),
+                    cl.confidence(),
+                    anchor_db.as_deref(),
+                )
+                .await?
                 {
                     stats.claims_unchanged += 1;
                 } else {
@@ -252,7 +233,8 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         crate::anchor_hash::hash_for_anchor(a, &cfg.code_index.sources)
                     });
                     store
-                        .upsert_claim_with_anchor(
+                        .upsert_claim_with_anchor_on(
+                            tx,
                             &subject,
                             &predicate,
                             value,
@@ -268,16 +250,88 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         .await?;
                     stats.claims += 1;
                 }
-                store
-                    .mirror_claim_said_by(&subject, &predicate, path, cl.said_by)
-                    .await?;
-                stats.edges += store
-                    .upsert_claim_node(path, &front.project, &subject, &predicate, cl)
-                    .await?;
+                Store::mirror_claim_said_by_on(tx, &subject, &predicate, path, cl.said_by).await?;
+                stats.edges +=
+                    Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl)
+                        .await?;
             }
         }
         Ok(())
     }
+}
+
+/// Canonical `(subject, predicate)` of a claim the graph may hold; `None` for one it skips.
+fn claim_key(cl: &frontmatter::Claim) -> Option<(String, String)> {
+    let subject = canon(&cl.subject);
+    let predicate = canon(&cl.predicate);
+    let value = cl.value.trim();
+    let skip = subject.is_empty()
+        || predicate.is_empty()
+        || value.is_empty()
+        || has_han(&subject)
+        || has_han(value);
+    (!skip).then_some((subject, predicate))
+}
+
+/// The claims the graph holds, as `((subject, predicate), claim)`, in slot order — the order
+/// every file takes its claim rows in.
+fn sorted_claims(front: &FrontMatter) -> Vec<((String, String), &frontmatter::Claim)> {
+    let mut keyed: Vec<_> = front
+        .claims
+        .iter()
+        .filter_map(|cl| claim_key(cl).map(|key| (key, cl)))
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    keyed
+}
+
+/// Up to `cap` names with a usable slug, one per slug (the first spelling wins), in slug order.
+/// Han-script names are drift the graph drops.
+fn named_slugs(names: &[String], cap: usize) -> Vec<(String, &str)> {
+    let mut seen = HashSet::new();
+    let mut picked = Vec::new();
+    for name in names.iter().take(cap) {
+        let name = name.trim();
+        if name.is_empty() || has_han(name) {
+            continue;
+        }
+        let slug = slugify(name);
+        if slug.is_empty() || !seen.insert(slug.clone()) {
+            continue;
+        }
+        picked.push((slug, name));
+    }
+    picked.sort_by(|a, b| a.0.cmp(&b.0));
+    picked
+}
+
+/// Take the speaker node before the first claim, not at whichever claim names a speaker: the node
+/// is shared by every note with a `said_by`, so its place in the lock order must be the same in all.
+async fn lock_speaker_node(tx: &Transaction<'_>, front: &FrontMatter) -> Result<()> {
+    let speaker = sorted_claims(front)
+        .into_iter()
+        .find_map(|(_, cl)| cl.said_by);
+    match speaker {
+        Some(said_by) => Store::upsert_speaker_on(tx, said_by).await.map(|_| ()),
+        None => Ok(()),
+    }
+}
+
+/// Heal for an unchanged note: write only the claim nodes/edges that are missing (#360).
+/// Insert-only (`ON CONFLICT DO NOTHING`) — existing edges are never deleted, so their
+/// `first_seen_at` survives; no embedding, no claim-row write.
+async fn heal_claim_edges(
+    tx: &Transaction<'_>,
+    front: &FrontMatter,
+    stats: &mut Stats,
+) -> Result<()> {
+    let path = &front.source_path;
+    lock_speaker_node(tx, front).await?;
+    for ((subject, predicate), cl) in sorted_claims(front) {
+        stats.edges +=
+            Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -301,17 +355,119 @@ pub struct Stats {
     pub edges: usize,
 }
 
-/// Per-file ingest verdict — what `ingest_file` did with one note.
+impl Stats {
+    /// Fold one file's counts into the run total. Every field is destructured so a new counter
+    /// that is not summed here fails to compile instead of silently reading 0.
+    pub fn absorb(&mut self, other: &Self) {
+        let Self {
+            scanned,
+            new,
+            updated,
+            unchanged,
+            deleted,
+            kept_vanished,
+            skipped,
+            failed,
+            repaired,
+            chunks,
+            tools,
+            concepts,
+            claims,
+            claims_unchanged,
+            edges,
+        } = *other;
+        self.scanned += scanned;
+        self.new += new;
+        self.updated += updated;
+        self.unchanged += unchanged;
+        self.deleted += deleted;
+        self.kept_vanished += kept_vanished;
+        self.skipped += skipped;
+        self.failed += failed;
+        self.repaired += repaired;
+        self.chunks += chunks;
+        self.tools += tools;
+        self.concepts += concepts;
+        self.claims += claims;
+        self.claims_unchanged += claims_unchanged;
+        self.edges += edges;
+    }
+}
+
+/// Per-file ingest verdict — what `ingest_steps` did with one note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileOutcome {
     New,
     Updated,
     Unchanged,
+    /// Content unchanged, only the stored `document.sha` moved (old whole-file sha → content hash).
+    ShaMoved,
     Skipped,
 }
 
 fn sha256(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
+}
+
+/// Frontmatter keys the engine rewrites itself (`project_links`), so they are not a content change.
+/// Same set as the Python sync (`src/ohmyboring/sync/hash.py` DERIVED_KEYS).
+const DERIVED_KEYS: [&str; 1] = ["relates_to:"];
+
+/// Drop the derived keys (key line plus the `-` list lines right after it) from the frontmatter.
+/// Same bytes as Python `strip_derived`; text without a frontmatter block is returned as is.
+fn strip_derived(text: &str) -> String {
+    let (bom, rest) = text
+        .strip_prefix('\u{feff}')
+        .map_or(("", text), |r| ("\u{feff}", r));
+    let Some((yaml, body)) = crate::vault::split_frontmatter(rest) else {
+        return text.to_owned();
+    };
+    let mut out = format!("{bom}---\n");
+    let mut skipping_list = false;
+    for line in yaml.split('\n') {
+        if skipping_list && line.trim_start().starts_with('-') {
+            continue;
+        }
+        skipping_list = DERIVED_KEYS.iter().any(|k| line.starts_with(k));
+        if !skipping_list {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("---\n");
+    out.push_str(body);
+    out
+}
+
+/// Change-detection hash: sha256 of the text without the derived frontmatter keys.
+fn content_sha(data: &str) -> String {
+    sha256(&strip_derived(data))
+}
+
+/// How the stored `document.sha` relates to the file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShaVerdict {
+    /// No document row yet.
+    NoRow,
+    /// Stored sha equals the content hash — nothing changed.
+    Same,
+    /// Stored sha is the old whole-file sha and the file is unchanged: only the sha column moves.
+    LegacySame(String),
+    /// Content changed.
+    Different,
+}
+
+fn judge_sha(stored: Option<&str>, data: &str) -> ShaVerdict {
+    let Some(stored) = stored else {
+        return ShaVerdict::NoRow;
+    };
+    if stored == content_sha(data) {
+        return ShaVerdict::Same;
+    }
+    if stored == sha256(data) {
+        return ShaVerdict::LegacySame(content_sha(data));
+    }
+    ShaVerdict::Different
 }
 
 /// Detect whether the string contains CJK Unified Ideographs (U+4E00..=U+9FFF) — filters model drift
@@ -337,7 +493,7 @@ fn slugify(s: &str) -> String {
 /// claim subject/predicate normalization — lowercase, collapse whitespace/`_`/`-` runs into one
 /// `-` (matches repo-slug convention), trim leading/trailing `-`. Prevents "foo bar" and "foo-bar"
 /// from landing as distinct claim subjects.
-fn canon(s: &str) -> String {
+pub(crate) fn canon(s: &str) -> String {
     let lower = s.to_lowercase();
     let mut out = String::with_capacity(lower.len());
     let mut prev_sep = false;
@@ -375,26 +531,85 @@ fn is_target(path: &Path, exclude: &[String]) -> bool {
     ext_ok && !exclude.iter().any(|s| pstr.contains(s))
 }
 
-/// Ingest one note file into the vector store + deterministic graph. The SSOT per-file pipeline.
-/// Reads `path` from disk, parses frontmatter, chunks, embeds, upserts, and rebuilds the
-/// semantic graph from the frontmatter. Accumulates into `stats`. Returns the verdict.
-///
-/// Uses the default chunker and frontmatter graph extractor. For custom strategies see
-/// [`ingest_file_with`].
-pub async fn ingest_file(
+/// Ingest one note file into the vector store + deterministic graph, in its own transaction.
+/// The SSOT per-file pipeline. Reads `path` from disk, parses frontmatter, chunks, embeds,
+/// upserts, and rebuilds the semantic graph from the frontmatter. Returns the verdict with the
+/// counts this one file contributed; the caller folds them with [`Stats::absorb`]. The chunker,
+/// graph extractor and embedder are injectable; `remember` uses [`ingest_file_in_tx`].
+pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
     store: &Store,
-    llm: &Llm,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> Result<(FileOutcome, Stats)> {
+    let (stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, path).await;
+    outcome.map(|o| (o, stats))
+}
+
+/// What [`ingest_file_with`] did, plus the counters this one file raised. After a failure they
+/// describe rolled-back rows; the run total folds them in only when the attempt succeeded.
+/// `stats` is owned here and handed out by value; the `&mut` below never leaves this module.
+///
+/// One transaction per file: a failure at any step rolls back every row the file wrote, its
+/// document row (and the sha it carries) included, so the next sync ingests it from scratch.
+async fn ingest_file_counted<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> (Stats, Result<FileOutcome>) {
+    let mut stats = Stats::default();
+    let outcome = ingest_in_own_tx::<C, G, E>(store, llm, cfg, path, &mut stats).await;
+    (stats, outcome)
+}
+
+async fn ingest_in_own_tx<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
     cfg: &config::BoringConfig,
     path: &str,
     stats: &mut Stats,
 ) -> Result<FileOutcome> {
-    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, Llm>(store, llm, cfg, path, stats)
+    let mut conn = store.conn().await?;
+    let tx = conn
+        .transaction()
         .await
+        .context("begin ingest transaction")?;
+    let outcome = ingest_steps::<C, G, E>(store, &tx, llm, cfg, path, stats).await?;
+    tx.commit().await.context("commit ingest transaction")?;
+    // Only a note that wrote a document, chunk or claim row has anything for Surreal to follow.
+    let wrote = matches!(
+        outcome,
+        FileOutcome::New | FileOutcome::Updated | FileOutcome::ShaMoved
+    );
+    if wrote {
+        store
+            .mirror_surreal(&crate::store::Scope::notes([path.to_owned()]))
+            .await?;
+    }
+    Ok(outcome)
 }
 
-/// Same as [`ingest_file`], but with injectable `Chunker`, `GraphExtractor`, and `Embed` strategies.
-pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
+/// The default pipeline on the caller's transaction: `remember` ingests the note and writes its
+/// `supersedes` edges in one request transaction, so the caller opens and commits it.
+pub async fn ingest_file_in_tx(
     store: &Store,
+    tx: &Transaction<'_>,
+    llm: &Llm,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> Result<(FileOutcome, Stats)> {
+    let mut stats = Stats::default();
+    let outcome = ingest_steps::<DefaultChunker, FrontmatterGraphExtractor, Llm>(
+        store, tx, llm, cfg, path, &mut stats,
+    )
+    .await?;
+    Ok((outcome, stats))
+}
+
+async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    tx: &Transaction<'_>,
     llm: &E,
     cfg: &config::BoringConfig,
     path: &str,
@@ -421,16 +636,21 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
 
     let (front, body) = frontmatter::parse(&data, path, cfg)?;
 
-    let sha = sha256(&data);
-    let prev = store.get_doc_sha(path).await?;
-    if prev.as_deref() == Some(sha.as_str()) {
-        // Content identical — chunk re-embedding is skipped, but the deterministic graph still
-        // rebuilds: "graph already built" holds only for notes ingested after the graph code
-        // that wrote their edges, and the rebuild embeds nothing for claims whose row exists.
-        store.set_updated_at(path, mtime).await?;
-        G::default()
-            .extract(store, llm, cfg, &front, &body, stats)
-            .await?;
+    let sha = content_sha(&data);
+    let prev = Store::get_doc_sha_on(tx, path).await?;
+    let verdict = judge_sha(prev.as_deref(), &data);
+    if let ShaVerdict::LegacySame(new_sha) = &verdict {
+        // Transition: the stored sha is the old whole-file one and the file did not change.
+        // Move the sha column only — no re-embed, no edge rewrite.
+        Store::set_doc_sha_on(tx, path, new_sha).await?;
+        stats.unchanged += 1;
+        return Ok(FileOutcome::ShaMoved);
+    }
+    if verdict == ShaVerdict::Same {
+        // Content identical — no `updated_at` write and no `clear_semantic_edges` (it deletes and
+        // reinserts every edge, resetting each edge's `first_seen_at` on every sync). Edges are
+        // cleared only for changed notes (below); here only missing claim edges are inserted.
+        heal_claim_edges(tx, &front, stats).await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::Unchanged);
     }
@@ -460,24 +680,27 @@ pub async fn ingest_file_with<C: Chunker, G: GraphExtractor, E: Embed>(
     // DO UPDATE, so overwriting them in place keeps the document with a full chunk set throughout —
     // a concurrent ask/recall never sees an empty/half-deleted window during a re-ingest. The stale
     // tail (when the new version has fewer chunks) is pruned only AFTER the new chunks are in place.
-    store.upsert_document(&front, &sha, mtime).await?;
+    Store::upsert_document_on(tx, &front, &sha, mtime).await?;
     for (i, (content, embedding)) in embedded.into_iter().enumerate() {
         store
-            .upsert_chunk(&Doc {
-                id: format!("{path}#{i}"),
-                content,
-                embedding,
-                front: front.clone(),
-                chunk_idx: i,
-            })
+            .upsert_chunk_on(
+                tx,
+                &Doc {
+                    id: format!("{path}#{i}"),
+                    content,
+                    embedding,
+                    front: front.clone(),
+                    chunk_idx: i,
+                },
+            )
             .await?;
     }
-    store.prune_chunks_from(path, pieces.len()).await?;
+    Store::prune_chunks_from_on(tx, path, pieces.len()).await?;
     stats.chunks += pieces.len();
 
     // deterministic semantic graph from frontmatter (no LLM extraction).
     G::default()
-        .extract(store, llm, cfg, &front, &body, stats)
+        .extract(store, tx, llm, cfg, &front, &body, stats)
         .await?;
 
     if prev.is_some() {
@@ -524,21 +747,22 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         // autonomous repair (quote unsafe scalar frontmatter, e.g. an unquoted `title: [FEDEV-97] …`
         // that YAML reads as a sequence) and re-ingest; only if THAT still fails do we skip + log.
         // Either way the rest of the corpus keeps syncing.
-        if let Err(e) = ingest_file_with::<C, G, E>(store, llm, cfg, &pstr, &mut stats).await {
-            if let Some(fixed) = std::fs::read_to_string(&pstr)
-                .ok()
-                .and_then(|c| crate::vault::repair_note_frontmatter(&c))
-                && frontmatter::parse(&fixed, &pstr, cfg).is_ok()
-                && std::fs::write(&pstr, &fixed).is_ok()
-                && ingest_file_with::<C, G, E>(store, llm, cfg, &pstr, &mut stats)
-                    .await
-                    .is_ok()
-            {
-                eprintln!("[ingest] auto-repaired malformed frontmatter + re-ingested {pstr}");
-                stats.repaired += 1;
-            } else {
-                eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
-                stats.failed += 1;
+        let (file_stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, &pstr).await;
+        match outcome {
+            Ok(_) => stats.absorb(&file_stats),
+            Err(e) => {
+                // A failed attempt was rolled back whole, so its counters describe rows that
+                // do not exist; only an attempt that committed adds to the total.
+                let (retry_stats, repaired) =
+                    repair_and_reingest::<C, G, E>(store, llm, cfg, &pstr).await;
+                if repaired {
+                    stats.absorb(&retry_stats);
+                    eprintln!("[ingest] auto-repaired malformed frontmatter + re-ingested {pstr}");
+                    stats.repaired += 1;
+                } else {
+                    eprintln!("[ingest] skipped malformed note {pstr}: {e:#}");
+                    stats.failed += 1;
+                }
             }
         }
     }
@@ -555,6 +779,27 @@ pub async fn run_with<C: Chunker, G: GraphExtractor, E: Embed>(
         record_prune_skipped(store, &vanished).await?;
     }
     Ok(stats)
+}
+
+/// Quote unsafe frontmatter in place and ingest again. Returns the retry's counters (even if the
+/// retry failed) and whether the note now ingested.
+async fn repair_and_reingest<C: Chunker, G: GraphExtractor, E: Embed>(
+    store: &Store,
+    llm: &E,
+    cfg: &config::BoringConfig,
+    path: &str,
+) -> (Stats, bool) {
+    if let Some(fixed) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| crate::vault::repair_note_frontmatter(&c))
+        && frontmatter::parse(&fixed, path, cfg).is_ok()
+        && std::fs::write(path, &fixed).is_ok()
+    {
+        let (stats, outcome) = ingest_file_counted::<C, G, E>(store, llm, cfg, path).await;
+        (stats, outcome.is_ok())
+    } else {
+        (Stats::default(), false)
+    }
 }
 
 /// Owner decision 2026-09-24 (「적어도 마이그레이션 시점인 지금은 아니라는거임」): prune deletes
@@ -598,8 +843,32 @@ fn is_managed_path(path: &Path, managed_dirs: &[PathBuf]) -> bool {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use super::{canon, collect_target_paths, has_han, is_managed_path, slugify, strip_nul};
+    use super::{
+        ShaVerdict, canon, collect_target_paths, content_sha, has_han, is_managed_path, judge_sha,
+        sha256, slugify, strip_nul,
+    };
     use std::path::{Path, PathBuf};
+
+    fn note(relates_to: &str) -> String {
+        format!("---\ntitle: t\nkind: note\nrelates_to:\n- \"[[{relates_to}]]\"\n---\n본문\n")
+    }
+
+    #[test]
+    fn relates_to_only_change_is_not_a_change() {
+        let stored = content_sha(&note("wiki-0002"));
+        let rewritten = note("wiki-0009");
+        assert_eq!(judge_sha(Some(&stored), &rewritten), ShaVerdict::Same);
+    }
+
+    #[test]
+    fn stored_whole_file_sha_only_moves_the_sha_column() {
+        let file = note("wiki-0002");
+        let stored = sha256(&file);
+        assert_eq!(
+            judge_sha(Some(&stored), &file),
+            ShaVerdict::LegacySame(content_sha(&file))
+        );
+    }
 
     #[test]
     fn strip_nul_removes_null_bytes() {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime, Timeouts};
-use tokio_postgres::{Config as PgConfig, NoTls, Transaction};
+use tokio_postgres::{Client, Config as PgConfig, NoTls, Transaction};
 
 use super::{
     CodeIndexError, CodeRelation, CodeSearchHit, CodeSymbolDetail, PreparedFile, RepositoryStatus,
@@ -14,6 +14,13 @@ use crate::config::CodeIndexSource;
 /// corpus (`document`, `chunk`, `node`, `edge`, `claim`).
 pub struct CodeIndexStore {
     pool: Pool,
+}
+
+/// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
+impl std::fmt::Debug for CodeIndexStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeIndexStore").finish_non_exhaustive()
+    }
 }
 
 /// I/O-boundary timeout for pool wait/create/recycle. Prevents infinite hangs on DB loss;
@@ -49,7 +56,7 @@ impl CodeIndexStore {
         Ok(Self { pool })
     }
     /// Acquire a connection from the pool.
-    async fn db(&self) -> Result<deadpool_postgres::Object, CodeIndexError> {
+    pub(crate) async fn db(&self) -> Result<deadpool_postgres::Object, CodeIndexError> {
         self.pool
             .get()
             .await
@@ -67,7 +74,11 @@ impl CodeIndexStore {
 
     /// Initialize the isolated code-index schema immediately before a selected sync writes it.
     pub async fn initialize(&self) -> Result<(), CodeIndexError> {
-        self.db().await?.batch_execute(SCHEMA).await?;
+        let db = self.db().await?;
+        db.batch_execute(SCHEMA).await?;
+        for index in &CASCADE_INDEXES {
+            ensure_valid_index(&db, index).await?;
+        }
         Ok(())
     }
 
@@ -353,6 +364,76 @@ async fn replace_file(
 
 fn count_to_usize(value: i64) -> Result<usize, CodeIndexError> {
     usize::try_from(value).map_err(|_| CodeIndexError::NumericOverflow)
+}
+
+struct ConcurrentIndex {
+    name: &'static str,
+    create: &'static str,
+}
+
+/// Deleting a `file` row cascades to `symbol` and `relation` by `file_id`, and each deleted
+/// symbol fires RI triggers on `relation` by `source_symbol_id` / `target_symbol_id`; without
+/// these indexes each of those scans the whole table (4.8M rows: a delete ran 2,506s). They
+/// cannot live in `SCHEMA`: that is one `batch_execute`, an implicit transaction, and
+/// `CREATE INDEX CONCURRENTLY` refuses one.
+const CASCADE_INDEXES: [ConcurrentIndex; 4] = [
+    ConcurrentIndex {
+        name: "code_index_symbol_file",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_symbol_file
+                 ON code_index.symbol(file_id)",
+    },
+    ConcurrentIndex {
+        name: "code_index_relation_file",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_relation_file
+                 ON code_index.relation(file_id)",
+    },
+    ConcurrentIndex {
+        name: "code_index_relation_source_symbol",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_relation_source_symbol
+                 ON code_index.relation(source_symbol_id)",
+    },
+    ConcurrentIndex {
+        name: "code_index_relation_target_symbol",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS code_index_relation_target_symbol
+                 ON code_index.relation(target_symbol_id)",
+    },
+];
+
+const INDEX_LOCK_TIMEOUT: &str = "30s";
+
+/// A cancelled `CREATE INDEX CONCURRENTLY` leaves the name behind as INVALID, and `IF NOT
+/// EXISTS` then counts it as present — so validity is read from `pg_index`, not the name.
+async fn ensure_valid_index(db: &Client, index: &ConcurrentIndex) -> Result<(), CodeIndexError> {
+    db.batch_execute(&format!("SET lock_timeout = '{INDEX_LOCK_TIMEOUT}'"))
+        .await?;
+    let built = build_index(db, index).await;
+    // The connection goes back to the pool: the timeout must not outlive this call.
+    let reset = db.batch_execute("RESET lock_timeout").await;
+    built?;
+    reset?;
+    Ok(())
+}
+
+async fn build_index(db: &Client, index: &ConcurrentIndex) -> Result<(), CodeIndexError> {
+    let valid: Option<bool> = db
+        .query_opt(
+            "SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+              WHERE c.relnamespace = 'code_index'::regnamespace AND c.relname = $1",
+            &[&index.name],
+        )
+        .await?
+        .map(|row| row.get(0));
+    if valid == Some(false) {
+        db.batch_execute(&format!(
+            "DROP INDEX CONCURRENTLY IF EXISTS code_index.{}",
+            index.name
+        ))
+        .await?;
+    }
+    if valid != Some(true) {
+        db.batch_execute(index.create).await?;
+    }
+    Ok(())
 }
 
 const SCHEMA: &str = r"

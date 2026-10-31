@@ -39,7 +39,7 @@ CLAUDE.md §5 를 따른다. 창 측정에서는 분모에 창 경계도 같이 
 
 ## 5. 측정은 측정 대상에 쓰지 않는다
 
-측정 중에는 쓰기 도구(`remember`·`forget`·`sync`·`classify_repo`·`verdict`)를 부르지 않는다. 손으로 사건을 부르는 시험이 필요하면 `BORING_EVENT_SINK=spool BORING_EVENT_LOG=<임시 경로>` 로 판정 계열 밖에 쓴다. 이미 섞였으면 백업 → 삭제 → 그 일을 기록하는 데까지 한 번에 한다.
+측정 중에는 쓰기 도구(`remember`·`forget`·`sync`·`classify_repo`·`verdict`)를 부르지 않는다. 손으로 사건을 부르는 시험이 필요하면 `BORING_EVENT_SINK=spool BORING_EVENT_LOG=<임시 경로>` 로 판정 계열 밖에 쓴다. 이미 섞였으면 백업 → 삭제 → 그 일을 기록하는 데까지 한 번에 한다. 섞였는지는 행이 말하게 한다: 셈에서 빼기 전에 그 행을 쓴 쪽(`event_log` 의 `session_id`·`component`·`status` 같은 칸)이 우리가 부른 시험과 맞는지 한 줄로 인용한다. 보고나 카드에 붙은 「시험」 같은 이름표는 출처가 아니다.
 
 ## 6. 표본 하한에 못 미치면 「아직」
 

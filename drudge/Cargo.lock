@@ -522,6 +522,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "tower",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-python",

@@ -31,6 +31,7 @@ from ohmyboring.result import Err, Ok  # noqa: E402
 from ohmyboring.search import retriever as search_retriever  # noqa: E402
 
 door = importlib.import_module("agents.door.door")
+_REAL_SEARCH_HANDOVER = door._search_handover
 
 
 def document(doc_id: str = "/w.md#0", path: str = "/w.md", **metadata_overrides):
@@ -196,6 +197,21 @@ class SearchRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertIn("handover", response.json()["error"])
 
+    def test_real_handover_failure_surfaces_the_detail_string_not_the_pgerror_repr(self):
+        # 진짜 _search_handover 를 탄다: record_handover 의 Err(PgError) 가 detail 문자열로 접혀야 한다.
+        detail = "parity forced handover failure\nCONTEXT:  PL/pgSQL function parity_fail() line 1 at RAISE"
+        conn = mock.MagicMock()
+        with (
+            mock.patch.object(door, "_search_handover", _REAL_SEARCH_HANDOVER),
+            mock.patch.object(door.search_pg, "connect", return_value=Ok(conn)),
+            mock.patch.object(
+                door.search_pg, "record_handover", return_value=Err(door.search_pg.PgError(detail))
+            ),
+        ):
+            response = self.post({"query": "q", "session_id": "s-1"})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"error": f"handover failed: {detail}"})
+
     def test_blank_session_id_skips_handover(self):
         with mock.patch.object(door, "_search_handover") as handover:
             response = self.post({"query": "q", "session_id": "   "})
@@ -229,6 +245,30 @@ class SearchRouteTests(unittest.TestCase):
         self.assertEqual(self.post({"query": "  "}).status_code, 400)
         self.assertEqual(self.post({"query": "q", "related": -1}).status_code, 400)
         self.assertEqual(self.post({"query": "q", "project": 5}).status_code, 400)
+
+    def test_since_hours_above_i32_is_400(self):
+        self.post({"query": "q", "since_hours": 2**31 - 1})
+        self.assertEqual(self.made[-1]["since_hours"], 2**31 - 1)
+        response = self.post({"query": "q", "since_hours": 2**31})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "1 validation error for _SearchBody\nsince_hours\n"
+            "  Input should be less than or equal to 2147483647 [type=less_than_equal,"
+            " input_value=2147483648, input_type=int]\n",
+            response.json()["error"],
+        )
+
+    def test_since_hours_below_i32_is_400(self):
+        self.post({"query": "q", "since_hours": -(2**31)})
+        self.assertEqual(self.made[-1]["since_hours"], -(2**31))
+        response = self.post({"query": "q", "since_hours": -(2**31) - 1})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "1 validation error for _SearchBody\nsince_hours\n"
+            "  Input should be greater than or equal to -2147483648 [type=greater_than_equal,"
+            " input_value=-2147483649, input_type=int]\n",
+            response.json()["error"],
+        )
 
     def test_no_dsn_is_503(self):
         os.environ.pop("DOOR_PG_DSN", None)

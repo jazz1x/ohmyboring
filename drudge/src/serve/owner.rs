@@ -3,6 +3,7 @@
 //! the owner.
 
 use axum::http::HeaderMap;
+use deadpool_postgres::Transaction;
 use serde_json::json;
 
 use crate::frontmatter::Author;
@@ -61,21 +62,51 @@ pub(crate) fn may_rewrite(standing: Standing, existing: &Author) -> bool {
 /// The owner-written notes among `targets` that this non-owner request may not supersede, each
 /// recorded once as `owner_supersede_refused`. Empty for the owner, and without a store — no
 /// supersedes edge can be written then, so nothing is replaced.
+///
+/// Read-only on the request's transaction handle `tx`. The event is not written here: the caller
+/// records it with `record_supersede_refusals` once `tx` is released, committed or rolled back.
 pub(crate) async fn refused_supersedes(
+    tx: &Transaction<'_>,
+    standing: Standing,
+    targets: &[String],
+) -> anyhow::Result<Vec<String>> {
+    match standing {
+        Standing::NotOwner => Store::owner_authored(tx, targets).await,
+        Standing::Owner => Ok(Vec::new()),
+    }
+}
+
+/// `refused_supersedes` for a request with no transaction of its own (`/remember`): reads on a
+/// pooled connection and records the event. Without a store nothing can be replaced.
+pub(crate) async fn refused_supersedes_logged(
     store: Option<&Store>,
     standing: Standing,
     targets: &[String],
     door: &str,
 ) -> anyhow::Result<Vec<String>> {
-    match (store, standing) {
-        (Some(store), Standing::NotOwner) => {
-            let owned = store.owner_authored(targets).await?;
-            if !owned.is_empty() {
-                record_refusal(Some(store), "owner_supersede_refused", &owned, door).await;
-            }
-            Ok(owned)
+    match store {
+        Some(store) => {
+            let mut conn = store.conn().await?;
+            let tx = conn.transaction().await?;
+            let refused = refused_supersedes(&tx, standing, targets).await?;
+            drop(tx);
+            drop(conn);
+            record_supersede_refusals(Some(store), &refused, door).await;
+            Ok(refused)
         }
-        _ => Ok(Vec::new()),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// One `owner_supersede_refused` event for the refused list, if any. Called after the request's
+/// transaction handle is gone; its failure stays a warning.
+pub(crate) async fn record_supersede_refusals(
+    store: Option<&Store>,
+    refused: &[String],
+    door: &str,
+) {
+    if !refused.is_empty() {
+        record_refusal(store, "owner_supersede_refused", refused, door).await;
     }
 }
 

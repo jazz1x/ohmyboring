@@ -106,15 +106,8 @@ owner token — otherwise that note is skipped and named in `owner_held`), blank
 so the engine's own /sync rereads them under the merged form, and calls that
 /sync itself — one reread at a time, merges landing meanwhile queue for the next; a body
 `row: {channel, card_ts, idx}` names the card row the door settles when its reread ends. Of the GETs, only /projects without active_days reaches the upstream.
-And POST /run/morning-card · POST /run/weekly-card run the card programs
-themselves (agents/slack/card.py · weekly_card.py as a subprocess with the door's
-own env): hermes cron owns the schedule and asks the door to fire the tool, one run
-per route at a time (a second call while one runs is 409), answering {ok, exit,
-posted_ts?, tail} — a non-zero exit is ok:false with the code, never hidden. No
-auth header: the door binds 127.0.0.1 on the host and the compose-internal bridge
-otherwise, the hermes script env carries no token to send, and the tool's own
-once-per-morning / once-per-week guard makes a duplicate trigger exit 0 rather
-than post twice.
+The card programs no longer run inside the door: hermes cron runs them itself
+(agents/hermes/card_runner.py), so the door has no /run/* routes.
 """
 
 from __future__ import annotations
@@ -127,9 +120,7 @@ import http.client
 import json
 import os
 import queue
-import re
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -152,6 +143,11 @@ from ohmyboring import config as boring_config
 from ohmyboring.adapters import embed as embed_adapter
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import vault as vault_notes
+from ohmyboring.briefing import daily as brief_daily
+from ohmyboring.briefing import generate as brief_generate
+from ohmyboring.briefing import schedule as brief_schedule
+from ohmyboring.compact import run as compact_run
+from ohmyboring.compact import schedule as compact_schedule
 from ohmyboring.entrypoints.http import mcp_recall
 from ohmyboring.events import parse as events_parse
 from ohmyboring.events import run as events_run
@@ -162,17 +158,17 @@ from ohmyboring.recall import named as recall_named
 from ohmyboring.recall import shadow as recall_shadow
 from ohmyboring.recall import wiki as recall_wiki
 from ohmyboring.registers import pg as registers_pg
-from ohmyboring.registers import shadow as registers_shadow
 from ohmyboring.remember import dedup as remember_dedup
-from ohmyboring.remember import graph as remember_graph
 from ohmyboring.remember import index as remember_index
 from ohmyboring.remember import pii as remember_pii
-from ohmyboring.remember import shadow as remember_shadow
 from ohmyboring.remember import writer as remember_writer
 from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
 from ohmyboring.search import pg as search_pg
 from ohmyboring.search import retriever as search_retriever
+from ohmyboring.sync import hash as sync_hash
+from ohmyboring.sync import run as sync_run
+from ohmyboring.sync import schedule as sync_schedule
 from ohmyboring.verdict import parse as verdict_parse
 from ohmyboring.verdict import run as verdict_run
 
@@ -209,6 +205,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     threading.Thread(target=_prefill_note_index, args=(index,), name="note-index", daemon=True).start()
     app.state.note_index = index
+    _start_sync_if_owner()
+    _start_compact_if_owner()
+    _start_brief_if_owner()
     yield
 
 
@@ -258,13 +257,23 @@ async def _stream_chunks(upstream: http.client.HTTPResponse) -> AsyncIterator[by
         upstream.close()
 
 
+_SEARCH_HEADER = "x-boring-search"
+
+
+def _with_search_header(response: Response, upstream_headers: Any) -> Response:
+    """엔진 /search 의 x-boring-search(값 engine)를 프록시가 그대로 싣는다 — 누가 답했는지 호출자가 본다."""
+    if (value := upstream_headers.get(_SEARCH_HEADER)) is not None:
+        response.headers[_SEARCH_HEADER] = value
+    return response
+
+
 def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Response:
     upstream_req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
     try:
         upstream = urllib.request.urlopen(upstream_req, timeout=_TIMEOUT)
     except urllib.error.HTTPError as e:
         # The engine answered; it just said no. A faithful door passes that through.
-        return _pass_through(e.code, e.read(), e.headers.get("content-type"))
+        return _with_search_header(_pass_through(e.code, e.read(), e.headers.get("content-type")), e.headers)
     content_type = upstream.headers.get("content-type")
     if content_type is not None and content_type.startswith("text/event-stream"):
         return StreamingResponse(
@@ -273,7 +282,9 @@ def _fetch(url: str, body: bytes, headers: dict[str, str], method: str) -> Respo
             headers={"content-type": content_type},
         )
     with upstream:
-        return _pass_through(upstream.status, upstream.read(), content_type)
+        return _with_search_header(
+            _pass_through(upstream.status, upstream.read(), content_type), upstream.headers
+        )
 
 
 _OWNER_TOKEN_HEADER = "x-boring-owner-token"
@@ -307,11 +318,16 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
     if request.method in ("GET", "POST") and _events_owner() == _WRITER_PYTHON:
         if (answered := await _events_python(request, body)) is not None:
             return answered
-    # 빈자리 도구는 스위치와 무관하게 늘 문 안에서 답한다 — 엔진엔 gap 이 없다.
-    if request.method == "POST" and request.url.path == "/mcp":
-        if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
-            rpc = _http_json_object(body) or {}
-            return await _gap_python(rpc.get("id"), call[1], "mcp")
+    # 잇기 쓰기 주인 스위치(C-PORT4): python 이면 gap(HTTP·MCP)과 split-subjects 셋을 문 안에서 답한다
+    # (예전 그대로 — MCP gap 은 엔진에 안 넘기고 tools/list 에는 문이 gap 을 덧붙인다). engine 이면
+    # 넷 다 엔진이 답하고 문은 프록시한다.
+    if _link_writer() == _WRITER_PYTHON:
+        if (handler := _LINK_PYTHON_HANDLERS.get((request.method, request.url.path))) is not None:
+            return await handler(request)
+        if request.method == "POST" and request.url.path == "/mcp":
+            if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
+                rpc = _http_json_object(body) or {}
+                return await _gap_python(rpc.get("id"), call[1], "mcp")
     # 읽기 주인 스위치(E4-1): python 이면 일곱 레지스터 읽기를 엔진에 넘기지 않고 문 안에서 답한다.
     if request.method == "POST" and _register_reader() == _READER_PYTHON:
         if request.url.path in _REGISTER_HTTP_PATHS:
@@ -326,6 +342,8 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
                     request, rpc.get("id"), call[1], _REGISTER_MCP_TOOLS[call[0]], "mcp"
                 )
     headers = _engine_headers(request)
+    if request.method == "POST" and request.url.path == _SPLIT_PATH:
+        return await _split_merge_via_engine(request, url, headers, background_tasks)
     # 회상 읽기 주인 스위치(E4-2): python 이면 recall 은 엔진에 안 넘기고 문 안에서 답한다.
     if request.method == "POST" and request.url.path == "/mcp" and _recall_reader() == _READER_PYTHON:
         if (call := _mcp_tools_call(body)) is not None and call[0] == "recall":
@@ -340,58 +358,9 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
             status_code=502,
         )
     if request.method == "POST" and request.url.path == "/mcp":
-        engine_response = response
         response = _augment_mcp_recall(body, response)
-        response = _augment_tools_list(body, response)
-        # 회상 그림자는 번호 블록을 붙이기 전의 엔진 텍스트와 대조한다(E4-2).
-        if not isinstance(engine_response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
-            if call[0] == "recall":
-                background_tasks.add_task(
-                    _recall_shadow_task, call[1], engine_response.status_code, engine_response.body
-                )
-        # remember 는 회상과 달리 응답을 안 고친다 — 바이트 그대로 본 뒤 그림자만 태운다(E3a-2).
-        if not isinstance(response, StreamingResponse) and (arguments := _mcp_remember_arguments(body)):
-            background_tasks.add_task(
-                _remember_shadow_task,
-                "mcp",
-                arguments,
-                response.status_code,
-                response.body,
-                _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
-            )
-        # 일곱 레지스터 도구도 같은 규약 — 응답 뒤 읽기 그림자가 칸별 대조 사건을 남긴다(E4-1).
-        if not isinstance(response, StreamingResponse) and (call := _mcp_tools_call(body)) is not None:
-            if call[0] in _REGISTER_MCP_TOOLS:
-                background_tasks.add_task(
-                    _register_shadow_task,
-                    _REGISTER_MCP_TOOLS[call[0]],
-                    "mcp",
-                    call[1],
-                    response.status_code,
-                    response.body,
-                )
-        return response
-    if request.method == "POST" and request.url.path in _REGISTER_HTTP_PATHS:
-        if not isinstance(response, StreamingResponse) and (data := _http_json_object(body)) is not None:
-            background_tasks.add_task(
-                _register_shadow_task,
-                _REGISTER_HTTP_PATHS[request.url.path],
-                "http",
-                data,
-                response.status_code,
-                response.body,
-            )
-        return response
-    if request.method == "POST" and request.url.path == "/remember":
-        if not isinstance(response, StreamingResponse) and (arguments := _http_remember_arguments(body)):
-            background_tasks.add_task(
-                _remember_shadow_task,
-                "remember",
-                arguments,
-                response.status_code,
-                response.body,
-                _standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
-            )
+        if _link_writer() == _WRITER_PYTHON:
+            response = _augment_tools_list(body, response)
     return response
 
 
@@ -462,7 +431,8 @@ def _augment_tools_list(body: bytes, response: Response) -> Response:
     tools = result.get("tools") if isinstance(result, dict) else None
     if not isinstance(tools, list):
         return response
-    result["tools"] = [*tools, gap_parse.TOOL]
+    # 엔진도 gap 을 싣는다(C-PORT4) — 스위치 python 이면 문 것으로 바꿔 한 번만 나오게 한다.
+    result["tools"] = [*(t for t in tools if t.get("name") != gap_parse.TOOL["name"]), gap_parse.TOOL]
     return _pass_through(
         response.status_code, json.dumps(response_json, ensure_ascii=False).encode("utf-8"), content_type
     )
@@ -555,113 +525,7 @@ def _nearest_document(text: str, exclude_path: str | None) -> Either[str | None,
     return Ok(row[0] if row else None)
 
 
-#: 그림자의 그래프 대조(E3b)가 읽는 세 장 — 문이 지난 노트가 실제로 남긴 간선·문서·claim
-#: 행의 끝 상태다. 전부 읽기 전용 세션(임베딩 프로브와 같은 연결 모양).
-_GRAPH_EDGES_SQL = (
-    "SELECT e.src, e.kind, e.dst FROM edge e"
-    " WHERE e.src = ANY(%(docs)s) OR e.dst = ANY(%(docs)s)"
-    "    OR e.src IN (SELECT dst FROM edge WHERE src = ANY(%(docs)s) AND kind = 'claims')"
-)
-_GRAPH_DOCUMENTS_SQL = "SELECT source_path FROM document WHERE source_path = ANY(%(paths)s)"
-_GRAPH_CLAIMS_SQL = (
-    "SELECT source_path, subject, predicate, kind, superseded_at IS NOT NULL"
-    " FROM claim WHERE source_path = ANY(%(paths)s)"
-)
-
-
-def _read_graph(paths: tuple[str, ...]) -> remember_graph.GraphSnapshot | None:
-    """그림자가 정한 문서 경로들의 그래프 끝 상태를 읽는다 — 읽기 전용, 쓰기 없음.
-
-    DSN 부재·pg 고장이면 None — 그림자 사건이 graph-unchecked (다) 로 남긴다. 임베딩
-    프로브와 마찬가지로 응답 뒤 백그라운드라, 실패가 요청에 닿는 일은 없다."""
-    dsn = os.environ.get("DOOR_PG_DSN")
-    if not dsn:
-        return None
-    docs = [f"doc:{path}" for path in paths]
-    try:
-        with (
-            psycopg.connect(dsn, options="-c default_transaction_read_only=on") as conn,
-            conn.cursor() as cur,
-        ):
-            cur.execute(_GRAPH_EDGES_SQL, {"docs": docs})
-            edges = frozenset((row[0], row[1], row[2]) for row in cur.fetchall())
-            cur.execute(_GRAPH_DOCUMENTS_SQL, {"paths": list(paths)})
-            documents = frozenset(row[0] for row in cur.fetchall())
-            cur.execute(_GRAPH_CLAIMS_SQL, {"paths": list(paths)})
-            claims = tuple(
-                remember_graph.ClaimRow(
-                    source_path=row[0],
-                    subject=row[1],
-                    predicate=row[2],
-                    kind=row[3],
-                    sealed=row[4],
-                )
-                for row in cur.fetchall()
-            )
-    except psycopg.Error as e:
-        print(f"[door] remember_shadow graph read failed: {e}", file=sys.stderr, flush=True)
-        return None
-    return remember_graph.GraphSnapshot(edges=edges, documents=documents, claims=claims)
-
-
-def _remember_shadow_task(route: str, arguments: dict, status: int, body: bytes, is_owner: bool) -> None:
-    """응답을 본 뒤에 도는 그림자 — 같은 요청을 파이썬 쓰기 경로에 「쓰지 않고」 태워
-    엔진이 한 결정(PII 게이트·중복 문의 걸러둘·대체·저장, owner 자격 거절)과 같은 결정을
-    낼지, 저장·대체에서는 실제 노트와 칸별로, 읽기 전용 세션으로 실제 그래프의 간선·claim
-    봉인까지 대조하고 사건(remember_shadow) 한 줄을 남긴다(E3a-2, E3b). 걸러진
-    요청은 결정만 비교한다. 실패는 전부 여기서 접는다: 문 로그 한 줄 + 사건 status=error —
-    응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
-    vault_dir = _vault_dir()
-    match remember_pii.load_from_vault(vault_dir):
-        case Err(reason):
-            event_log.try_append_event(
-                "door",
-                remember_shadow.EVENT_NAME,
-                "error",
-                reason=f"pii rules: {reason}",
-                omb_session_id=_omb_session_id(arguments),
-            )
-            return
-        case Ok(scanner):
-            pass
-    try:
-        event = remember_shadow.run_shadow(
-            remember_shadow.ShadowRequest(
-                route=route,
-                arguments=arguments,
-                engine_status=status,
-                engine_body=body,
-                vault_dir=vault_dir,
-                read_note=vault_notes.read_note,
-                split_frontmatter=vault_note.split_frontmatter,
-                list_notes=lambda: _list_wiki_notes(vault_dir),
-                pii_scanner=scanner,
-                is_owner=is_owner,
-                nearest_document=_nearest_document,
-                read_graph=_read_graph,
-                note_index=getattr(app.state, "note_index", None),
-            )
-        )
-    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
-        print(
-            f"[door] remember_shadow failed: {type(e).__name__}: {e}",
-            file=sys.stderr,
-            flush=True,
-        )
-        event_log.try_append_event(
-            "door",
-            remember_shadow.EVENT_NAME,
-            "error",
-            reason=f"{type(e).__name__}: {e}",
-            omb_session_id=_omb_session_id(arguments),
-        )
-        return
-    event_log.try_append_event(
-        "door", remember_shadow.EVENT_NAME, event.status, **remember_shadow.event_payload(event)
-    )
-
-
-#: remember 쓰기 주인 스위치(E3c-1) — engine(기본)이면 프록시+그림자 그대로, python 이면
+#: remember 쓰기 주인 스위치(E3c-1) — engine(기본)이면 프록시 그대로, python 이면
 #: 문 안의 파이썬 쓰기 길(ohmyboring.remember.writer)이 결정·쓰고 답한다. 운영 기본은
 #: engine — 이 조각에서 켜지 않는다(켜기는 오케스트레이터가 검증 뒤에 한다).
 _REMEMBER_WRITER_ENV = "DOOR_REMEMBER_WRITER"
@@ -750,7 +614,130 @@ def _writer_deps(
         append_event=_enqueue_writer_event,
         note_index=getattr(app.state, "note_index", None),
         embed_dim=boring_config.embed_dim(),
+        content_hash=sync_hash.content_hash if _sync_owner() == _SYNC_PYTHON else sync_hash.legacy_sha,
     )
+
+
+#: 4시간 sync 주인 스위치 — engine(기본)이면 스레드 없음·기록기 해시 그대로, python 이면 문 배경
+#: 스레드(ohmyboring.sync)가 기동 1회 + schedule.sync_hours 마다 볼트를 다시 색인하고
+#: remember 기록기도 파생 칸을 뺀 새 해시를 저장한다. 켜기는 오케스트레이터가 판정 뒤에 한다.
+_SYNC_OWNER_ENV = "DOOR_SYNC_OWNER"
+_SYNC_PYTHON = "python"
+
+
+def _sync_owner() -> str:
+    """python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _SYNC_PYTHON if os.environ.get(_SYNC_OWNER_ENV) == _SYNC_PYTHON else "engine"
+
+
+def _sync_deps() -> sync_run.SyncDeps:
+    return sync_run.SyncDeps(
+        wiki_dir=os.path.join(_vault_dir(), "wiki"),
+        connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
+        embed=remember_writer.embed_via_adapter,
+        embed_dim=boring_config.embed_dim(),
+        split_frontmatter=vault_note.split_frontmatter,
+        classify_origin=lambda path: boring_config.classify(path)[0],
+        append_event=_enqueue_writer_event,
+        db_errors=(psycopg.Error,),
+        allow_company=bool(boring_config.load().get("allow_company_origin")),
+    )
+
+
+def _start_sync_if_owner() -> None:
+    """DOOR_SYNC_OWNER=python 이고 DSN·주기가 맞을 때만 배경 스레드를 띄운다. 못 띄우면 이유를 찍는다."""
+    if _sync_owner() != _SYNC_PYTHON:
+        return
+    if not os.environ.get("DOOR_PG_DSN"):
+        print(
+            "[door] sync owner=python but DOOR_PG_DSN is empty — sync thread not started",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    match boring_config.schedule():
+        case Err(reason):
+            print(f"[door] sync thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(schedule):
+            sync_schedule.start(_sync_deps(), schedule.sync_hours)
+            print(f"[door] sync thread started: every {schedule.sync_hours}h", file=sys.stderr, flush=True)
+
+
+#: 하루 1회 DB 정리 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
+#: schedule.compact_hours 마다 sync 와 같은 잠금 아래 compact 를 돈다. 켜기 전에 엔진에
+#: BORING_COMPACT_DISABLED=1 을 먼저 줘야 둘이 겹치지 않는다(오케스트레이터 몫).
+_COMPACT_OWNER_ENV = "DOOR_COMPACT_OWNER"
+
+
+def _compact_owner() -> str:
+    """python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게)."""
+    return _SYNC_PYTHON if os.environ.get(_COMPACT_OWNER_ENV) == _SYNC_PYTHON else "engine"
+
+
+def _start_compact_if_owner() -> None:
+    if _compact_owner() != _SYNC_PYTHON:
+        return
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        print(
+            "[door] compact owner=python but DOOR_PG_DSN is empty — compact thread not started",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    match boring_config.schedule():
+        case Err(reason):
+            print(f"[door] compact thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(schedule):
+            deps = compact_run.CompactDeps(
+                connect=lambda: psycopg.connect(dsn, autocommit=True),
+                append_event=_enqueue_writer_event,
+            )
+            compact_schedule.start(deps, schedule.compact_hours)
+            print(
+                f"[door] compact thread started: every {schedule.compact_hours}h", file=sys.stderr, flush=True
+            )
+
+
+#: 일일 브리프 노트 주인 스위치 — engine(기본)이면 스레드 없음, python 이면 문 배경 스레드가
+#: schedule.brief_hour(로컬)에 vault/wiki/daily-brief-<날짜>.md 를 쓴다. 켜기 전에 엔진의
+#: BORING_BRIEF_HOUR 를 시각이 아닌 값(`off`)으로 둬야 둘이 겹치지 않는다 — 빈 값은 엔진에서 boring.json 값이다.
+_BRIEF_OWNER_ENV = "DOOR_BRIEF_OWNER"
+
+
+def _brief_owner() -> str:
+    return _SYNC_PYTHON if os.environ.get(_BRIEF_OWNER_ENV) == _SYNC_PYTHON else "engine"
+
+
+def _start_brief_if_owner() -> None:
+    if _brief_owner() != _SYNC_PYTHON:
+        return
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        print(
+            "[door] brief owner=python but DOOR_PG_DSN is empty — brief thread not started",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    match boring_config.schedule():
+        case Err(reason):
+            print(f"[door] brief thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(boring_config.Schedule(brief_hour_error=str(reason))):
+            print(f"[door] brief thread not started: {reason}", file=sys.stderr, flush=True)
+        case Ok(boring_config.Schedule(brief_hour=None)):
+            print("[door] brief thread not started: schedule.brief_hour is off", file=sys.stderr, flush=True)
+        case Ok(boring_config.Schedule(brief_hour=hour)):
+            deps = brief_daily.BriefDeps(
+                connect=lambda: psycopg.connect(dsn, autocommit=True),
+                generate=brief_generate.llm_generate,
+                lang=boring_config.note_lang(),
+                wiki_dir=os.path.join(_vault_dir(), "wiki"),
+                append_event=_enqueue_writer_event,
+                clock=lambda: datetime.now().astimezone(),
+            )
+            brief_schedule.start(deps, hour)
+            print(f"[door] brief thread started: daily at {hour}:00 local", file=sys.stderr, flush=True)
 
 
 def _remember_outcome_response(body: bytes, route: str, outcome: remember_writer.WriteOutcome) -> Response:
@@ -810,13 +797,17 @@ def _verdict_writer() -> str:
     return _WRITER_PYTHON if os.environ.get(_VERDICT_WRITER_ENV) == _WRITER_PYTHON else "engine"
 
 
+def _verdict_label(at: datetime) -> str:
+    return at.isoformat(timespec="microseconds")
+
+
 def _verdict_deps(request: Request) -> verdict_run.Deps:
     dsn = os.environ.get("DOOR_PG_DSN")
     return verdict_run.Deps(
         connect=(lambda: psycopg.connect(dsn)) if dsn else None,
         append_event=_enqueue_writer_event,
         is_owner=_standing(request.headers.get(_OWNER_TOKEN_HEADER)) == Standing.OWNER,
-        now=lambda: datetime.now(tz=UTC).isoformat(),
+        now=lambda: _verdict_label(datetime.now(tz=UTC)),
     )
 
 
@@ -1142,59 +1133,6 @@ async def _register_python(
     return JSONResponse(payload)
 
 
-def _register_shadow_query(
-    surface: str, transport: str, arguments: dict
-) -> Either[dict, registers_shadow.PyFailure]:
-    """그림자의 파이썬 길 — 인자 거절은 대조 가능한 거절로, 계산 고장은 (다) 로 남긴다."""
-    parse = registers_pg.http_args if transport == "http" else registers_pg.mcp_args
-    match parse(surface, arguments):
-        case Err(rejected):
-            return Err(registers_shadow.PyFailure(rejected.message, rejection=True))
-        case Ok(args):
-            pass
-    match _register_answer(args, surface, transport):
-        case Err(message):
-            return Err(registers_shadow.PyFailure(message, rejection=False))
-        case Ok(payload):
-            return Ok(payload)
-
-
-def _register_shadow_task(surface: str, transport: str, arguments: dict, status: int, body: bytes) -> None:
-    """읽기 그림자(E4-1) — 응답을 본 뒤 같은 요청을 읽기 전용으로 다시 계산해 엔진 답과
-    칸별로 대조하고 read_shadow 사건 한 줄을 남긴다. 실패는 전부 여기서 접는다: 문 로그
-    한 줄 + 사건 status=error — 응답은 이미 간 뒤라 어떤 예외도 클라이언트에 닿지 않는다."""
-    try:
-        event = registers_shadow.run_shadow(
-            registers_shadow.ShadowRequest(
-                surface=surface,
-                transport=transport,
-                arguments=arguments,
-                engine_status=status,
-                engine_body=body,
-                query=lambda: _register_shadow_query(surface, transport, arguments),
-                rerun=lambda: _register_shadow_query(surface, transport, arguments),
-            )
-        )
-    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
-        print(f"[door] read_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "door",
-            registers_shadow.EVENT_NAME,
-            "error",
-            surface=surface,
-            transport=transport,
-            reason=f"{type(e).__name__}: {e}",
-        )
-        return
-    event_log.try_append_event(
-        "door",
-        registers_shadow.EVENT_NAME,
-        event.status,
-        surface=surface,
-        **registers_shadow.event_payload(event),
-    )
-
-
 _RECALL_WIKI_INDEX = recall_wiki.WikiIndex(vault_note.split_frontmatter)
 
 
@@ -1212,20 +1150,12 @@ def _recall_python(arguments: dict) -> recall_shadow.PythonAnswer:
     )
 
 
-def _recall_shadow_task(arguments: dict, status: int, body: bytes, reader: str = "engine") -> None:
-    """회상 그림자(E4-2) — 응답이 간 뒤 같은 인자로 파이썬 회상을 계산해 엔진 텍스트와 대조하고
-    recall_shadow 사건 한 줄을 남긴다. 예외는 여기서 문 로그 한 줄 + 사건 status=error 로 접는다."""
-    try:
-        event = recall_shadow.run_shadow(status, body, lambda: _recall_python(arguments))
-    except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
-        print(f"[door] recall_shadow failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        event_log.try_append_event(
-            "door", recall_shadow.EVENT_NAME, "error", reader=reader, reason=f"{type(e).__name__}: {e}"
-        )
-        return
-    event_log.try_append_event(
-        "door", recall_shadow.EVENT_NAME, event.status, reader=reader, **recall_shadow.event_payload(event)
-    )
+def _recall_engine_claims(paths: list[str]) -> Either[dict, str]:
+    """그림자가 엔진이 고른 노트에 refine 을 태울 때 쓰는 현재 claims — 파이썬 길과 같은 읽기 전용 연결."""
+    dsn = os.environ.get("DOOR_PG_DSN")
+    if not dsn:
+        return Err("DOOR_PG_DSN not set")
+    return recall_answer.claims_of(dsn, paths)
 
 
 _RECALL_READER_ENV = "DOOR_RECALL_READER"
@@ -1286,11 +1216,17 @@ def _recall_reverse_shadow_task(
     recall_shadow 사건(reader=python)을 남긴다. 엔진 불통·예외는 문 로그 한 줄 + status=error."""
     try:
         engine = _fetch(url, _recall_without_session(body), headers, "POST")
-        event = recall_shadow.compare(engine.status_code, engine.body, answered)
+        event = recall_shadow.compare(engine.status_code, engine.body, answered, _recall_engine_claims)
     except OSError as e:
         print(f"[door] recall_shadow engine unreachable: {e}", file=sys.stderr, flush=True)
         event_log.try_append_event(
-            "door", recall_shadow.EVENT_NAME, "error", reader=_READER_PYTHON, reason="engine unreachable"
+            "door",
+            recall_shadow.EVENT_NAME,
+            "error",
+            reader=_READER_PYTHON,
+            reason="engine unreachable",
+            cause=recall_shadow.CAUSE_ENGINE,
+            compared=recall_shadow.COMPARED,
         )
         return
     except Exception as e:  # noqa: BLE001 — 그림자는 응답 뒤라, 어떤 예외든 이 한 자리에서 접는다
@@ -1301,6 +1237,8 @@ def _recall_reverse_shadow_task(
             "error",
             reader=_READER_PYTHON,
             reason=f"{type(e).__name__}: {e}",
+            cause=recall_shadow.CAUSE_PYTHON,
+            compared=recall_shadow.COMPARED,
         )
         return
     event_log.try_append_event(
@@ -1379,19 +1317,10 @@ def _fetch_edges() -> list[tuple[str, str, str]]:
 
 
 def _approved_payload(since_hours: int) -> dict:
-    rows = _fetch_edges()
-    selection = approved.select_approved(rows, since_hours, datetime.now(tz=approved.SEOUL))
-    return {
-        "since_hours": since_hours,
-        "approved": [
-            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
-            for item in selection.approved
-        ],
-        "contested": [
-            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
-            for item in selection.contested
-        ],
-    }
+    selection = approved.select_approved(_fetch_edges(), since_hours, datetime.now(tz=approved.SEOUL))
+    for item in selection.skipped:
+        print(f"[door] approved skipped {item.session}: {item.reason}", file=sys.stderr, flush=True)
+    return approved.payload(selection, since_hours)
 
 
 async def _approved(request: Request) -> Response:
@@ -1428,7 +1357,7 @@ _MAX_ACTIVE_DAYS = 365
 
 _ACTIVE_PROJECTS_SQL = (
     "select project, count(*) from document where project <> '' "
-    "and updated_at > now() - make_interval(days => %s) group by 1 order by 2 desc"
+    "and updated_at > now() - make_interval(days => %s) group by 1 order by 2 desc, 1"
 )
 
 
@@ -1482,6 +1411,8 @@ async def _claim_source(request: Request) -> Response:
     subject = request.query_params.get("subject", "")
     if not subject.strip():
         return JSONResponse({"error": "subject query param is required"}, status_code=400)
+    if "\x00" in subject:
+        return JSONResponse({"error": "subject must not contain NUL"}, status_code=400)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
@@ -1498,6 +1429,8 @@ async def _claim_sources(request: Request) -> Response:
     predicate = request.query_params.get("predicate", "")
     if not predicate.strip():
         return JSONResponse({"error": "predicate query param is required"}, status_code=400)
+    if "\x00" in predicate:
+        return JSONResponse({"error": "predicate must not contain NUL"}, status_code=400)
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
@@ -1526,91 +1459,6 @@ async def _rules(request: Request) -> Response:
     return JSONResponse(rules.group_rules(rows))
 
 
-#: how long one card run may hold its route before the door gives up on it. Generous on
-#: purpose: the morning card's gemma4 calls and the weekly's own 300s child each fit inside.
-_RUN_CARD_TIMEOUT_S = float(os.environ.get("DOOR_RUN_CARD_TIMEOUT", "900"))
-
-#: The programs the run routes execute — the same tools launchd used to fire, unchanged,
-#: plus the 이름 맞추기 판정기: 판정과 합치기는 다른 실행이라 카드와 같은 {ok, exit, tail}
-#: 모양으로 문이 돌린다.
-_CARD_PROGRAMS = {
-    "morning-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card.py",
-    "weekly-card": Path(__file__).resolve().parents[2] / "agents" / "slack" / "weekly_card.py",
-    "repair-judge": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card_repair_judge.py",
-    "advice-write": Path(__file__).resolve().parents[2] / "agents" / "slack" / "card_advice_write.py",
-}
-
-#: One lock per route: a card takes minutes (model calls), and a second concurrent run is not
-#: a second opinion but a double post waiting to happen — the second caller gets a 409 instead.
-_RUN_LOCKS: dict[str, asyncio.Lock] = {}
-
-#: The tool prints "[card] posted ts=<slack ts>" (or "already posted today (ts=…)"); the newest
-#: match on stdout becomes the response's posted_ts.
-_POSTED_TS_RE = re.compile(r"ts=([0-9]+\.[0-9]+)")
-
-
-def _run_card_subprocess(script: Path, timeout_s: float) -> subprocess.CompletedProcess[str]:
-    """The subprocess seam the tests stub. Inherits the door's env — compose supplies the
-    Slack token/channel, the vault dir, the engine URL, OLLAMA_HOST."""
-    return subprocess.run(
-        [sys.executable, str(script)],
-        cwd=str(Path(__file__).resolve().parents[2]),
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-    )
-
-
-def _card_run_body(name: str, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
-    """{ok, exit, posted_ts?, tail} — a non-zero exit is ok:false with the code, never hidden."""
-    merged = "\n".join(part for part in (completed.stderr.strip(), completed.stdout.strip()) if part)
-    tail = "\n".join(merged.splitlines()[-5:])[-1000:]
-    body: dict[str, Any] = {"ok": completed.returncode == 0, "exit": completed.returncode, "tail": tail}
-    matches = _POSTED_TS_RE.findall(completed.stdout)
-    if matches:
-        body["posted_ts"] = matches[-1]
-    return body
-
-
-async def _run_card_route(request: Request, name: str) -> Response:
-    lock = _RUN_LOCKS.setdefault(name, asyncio.Lock())
-    if lock.locked():
-        return JSONResponse({"error": f"{name} already running"}, status_code=409)
-    async with lock:
-        try:
-            completed = await asyncio.to_thread(
-                _run_card_subprocess, _CARD_PROGRAMS[name], _RUN_CARD_TIMEOUT_S
-            )
-        except subprocess.TimeoutExpired:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "exit": None,
-                    "tail": "",
-                    "error": f"timeout after {_RUN_CARD_TIMEOUT_S:.0f}s",
-                }
-            )
-        except OSError as e:
-            return JSONResponse({"ok": False, "exit": None, "tail": "", "error": f"spawn failed: {e}"})
-        return JSONResponse(_card_run_body(name, completed))
-
-
-async def _run_morning_card(request: Request) -> Response:
-    return await _run_card_route(request, "morning-card")
-
-
-async def _run_repair_judge(request: Request) -> Response:
-    return await _run_card_route(request, "repair-judge")
-
-
-async def _run_advice_write(request: Request) -> Response:
-    return await _run_card_route(request, "advice-write")
-
-
-async def _run_weekly_card(request: Request) -> Response:
-    return await _run_card_route(request, "weekly-card")
-
-
 #: repair candidates per page — 3 default (the card's "오늘 할 일" shows the top 3), 1..50 range
 #: (0 is not a page, an unbounded scan is not a "top N" any more).
 _MIN_REPAIR_LIMIT = 1
@@ -1622,7 +1470,7 @@ _SAMPLE_MAX_VARIANTS = 10
 _SAMPLE_VALUE_CHARS = 160
 _SPLIT_SAMPLES_SQL = (
     "select predicate, count(*), (array_agg(left(value, %s) order by length(value) desc, value))[1] "
-    "from claim where subject = any(%s) "
+    "from claim where subject = any(%s) and superseded_at is null "
     "group by predicate order by 2 desc, 1 limit %s"
 )
 
@@ -1648,8 +1496,10 @@ async def _repairs_split_subjects_samples(request: Request) -> Response:
     return JSONResponse({"samples": [{"predicate": p, "rows": n, "value": v} for p, n, v in rows]})
 
 
-_SPLIT_SUBJECTS_SQL = "select subject, source_path from claim"
-_SPLIT_DELETE_SQL = "delete from claim where subject = any(%s) and source_path = any(%s)"
+_SPLIT_SUBJECTS_SQL = "select subject, source_path from claim where superseded_at is null"
+_SPLIT_DELETE_SQL = (
+    "delete from claim where subject = any(%s) and source_path = any(%s) and superseded_at is null"
+)
 _SPLIT_UPDATE_SQL = "update document set sha = '' where source_path = any(%s)"
 _OWNER_NOTES_SQL = "select source_path from document where author = 'owner' and source_path = any(%s)"
 
@@ -1712,7 +1562,7 @@ def _group_split_subjects(rows: list[tuple[str, str]]) -> list[dict[str, Any]]:
         for norm, bucket in buckets.items()
         if len(bucket["variant_rows"]) >= 2
     ]
-    groups.sort(key=lambda g: g["rows"], reverse=True)
+    groups.sort(key=lambda g: (-g["rows"], g["subject"]))
     return groups
 
 
@@ -1790,11 +1640,13 @@ def _call_engine_sync() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _Merged:
-    """A committed merge waiting for the engine to reread it; `row` is the card row to settle."""
+    """A merge waiting for the engine to reread it; `row` is the card row to settle. The counts
+    are None for a merge whose engine answer never arrived: it may have committed, so it is
+    reread, but no `subject_merged` event states counts nobody saw."""
 
     subject: str
-    deleted_rows: int
-    reread_notes: int
+    deleted_rows: int | None
+    reread_notes: int | None
     owner_held: list[str]
     row: card_types.RowRef | None
 
@@ -1847,6 +1699,8 @@ def _show_row(row: card_types.RowRef, outcome: card_types.Outcome, lang: str) ->
 
 
 def _record_merged(merged: _Merged, rows: list[tuple[str, str]], lang: str) -> card_types.Outcome:
+    if merged.deleted_rows is None or merged.reread_notes is None:
+        return card_types.Pending()
     remaining = _count_variants(rows, merged.subject)
     _emit_subject_merged_event(
         merged.subject, merged.deleted_rows, merged.reread_notes, remaining, merged.owner_held
@@ -1974,15 +1828,9 @@ def _merge_split_subject(
     finally:
         conn.close()
 
-    _reread_in_background(_Merged(subject, deleted_rows, reread_notes, owner_held, row))
-    return {
-        "subject": subject,
-        "deleted_rows": deleted_rows,
-        "reread_notes": reread_notes,
-        "remaining_variants": None,
-        "owner_held": owner_held,
-        "sync": "started",
-    }
+    merged = _Merged(subject, deleted_rows, reread_notes, owner_held, row)
+    _reread_in_background(merged)
+    return _merged_body(merged)
 
 
 async def _repairs_split_subjects_get(request: Request) -> Response:
@@ -2005,21 +1853,110 @@ async def _repairs_split_subjects_get(request: Request) -> Response:
     return JSONResponse({"groups": groups[:limit], "total_groups": len(groups)})
 
 
-async def _repairs_split_subjects_post(request: Request) -> Response:
+@dataclass(frozen=True)
+class _SplitPost:
+    """A POST /repairs/split-subjects body that passed the door's checks."""
+
+    subject: Any
+    row: card_types.RowRef | None
+
+
+async def _parse_split_post(request: Request) -> Either[_SplitPost, Response]:
+    """The 400s of POST /repairs/split-subjects. The row check lives here, in the door, because
+    the card row is the door's to settle — the engine never sees what a row is."""
     try:
         body = await request.json()
     except json.JSONDecodeError:
-        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        return Err(JSONResponse({"error": "body must be JSON"}, status_code=400))
     subject = body.get("subject") if isinstance(body, dict) else None
     if not subject:
-        return JSONResponse({"error": "subject is required"}, status_code=400)
+        return Err(JSONResponse({"error": "subject is required"}, status_code=400))
     try:
         raw_row = body.get("row")
         row = None if raw_row is None else card_types.RowRef.model_validate(raw_row)
     except ValidationError as e:
-        return JSONResponse(
-            {"error": "row must be {channel, card_ts, idx}", "detail": str(e)}, status_code=400
+        return Err(
+            JSONResponse({"error": "row must be {channel, card_ts, idx}", "detail": str(e)}, status_code=400)
         )
+    return Ok(_SplitPost(subject, row))
+
+
+def _merged_body(merged: _Merged) -> dict[str, Any]:
+    return {
+        "subject": merged.subject,
+        "deleted_rows": merged.deleted_rows,
+        "reread_notes": merged.reread_notes,
+        "remaining_variants": None,
+        "owner_held": merged.owner_held,
+        "sync": "started",
+    }
+
+
+_SPLIT_PATH = "/repairs/split-subjects"
+
+
+def _settle_unanswered(row: card_types.RowRef, reason: str) -> None:
+    lang = card_advice.resolve_lang(boring_config.note_lang())
+    _show_row(row, card_view.merge_unanswered_outcome(reason, lang=lang), lang)
+
+
+def _engine_merged(response: Response, post: _SplitPost) -> _Merged | None:
+    """The engine's 202 as a committed merge, or None when it is no 202 with the four fields."""
+    if response.status_code != 202:
+        return None
+    try:
+        answer = json.loads(response.body)
+        return _Merged(
+            subject=answer["subject"],
+            deleted_rows=int(answer["deleted_rows"]),
+            reread_notes=int(answer["reread_notes"]),
+            owner_held=list(answer["owner_held"]),
+            row=post.row,
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+async def _split_merge_via_engine(
+    request: Request, url: str, headers: dict[str, str], background_tasks: BackgroundTasks
+) -> Response:
+    """POST /repairs/split-subjects with the engine as writer (DOOR_LINK_WRITER=engine): the door
+    keeps the row check, the reread and the card row; the engine does the delete in one
+    transaction. When the engine gives no answer (timeout, 502) the merge may still have
+    committed, so the reread is queued all the same — without counts, which are unknown — and
+    the card row says 응답 없음 instead of waiting for a recount that would report a merge
+    nobody saw."""
+    match await _parse_split_post(request):
+        case Err(rejected):
+            return rejected
+        case Ok(post):
+            pass
+    try:
+        response = await asyncio.to_thread(_fetch, url, await request.body(), headers, "POST")
+    except OSError as e:
+        response = JSONResponse({"error": "engine unreachable", "upstream": _upstream()}, status_code=502)
+        reason = f"engine unreachable: {e}"
+    else:
+        reason = f"engine answered {response.status_code}"
+    if response.status_code == 502:
+        _reread_in_background(_Merged(str(post.subject), None, None, [], None))
+        if post.row is not None:
+            background_tasks.add_task(_settle_unanswered, post.row, reason)
+        return response
+    match _engine_merged(response, post):
+        case None:
+            return response
+        case merged:
+            _reread_in_background(merged)
+            return JSONResponse(_merged_body(merged), status_code=202)
+
+
+async def _repairs_split_subjects_post(request: Request) -> Response:
+    match await _parse_split_post(request):
+        case Err(rejected):
+            return rejected
+        case Ok(post):
+            subject, row = post.subject, post.row
     if not os.environ.get("DOOR_PG_DSN"):
         return JSONResponse({"error": "store not configured"}, status_code=503)
     try:
@@ -2045,7 +1982,7 @@ class _SearchBody(BaseModel):
     claims: StrictInt = Field(default=0, ge=0)
     related: StrictInt = Field(default=0, ge=0)
     related_heads: StrictInt = Field(default=2, ge=0)
-    since_hours: StrictInt | None = None
+    since_hours: StrictInt | None = Field(default=None, ge=-2147483648, le=2147483647)
     project: StrictStr | None = None
     session_id: StrictStr | None = None
 
@@ -2072,7 +2009,11 @@ def _search_handover(session_id: str, paths: list[str]) -> Either[search_pg.Hand
             return Err(failure.detail)
         case Ok(conn):
             with contextlib.closing(conn):
-                return search_pg.record_handover(conn, session_id, observed_at, paths)
+                match search_pg.record_handover(conn, session_id, observed_at, paths):
+                    case Err(failure):
+                        return Err(failure.detail)
+                    case Ok(report):
+                        return Ok(report)
 
 
 def _gap_record(args: gap_parse.GapArgs) -> Either[gap_pg.GapReport, str]:
@@ -2120,6 +2061,25 @@ async def _gap(request: Request) -> Response:
     if data is None:
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
     return await _gap_python(None, data, "http")
+
+
+#: 잇기 쓰기 주인 스위치(C-PORT4) — python 이면 gap(HTTP·MCP)과 split-subjects 셋을 문 안에서 답한다
+#: (옛 길 그대로), 그 밖의 값·부재는 engine: 엔진이 넷 다 답하고 문은 프록시하되 POST split 의 row 검증·
+#: 다시 읽기·카드 행만 맡는다. 운영 기본은 .env 의 python — 넘김은 오케스트레이터가 한다.
+_LINK_WRITER_ENV = "DOOR_LINK_WRITER"
+
+
+def _link_writer() -> str:
+    """python 만 켬, 그 밖의 값·부재는 전부 engine(실수로 켜지지 않게 — 다른 *_WRITER 와 같다)."""
+    return _WRITER_PYTHON if os.environ.get(_LINK_WRITER_ENV) == _WRITER_PYTHON else "engine"
+
+
+_LINK_PYTHON_HANDLERS = {
+    ("GET", "/repairs/split-subjects"): _repairs_split_subjects_get,
+    ("GET", "/repairs/split-subjects/samples"): _repairs_split_subjects_samples,
+    ("POST", "/repairs/split-subjects"): _repairs_split_subjects_post,
+    ("POST", "/gap"): _gap,
+}
 
 
 def _search_log_query(query: str, hits: list[dict], started: float) -> None:
@@ -2198,27 +2158,40 @@ async def _search(request: Request) -> Response:
     return JSONResponse({"hits": hits}, headers={"x-boring-search": "python"})
 
 
+#: 1차 넘김 스위치 — 엔진이 답하는 표(http_routes)에 있는 여섯 경로를 문 Python 도 답할 수 있다.
+#: 값이 정확히 engine 일 때만 엔진(프록시)으로 가고, 그 밖(없음·python·오타)은 문 Python 이 답한다.
+_MEMORY_READER_ENV = "DOOR_MEMORY_READER"
+_SEARCH_READER_ENV = "DOOR_SEARCH_READER"
+_HANDOVER_ENGINE = "engine"
+_HANDED_OVER_PATHS = {
+    "/approved": (_MEMORY_READER_ENV, _approved),
+    "/claim-source": (_MEMORY_READER_ENV, _claim_source),
+    "/claim-sources": (_MEMORY_READER_ENV, _claim_sources),
+    "/rules": (_MEMORY_READER_ENV, _rules),
+    "/projects": (_SEARCH_READER_ENV, _projects),
+    "/search": (_SEARCH_READER_ENV, _search),
+}
+
+
+def _handover_route(env: str, native: Any) -> Any:
+    async def handler(request: Request, background_tasks: BackgroundTasks) -> Response:
+        if os.environ.get(env) == _HANDOVER_ENGINE:
+            return await _proxy(request, background_tasks)
+        return await native(request)
+
+    return handler
+
+
 for _path, _methods in _load_routes().items():
-    app.add_api_route(_path, _proxy, methods=_methods)
+    if _path in _HANDED_OVER_PATHS:
+        _env, _native = _HANDED_OVER_PATHS[_path]
+        app.add_api_route(_path, _handover_route(_env, _native), methods=_methods)
+    else:
+        app.add_api_route(_path, _proxy, methods=_methods)
 
 # The door's own routes, driven by the snapshot's door_routes key. A snapshot
 # entry without a native handler here is a KeyError at startup, not a proxy hole.
-_DOOR_HANDLERS = {
-    "GET /approved": _approved,
-    "GET /claim-source": _claim_source,
-    "GET /claim-sources": _claim_sources,
-    "GET /projects": _projects,
-    "GET /repairs/split-subjects": _repairs_split_subjects_get,
-    "GET /repairs/split-subjects/samples": _repairs_split_subjects_samples,
-    "POST /gap": _gap,
-    "POST /repairs/split-subjects": _repairs_split_subjects_post,
-    "POST /run/advice-write": _run_advice_write,
-    "POST /run/morning-card": _run_morning_card,
-    "POST /run/repair-judge": _run_repair_judge,
-    "POST /run/weekly-card": _run_weekly_card,
-    "POST /search": _search,
-    "GET /rules": _rules,
-}
+_DOOR_HANDLERS: dict[str, Any] = {}
 for _method, _path in _load_door_routes():
     app.add_api_route(_path, _DOOR_HANDLERS[f"{_method} {_path}"], methods=[_method])
 

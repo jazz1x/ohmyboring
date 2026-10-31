@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 from ohmyboring import config as boring_config
+from ohmyboring.result import Err, Ok
 
 BORING_HOME = os.environ.get("BORING_HOME") or os.path.expanduser("~/oh-my-boring")
 
@@ -65,7 +66,6 @@ DEFAULT_MCP_SERVER = {
 }
 
 CODEX_HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"
-CODEX_HOST_WORKER_INTERVAL_SEC = 20 * 60
 CODEX_HOST_WORKER_LOG = f"/tmp/{CODEX_HOST_WORKER_LABEL}.log"
 
 
@@ -375,8 +375,18 @@ def _codex_collector_path(boring_home: str | None = None) -> Path:
     return path
 
 
+def _schedule() -> boring_config.Schedule:
+    """boring.json `schedule`; an invalid block stops the install with the reason."""
+    match boring_config.schedule():
+        case Ok(schedule):
+            return schedule
+        case Err(reason):
+            raise RuntimeError(reason)
+
+
 def _codex_host_worker_plist(home: str, python: str = sys.executable) -> str:
     collector = _codex_collector_path(home)
+    interval_sec = _schedule().ingest_tick_minutes * 60
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -391,12 +401,11 @@ def _codex_host_worker_plist(home: str, python: str = sys.executable) -> str:
 	    <string>BORING_HOME={_xml_escape(str(home))}</string>
 	    <string>COLLECT_LIMIT=1</string>
 	    <string>CODEX_INCLUDE_ROLLOUTS=1</string>
-	    <string>COLLECT_STABLE_AGE_SECONDS=1800</string>
 	    <string>{_xml_escape(python)}</string>
 	    <string>{_xml_escape(str(collector))}</string>
   </array>
   <key>StartInterval</key>
-  <integer>{CODEX_HOST_WORKER_INTERVAL_SEC}</integer>
+  <integer>{interval_sec}</integer>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
@@ -440,9 +449,8 @@ def _install_codex_host_worker_linux(boring_home: str | None = None) -> dict:
     home = boring_home if boring_home is not None else BORING_HOME
     collector = _codex_collector_path(home)
     job = (
-        f"*/20 * * * * cd {_sh_quote(str(home))} && "
+        f"*/{_schedule().ingest_tick_minutes} * * * * cd {_sh_quote(str(home))} && "
         f"BORING_HOME={_sh_quote(str(home))} COLLECT_LIMIT=1 CODEX_INCLUDE_ROLLOUTS=1 "
-        f"COLLECT_STABLE_AGE_SECONDS=1800 "
         f"{_sh_quote(sys.executable)} {_sh_quote(str(collector))} >>{_sh_quote(CODEX_HOST_WORKER_LOG)} 2>&1 "
         f"# {CODEX_HOST_WORKER_LABEL}"
     )
@@ -929,7 +937,7 @@ def _ensure_memory_ingest_worker(
     now: datetime.datetime,
     boring_home: str,
 ) -> bool:
-    """Ensure the autonomous 20-minute session-ingestion worker job exists and points to the
+    """Ensure the autonomous session-ingestion worker job exists and points to the
     canonical repo script. This job is intentionally not exposed in boring.json hermes_cron_jobs
     because it is infrastructure, not user scheduling.
 
@@ -938,7 +946,8 @@ def _ensure_memory_ingest_worker(
     never call a model for it — not even when the script exits non-zero.
     """
     script = "ingest-worker.py"
-    desired_schedule = {"kind": "interval", "minutes": 20, "display": "every 20m"}
+    minutes = _schedule().ingest_tick_minutes
+    desired_schedule = {"kind": "interval", "minutes": minutes, "display": f"every {minutes}m"}
     existing = next((j for j in jobs if j.get("name") == "memory-ingest-worker"), None)
     if existing:
         needs_update = (
@@ -953,7 +962,7 @@ def _ensure_memory_ingest_worker(
             return False
         existing["script"] = script
         existing["schedule"] = desired_schedule
-        existing["schedule_display"] = "every 20m"
+        existing["schedule_display"] = desired_schedule["display"]
         existing["enabled"] = True
         existing["state"] = "scheduled"
         existing["skills"] = []
@@ -978,7 +987,7 @@ def _ensure_memory_ingest_worker(
             "no_agent": True,
             "context_from": None,
             "schedule": desired_schedule,
-            "schedule_display": "every 20m",
+            "schedule_display": desired_schedule["display"],
             "repeat": {"times": None, "completed": 0},
             "enabled": True,
             "state": "scheduled",

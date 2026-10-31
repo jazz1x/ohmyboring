@@ -30,7 +30,7 @@ class GapArgs:
 TOOL = {
     "name": "gap",
     "description": (
-        "Report a gap in memory. Call this when recall, claims or decisions returned nothing, "
+        "Report a gap in memory. CALL THIS when recall, claims or decisions returned nothing, "
         "a stale value, or failed for the question you were asking (kind: missing, stale, broken). "
         "Send the question you were looking for and the note source_paths you were handed "
         "(required for stale: say which notes were out of date). The door records the report "

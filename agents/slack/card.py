@@ -214,6 +214,9 @@ class Collaborators(NamedTuple):
     # CARD_RENDER_ONLY: when set, the advice lane is today's already-posted proposals — no
     # search, no model call, no suppression — instead of a fresh advise → resolve.
     posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
+    # note path → its current claims with the sealed value each replaced; defaulting to none
+    # draws no value look, so a caller that never heard of it renders the card it always did.
+    pairs: Callable[[str], list[card_types.ValuePair] | card_types.PairsUnread] = lambda note: []
 
 
 def _live_collaborators() -> Collaborators:
@@ -237,6 +240,7 @@ def _live_collaborators() -> Collaborators:
         held_repairs=card_live._held_repair_subjects,
         repair_judgments=card_live._live_repair_judgments,
         score=card_live._live_score,
+        pairs=card_live._live_pairs,
     )
 
 
@@ -476,13 +480,23 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
+        notes = {p.note for p in state["proposals"]} | {r.note for r in state["reviews"]}
+        looked_up = {note: collabs.pairs(note) for note in sorted(notes) if note}
+
+        def with_pairs(row):
+            match looked_up.get(row.note, []):
+                case card_types.PairsUnread():
+                    return row.model_copy(update={"pairs_unread": True})
+                case found:
+                    return row.model_copy(update={"pairs": found})
+
         fitted = card_view.fit_card(
-            state["proposals"],
+            [with_pairs(p) for p in state["proposals"]],
             confirmation=state["confirmation"],
             repairs=state["repairs"],
             repairs_total_groups=state["repairs_total_groups"],
             merged_yesterday_rows=state["merged_yesterday_rows"],
-            reviews=state["reviews"],
+            reviews=[with_pairs(r) for r in state["reviews"]],
             lang=lang,
             note_links=boring_config.note_links(),
             score=state["score"],

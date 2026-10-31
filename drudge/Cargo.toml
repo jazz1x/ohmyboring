@@ -23,7 +23,7 @@ deadpool-postgres = { version = "0.14" }                  # 재연결 풀 — FI
 pgvector = { version = "0.4", features = ["postgres"] }  # 벡터 타입 + HNSW
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }  # 0.13 dropped rustls-tls: rustls now implies aws-lc-rs + platform trust store
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
@@ -42,6 +42,7 @@ tree-sitter-bash = "=0.25.1"
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 # 철학 강제 (upstream 상속) — cargo clippy -D warnings 게이트
 [lints.rust]

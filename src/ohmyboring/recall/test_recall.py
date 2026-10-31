@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -291,7 +292,9 @@ class _Seams:
         claims=None,
         claims_err=None,
         vector_err=None,
+        concepts=None,
     ):
+        self._concepts = concepts or {}
         self._claims, self._claims_err = claims or {}, claims_err
         self._vector_err = vector_err
         self.skipped = 0
@@ -301,7 +304,11 @@ class _Seams:
         self._superseded, self._rank_err = superseded or {}, rank_err
 
     def seams(self) -> answer.Seams:
-        return answer.Seams(self._wiki, self._rank, self._vec, self._sup, self._claims_of)
+        return answer.Seams(self._wiki, self._rank, self._vec, self._sup, self._claims_of, self._concepts_of)
+
+    def _concepts_of(self, paths):
+        self.calls.append("concepts")
+        return Ok({p: v for p, v in self._concepts.items() if p in paths})
 
     def _claims_of(self, paths):
         self.calls.append("claims")
@@ -426,6 +433,21 @@ def test_superseded_label_names_the_newer_notes_and_lines_join_with_a_blank_line
     recalled = _text(answer.answer(_args(), stub.seams()))
     assert recalled.text == "- [old.md (superseded by n1.md, n2.md)] 옛\n\n- [live.md] 새", recalled.text
     assert answer.recall_text([("/a/b.md", "x")], {}) == "- [b.md] x"
+
+
+def test_each_note_carries_one_concepts_line_of_at_most_six_and_the_length_cost_is_small():
+    hits = [_hit("a", 5.0, "첫 본문"), _hit("b", 4.0, "둘째 본문"), _hit("c", 3.0, "셋째 본문")]
+    names = ["mutation-testing", "single-source-of-truth", "rop", "fold", "adt", "slugify", "dropped-7th"]
+    concepts = {"/vault/wiki/a.md": names, "/vault/wiki/b.md": ["rop"]}
+    plain = _text(answer.answer(_args(), _Seams(wiki_hits=hits).seams()))
+    rich = _text(answer.answer(_args(), _Seams(wiki_hits=hits, concepts=concepts).seams()))
+    first = "- [a.md] 첫 본문\n  concepts: mutation-testing, single-source-of-truth, rop, fold, adt, slugify"
+    assert rich.text.split("\n\n")[0] == first, rich.text
+    assert "dropped-7th" not in rich.text
+    assert rich.text.split("\n\n")[1] == "- [b.md] 둘째 본문\n  concepts: rop"
+    assert rich.text.split("\n\n")[2] == "- [c.md] 셋째 본문", "no concepts → no line"
+    assert rich.refined.count("concepts:") == 2
+    assert len(rich.text) > len(plain.text)
 
 
 def _claim_row(subject: str, predicate: str, value: str, kind: str = "decision") -> pg.RegisterRow:
@@ -556,6 +578,7 @@ def test_a_query_equal_to_a_title_puts_that_note_first_unless_it_is_superseded()
                 vector=lambda a: Ok([]),
                 superseded_by=lambda paths: Ok({}),
                 current_claims=lambda paths: Ok({}),
+                concepts=lambda paths: Ok({}),
             )
             recalled = _text(answer.answer(_args(query=f"  {title.upper()} ", max_results=3), seams))
             return [
@@ -567,6 +590,30 @@ def test_a_query_equal_to_a_title_puts_that_note_first_unless_it_is_superseded()
         superseded = {str(d / "wiki-7115.md"): _other(True), str(d / "wiki-6885.md"): _other(False)}
         demoted = first_three(superseded)
         assert demoted[-1] == "wiki-7115", f"대체된 제목 일치 노트는 밀리되 잘리지 않는다: {demoted}"
+
+
+def test_a_superseded_note_that_leads_by_rrf_sum_sinks_below_the_live_notes_after_fusion():
+    # 벡터 1위·wiki 3위라 RRF 합은 s 가 가장 크다 — 합치고도 대체된 노트는 산 노트 뒤
+    hits = [_hit("a", 5.0), _hit("b", 4.0), _hit("s", 3.0)]
+    stub = _Seams(
+        wiki_hits=hits,
+        facts=_facts(s=_other(True), a=_other(False), b=_other(False)),
+        vector=[("/vault/wiki/s.md", "벡터")],
+    )
+    recalled = _text(answer.answer(_args(), stub.seams()))
+    assert _shown(recalled) == ["a", "b", "s"], _shown(recalled)
+    cut = _text(answer.answer(_args(max_results=2), stub.seams()))
+    assert _shown(cut) == ["a", "s"], f"RRF 로 컷 안에 든 대체 노트는 밀리되 잘리지 않는다: {_shown(cut)}"
+    vector_only = _Seams(
+        wiki_hits=[_hit("a", 5.0), _hit("b", 4.0)],
+        facts=_facts(v=_other(True), a=_other(False), b=_other(False)),
+        vector=[("/vault/wiki/v.md", "벡터")],
+    )
+    asked_only = replace(
+        vector_only.seams(),
+        rank_facts=lambda paths: Ok({p: f for p, f in vector_only._facts.items() if p in paths}),
+    )  # 묻힌 경로만 돌려준다 — v 의 대체 여부는 벡터 전용 질의로만 들어온다
+    assert _shown(_text(answer.answer(_args(), asked_only)))[-1] == "v", "벡터에서만 온 줄도 가라앉는다"
 
 
 def test_failed_rank_facts_lookup_fails_the_recall():
@@ -605,51 +652,65 @@ def _py(text: str, path="wiki"):
     return Ok(answer.Recalled(text, path, text))
 
 
+def _engine_claims(claims):
+    return lambda paths: Ok({p: v for p, v in claims.items() if p in paths})
+
+
+def _compare(status, body, python, claims_for=None):
+    return shadow.compare(status, body, python, claims_for or _engine_claims({}))
+
+
 def test_shadow_same_text_is_ok_and_carries_path_and_line_counts():
-    event = shadow.compare(200, _engine("- [a.md] x\n\n- [b.md] y"), _py("- [a.md] x\n\n- [b.md] y"))
+    event = _compare(200, _engine("- [a.md] x\n\n- [b.md] y"), _py("- [a.md] x\n\n- [b.md] y"))
     assert event == shadow.ShadowEvent("ok", "wiki", 3, 3)
 
 
 def test_shadow_mismatch_names_the_first_differing_line_with_80_chars_of_each():
     engine = "- [a.md] x\n\n" + "e" * 120
     python = "- [a.md] x\n\n" + "p" * 120 + "\n\nextra"
-    event = shadow.compare(200, _engine(engine), _py(python, "vector"))
+    event = _compare(200, _engine(engine), _py(python, "vector"))
     assert event.status == "mismatch" and event.path == "vector"
     assert (event.engine_lines, event.python_lines) == (3, 5)
     assert event.first_diff == shadow.FirstDiff(3, "e" * 80, "p" * 80)
-    longer = shadow.compare(200, _engine("a"), _py("a\nb"))
+    longer = _compare(200, _engine("a"), _py("a\nb"))
     assert longer.first_diff == shadow.FirstDiff(2, "", "b"), "한쪽이 더 길면 빈 줄과 견준다"
 
 
 def test_shadow_event_payload_never_carries_the_query():
     secret = "sk-PRIVATE-QUERY"
-    event = shadow.compare(200, _engine("엔진 줄"), _py("파이썬 줄"))
+    event = _compare(200, _engine("엔진 줄"), _py("파이썬 줄"))
     payload = shadow.event_payload(event)
     assert secret not in json.dumps(payload, ensure_ascii=False)
-    assert set(payload) == {"path", "engine_lines", "python_lines", "skipped", "first_diff", "reason"}
+    assert set(payload) == {
+        "path",
+        "engine_lines",
+        "python_lines",
+        "skipped",
+        "first_diff",
+        "reason",
+        "compared",
+        "superseded_hit",
+    }
     assert payload["first_diff"] == {"line": 1, "engine": "엔진 줄", "python": "파이썬 줄"}
 
 
 def test_shadow_error_and_rejection_branches():
-    unreadable = shadow.compare(200, _engine("x", is_error=True), _py("x"))
+    unreadable = _compare(200, _engine("x", is_error=True), _py("x"))
     assert unreadable.status == "error" and "engine unreadable" in (unreadable.reason or "")
-    assert shadow.compare(502, b"{}", _py("x")).status == "error"
-    assert shadow.compare(200, b"not json", _py("x")).status == "error"
-    failed = shadow.compare(200, _engine("x"), Err(answer.Failed("pg connect: down")))
+    assert _compare(502, b"{}", _py("x")).status == "error"
+    assert _compare(200, b"not json", _py("x")).status == "error"
+    failed = _compare(200, _engine("x"), Err(answer.Failed("pg connect: down")))
     assert failed.status == "error" and "pg connect: down" in (failed.reason or "")
 
     rpc = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "missing argument: query"}}
     )
-    same = shadow.compare(200, rpc.encode(), Err(answer.Rejected("missing argument: query")))
+    same = _compare(200, rpc.encode(), Err(answer.Rejected("missing argument: query")))
     assert same.status == "ok" and same.reason == "both rejected identically"
-    other = shadow.compare(200, rpc.encode(), Err(answer.Rejected("other")))
+    other = _compare(200, rpc.encode(), Err(answer.Rejected("other")))
     assert other.status == "mismatch"
-    assert shadow.compare(200, rpc.encode(), _py("x")).status == "mismatch"
-    assert (
-        shadow.compare(200, _engine("x"), Err(answer.Rejected("missing argument: query"))).status
-        == "mismatch"
-    )
+    assert _compare(200, rpc.encode(), _py("x")).status == "mismatch"
+    assert _compare(200, _engine("x"), Err(answer.Rejected("missing argument: query"))).status == "mismatch"
 
 
 def _wiki_names(*names: str) -> list[wiki.WikiHit]:
@@ -667,14 +728,14 @@ def _py_answer(names: list[str], k: int = 5, skipped: int = 0, **seam_kwargs) ->
 
 
 def _verdict(python: answer.Recalled, *engine_lines: str) -> str:
-    return shadow.compare(200, _engine("\n\n".join(engine_lines)), Ok(python)).status
+    return _compare(200, _engine("\n\n".join(engine_lines)), Ok(python)).status
 
 
 def test_shadow_tie_only_difference_is_tie_and_identical_text_is_ok():
     python = _py_answer(["a:3", "b:3", "c:3"])
     assert [ln.split("]")[0] for ln in python.text.split("\n\n")] == ["- [a.md", "- [b.md", "- [c.md"]
     assert _verdict(python, _line("a"), _line("b"), _line("c")) == "ok"
-    event = shadow.compare(200, _engine("\n\n".join([_line("c"), _line("a"), _line("b")])), Ok(python))
+    event = _compare(200, _engine("\n\n".join([_line("c"), _line("a"), _line("b")])), Ok(python))
     assert event.status == "tie" and event.first_diff is not None and event.path == "wiki"
 
 
@@ -726,7 +787,7 @@ def test_shadow_vector_path_has_no_tie_allowance():
 
 def test_shadow_counts_skipped_wiki_files_in_the_event():
     python = _py_answer(["a:3"], skipped=2)
-    event = shadow.compare(200, _engine(_line("a")), Ok(python))
+    event = _compare(200, _engine(_line("a")), Ok(python))
     assert event.status == "ok" and event.skipped == 2
     assert shadow.event_payload(event)["skipped"] == 2
     none = _Seams()
@@ -735,18 +796,54 @@ def test_shadow_counts_skipped_wiki_files_in_the_event():
     assert empty.skipped == 4 and empty.text == "(no experience recalled)"
 
 
-def test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold():
-    def boom():
-        raise RuntimeError("boom")
+def test_shadow_compares_refined_text_so_a_claim_line_difference_is_a_mismatch():
+    stub = _refined_stub()
+    python = _text(answer.answer(_args(), stub.seams()))
+    body = _engine(python.text)
+    same = _compare(200, body, Ok(python), _engine_claims(stub._claims))
+    assert (same.status, same.compared) == ("ok", "refined"), "통제군: 같은 claims 면 ok"
+    other = {_OLD: _register(_claim_row("recall", "ranking", "점수식 바뀜"))}
+    event = _compare(200, body, Ok(python), _engine_claims(other))
+    assert event.status == "mismatch" and event.first_diff is not None, event
+    assert "점수식 고정" in event.first_diff.python and "점수식 바뀜" in event.first_diff.engine
 
-    try:
-        shadow.run_shadow(200, _engine("x"), boom)
-    except RuntimeError:
-        return
-    raise AssertionError("run_shadow must not swallow the python path's exception")
+
+def test_shadow_ties_stay_ties_under_the_refined_comparison():
+    python = _py_answer(["a:3", "b:3", "c:3"])
+    shuffled = _engine("\n\n".join([_line("c"), _line("a"), _line("b")]))
+    event = _compare(200, shuffled, Ok(python), _engine_claims({}))
+    assert (event.status, event.compared) == ("tie", "refined")
+
+
+def test_shadow_error_names_its_cause_and_an_embed_outage_is_not_the_engine():
+    ok_py = _py("x")
+    outage = _compare(
+        200, _engine("x"), Err(answer.Failed("retrieve: embed: Connection refused")), _engine_claims({})
+    )
+    assert (outage.status, outage.cause) == ("error", "embed"), outage
+    pg_down = _compare(200, _engine("x"), Err(answer.Failed("pg connect: down")), _engine_claims({}))
+    assert pg_down.cause == "python"
+    engine_down = _compare(502, b"{}", ok_py, _engine_claims({}))
+    assert engine_down.cause == "engine"
+    assert shadow.event_payload(outage)["cause"] == "embed"
+    assert shadow.event_payload(outage)["compared"] == "refined"
+
+
+def test_shadow_says_when_a_superseded_note_was_hit():
+    newer = {"/vault/wiki/b.md": ["/vault/wiki/n.md"]}
+    python = _py_answer(["a:3", "b:3"], superseded=newer)
+    hit = _compare(200, _engine(python.text), Ok(python), _engine_claims({}))
+    assert shadow.event_payload(hit)["superseded_hit"] is True
+    plain = _py_answer(["a:3", "b:3"])
+    miss = _compare(200, _engine(plain.text), Ok(plain), _engine_claims({}))
+    assert shadow.event_payload(miss)["superseded_hit"] is False
 
 
 if __name__ == "__main__":
+    test_shadow_compares_refined_text_so_a_claim_line_difference_is_a_mismatch()
+    test_shadow_ties_stay_ties_under_the_refined_comparison()
+    test_shadow_error_names_its_cause_and_an_embed_outage_is_not_the_engine()
+    test_shadow_says_when_a_superseded_note_was_hit()
     test_query_terms_splits_and_filters()
     test_substring_match_handles_korean_josa()
     test_title_weighted_and_zero_is_none()
@@ -790,5 +887,4 @@ if __name__ == "__main__":
     test_shadow_tied_notes_must_carry_the_same_line_text()
     test_shadow_vector_path_has_no_tie_allowance()
     test_shadow_counts_skipped_wiki_files_in_the_event()
-    test_run_shadow_lets_a_python_exception_out_for_the_door_to_fold()
     print("ok - recall: wiki 직독(항·점수·snippet·필터·mtime 캐시)·경로 선택·렌더·그림자 대조")

@@ -310,9 +310,11 @@ fn matches_language(path: &Path, language: CodeLanguage) -> bool {
 
 fn is_ignored_directory(path: &Path, is_directory: bool) -> bool {
     is_directory
-        && path
-            .file_name()
-            .is_some_and(|name| name == ".git" || name == "target" || name == "node_modules")
+        && path.file_name().is_some_and(|name| {
+            [".git", ".claude", ".venv", "target", "node_modules"]
+                .iter()
+                .any(|ignored| name == *ignored)
+        })
 }
 
 fn content_sha(content: &str) -> String {

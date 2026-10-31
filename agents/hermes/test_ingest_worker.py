@@ -287,14 +287,15 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertEqual(drained[-1]["agent"], "codex")
 
     def test_scan_records_clamp_when_transcript_is_cut(self):
-        self._write_session("s-big", text="z" * 6000)
+        source_chars = ingest_worker.CLAMP + 2000
+        self._write_session("s-big", text="z" * source_chars)
         stdout, run = self._run_main()
         queued = self._offer_events("s-big")
         self.assertTrue(queued[-1]["clamped"])
         # clamp_text snaps cuts to newline boundaries, so the emitted size is CLAMP plus
         # at most one kept line — well under the unclamped source, and byte-identical to
         # what the engine received.
-        self.assertLess(queued[-1]["emitted_chars"], 6000)
+        self.assertLess(queued[-1]["emitted_chars"], source_chars)
         self.assertLessEqual(queued[-1]["emitted_chars"], ingest_worker.CLAMP + 600)
         self.assertEqual(len(run.call_args.args[0]), queued[-1]["emitted_chars"])
 

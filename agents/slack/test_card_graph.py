@@ -378,6 +378,11 @@ def _blocks_text(blocks) -> str:
 
 class GraphTests(unittest.TestCase):
     def setUp(self):
+        # card.py reads note_links from the host boring.json; boring.example.json ships links,
+        # which lengthen every row and move the char-budget cut on a fresh clone.
+        links = mock.patch.object(card.boring_config, "note_links", return_value=())
+        links.start()
+        self.addCleanup(links.stop)
         self.sends = []
         self.handovers = []
         self.stubs = Stubs()
@@ -2180,14 +2185,18 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-0700.md",
+                    "note": "/vault/wiki/wiki-00000000700.md",
                     "kind": "contested",
                     "reason": "채점기가 잡은 문장입니다.",
                 },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-0701.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-2",
+                    "note": "/vault/wiki/wiki-00000000701.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-28T00:00:00+00:00",
             },
         ]
@@ -2201,7 +2210,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-new",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "첫째 근거 문장입니다.",
                 },
@@ -2210,13 +2219,17 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-old",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                 },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-other", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-other",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-28T00:00:00+00:00",
             },
         ]
@@ -2234,11 +2247,19 @@ class LiveProposedTests(unittest.TestCase):
     def test_a_pair_held_within_the_ire_window_stays_off_the_card(self):
         rows = [
             {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "contested",
+                },
                 "observed_at": "2026-09-30T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-2",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
         ]
@@ -2246,7 +2267,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "1.0",
                     "sessions": ["s-1"],
@@ -2269,11 +2290,15 @@ class LiveProposedTests(unittest.TestCase):
     def test_a_malformed_hold_row_raises_not_skips(self):
         rows = [
             {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "contested",
+                },
                 "observed_at": "2026-09-30T00:00:00+00:00",
             }
         ]
-        held = [{"attributes": {"choice": "defer", "note": "/vault/wiki/wiki-2498.md"}}]
+        held = [{"attributes": {"choice": "defer", "note": "/vault/wiki/wiki-00000002498.md"}}]
         with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=held)):
             with self.assertRaises(ValueError):
                 card_live._live_proposed(24)
@@ -2285,14 +2310,18 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "채점이 잡은 옛 문장",
                 },
                 "observed_at": "2026-09-30T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2300.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-2",
+                    "note": "/vault/wiki/wiki-00000002300.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
         ]
@@ -2300,7 +2329,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "1.0",
                     "choice": "delegate",
@@ -2316,8 +2345,8 @@ class LiveProposedTests(unittest.TestCase):
         self.assertEqual(
             [(p.note, p.kind) for p in out],
             [
-                ("/vault/wiki/wiki-2498.md", "contested"),
-                ("/vault/wiki/wiki-2300.md", "used"),
+                ("/vault/wiki/wiki-00000002498.md", "contested"),
+                ("/vault/wiki/wiki-00000002300.md", "used"),
             ],
         )
         self.assertEqual(out[0].reason, "모델이 본 이유")
@@ -2330,7 +2359,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "원래 근거 문장",
                 },
@@ -2339,7 +2368,7 @@ class LiveProposedTests(unittest.TestCase):
         ]
         base = {
             "session_id": "s-1",
-            "note": "/vault/wiki/wiki-2498.md",
+            "note": "/vault/wiki/wiki-00000002498.md",
             "proposed_kind": "contested",
             "card_ts": "1.0",
             "choice": "delegate",
@@ -2364,7 +2393,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "원래 근거 문장",
                 },
@@ -2375,7 +2404,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "1.0",
                     "choice": "delegate",
@@ -2387,7 +2416,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "2.0",
                     "choice": "delegate",
@@ -2405,15 +2434,19 @@ class LiveProposedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as vault:
             wiki = os.path.join(vault, "wiki")
             os.makedirs(wiki)
-            with open(os.path.join(wiki, "wiki-2216.md"), "w", encoding="utf-8") as f:
-                f.write("---\nid: wiki-2216\ntitle: '폴더 관례'\nproject: ohmyboring\n---\nbody\n")
-            with open(os.path.join(wiki, "wiki-2300.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(wiki, "wiki-00000002216.md"), "w", encoding="utf-8") as f:
+                f.write("---\nid: wiki-00000002216\ntitle: '폴더 관례'\nproject: ohmyboring\n---\nbody\n")
+            with open(os.path.join(wiki, "wiki-00000002300.md"), "w", encoding="utf-8") as f:
                 f.write(
-                    "---\nid: wiki-2300\ntitle: 구조 개편 조각 3d\nproject: ohmyboring\n"
+                    "---\nid: wiki-00000002300\ntitle: 구조 개편 조각 3d\nproject: ohmyboring\n"
                     "date: 2026-09-29\nomb_session_id: s-1\n---\nbody\n"
                 )
             row = {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2216.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000002216.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T23:54:47+00:00",
             }
             with (
@@ -2429,14 +2462,18 @@ class LiveProposedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as vault:
             wiki = os.path.join(vault, "wiki")
             os.makedirs(wiki)
-            with open(os.path.join(wiki, "wiki-0100.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(wiki, "wiki-00000000100.md"), "w", encoding="utf-8") as f:
                 f.write("---\ntitle: 첫 노트\nproject: p\ndate: 2026-09-01\nomb_session_id: s-1\n---\nb\n")
-            with open(os.path.join(wiki, "wiki-0200.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(wiki, "wiki-00000000200.md"), "w", encoding="utf-8") as f:
                 f.write("---\ntitle: 둘째 노트\nproject: p\ndate: 2026-09-02\nomb_session_id: s-1\n---\nb\n")
-            with open(os.path.join(wiki, "wiki-0300.md"), "wb") as f:
+            with open(os.path.join(wiki, "wiki-00000000300.md"), "wb") as f:
                 f.write(b"---\ntitle: \xff\xfe broken\n---\n")
             row = {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0300.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000000300.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T23:54:47+00:00",
             }
             with (
@@ -2458,7 +2495,11 @@ class LiveProposedTests(unittest.TestCase):
                             f"---\ntitle: {title}\nproject: p\ndate: {day}\nomb_session_id: s-1\n---\nb\n"
                         )
                 row = {
-                    "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0900.md", "kind": "used"},
+                    "attributes": {
+                        "session_id": "s-1",
+                        "note": "/vault/wiki/wiki-00000000900.md",
+                        "kind": "used",
+                    },
                     "observed_at": observed_at,
                 }
                 with (
@@ -2668,7 +2709,7 @@ class ScoreAndSampleTests(unittest.TestCase):
     POP = [
         cc.ProposedVerdict(
             session_id=f"s{i}",
-            note=f"/vault/wiki/wiki-{100 + i}.md",
+            note=f"/vault/wiki/wiki-{100 + i:011}.md",
             kind="used",
             at=f"2026-10-0{i + 1}T00:00:00+00:00",
         )
@@ -2739,9 +2780,9 @@ class ScoreAndSampleTests(unittest.TestCase):
 
     def test_a_confirm_press_raises_compared_by_one_and_leaves_the_pool(self):
         owner_rows = [
-            _pressed("t1", "agree", "s5", "/vault/wiki/wiki-105.md"),
-            _pressed("t2", "agree", "s6", "/vault/wiki/wiki-106.md"),
-            _pressed("t3", "flip", "s4", "/vault/wiki/wiki-104.md"),
+            _pressed("t1", "agree", "s5", "/vault/wiki/wiki-00000000105.md"),
+            _pressed("t2", "agree", "s6", "/vault/wiki/wiki-00000000106.md"),
+            _pressed("t3", "flip", "s4", "/vault/wiki/wiki-00000000104.md"),
         ]
         before = self._score(owner_rows)
         self.assertEqual(before.score, cc.Scored(agreed=2, compared=3))
@@ -2754,8 +2795,10 @@ class ScoreAndSampleTests(unittest.TestCase):
         self.assertEqual(len(after.samples), 2)
 
     def test_shown_pairs_and_todays_review_rows_are_left_out(self):
-        shown = [_event("t", session_id="s2", note="/vault/wiki/wiki-102.md", proposed_kind="used")]
-        on_lane = [cc.ProposedVerdict(session_id="s0", note="/vault/wiki/wiki-100.md", kind="used", at="t")]
+        shown = [_event("t", session_id="s2", note="/vault/wiki/wiki-00000000102.md", proposed_kind="used")]
+        on_lane = [
+            cc.ProposedVerdict(session_id="s0", note="/vault/wiki/wiki-00000000100.md", kind="used", at="t")
+        ]
         out = self._score([], shown=shown, reviews=on_lane)
         self.assertEqual(out.score, cc.Scored(agreed=0, compared=0))
         self.assertTrue({"s2", "s0"}.isdisjoint(s.session_id for s in out.samples))
@@ -2912,6 +2955,18 @@ class AdviceAheadTests(unittest.TestCase):
             got = card_live._live_advice_written()
         self.assertEqual([p.subject for p in got], ["f64_risk"])
         self.assertEqual(asked, [(aw.EVENT, aw.WINDOW_HOURS)])
+
+
+class WorkAtFallbackTests(unittest.TestCase):
+    def test_no_note_by_proposal_day_names_the_smallest_wiki_number(self) -> None:
+        # `_session_works` is string-sorted, so wiki-10000 comes ahead of wiki-9999.
+        # An unnumbered note (daily-brief-*) is stored as number 0 and must not win.
+        notes = [
+            (0, "2026-11-03", "daily"),
+            (10000, "2026-11-02", "work 10000"),
+            (9999, "2026-11-01", "work 9999"),
+        ]
+        self.assertEqual(card_live._work_at(notes, "2026-10-01"), "work 9999")
 
 
 if __name__ == "__main__":

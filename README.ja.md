@@ -29,7 +29,9 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 > 新規クローンは **vault が空** なので、初日の `make ask` は何も見つけられません。`make collect` で Claude の過去記録を埋めれば、以降の Claude セッションは自動蓄積され、Codex は取り込み可能なトランスクリプトをワーカーが処理します（[取り込み](#取り込み-ingestion)参照）。
 
-> **Docker**、**Python 3**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。
+> **Docker**、**uv**、**jq**、**curl**、**git**、**make**、およびローカル LLM サーバー — **Ollama** または **LM Studio** (または別の OpenAI-compatible エンドポイント)が必要です。Python のバージョンは uv が `pyproject.toml` のとおりに取得するため、システムの Python は関係ありません。
+>
+> 同じ Mac 上の 2 つ目のクローンは、コンテナ名とポートが固定のため 1 つ目と衝突します。[トラブルシューティング](#トラブルシューティング)の表を参照してください。
 
 **ローカル LLM バックエンドを選ぶ:**
 
@@ -55,13 +57,65 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 
 ---
 
+## 普段の使い方
+
+- **セッションは前のセッションが止まったところから始まります。** セッションを開くと `SessionStart` フックが、開いたプロジェクトのカード（最近の決定・リスク・事実・次にやること）を差し込みます。その後はプロンプトごとに、文面に合う過去のノートを最大 3 件付けます（`hooks/recall.py`）。
+- **決まったことは決まったその場で書き残します。** 決定とその理由、ようやく突き止めた原因、自分が言ったルールを、エージェントが `remember` で 1 件のノートに残し、決めた内容は `claims`（主語・述語・値・種類）に入れて一覧からすぐ引けるようにします。
+- **次のセッションは解き直す前にまず読みます。** 「どこまでやったか」は `next_actions`、もう決まっているかもしれないことは `decisions`、見覚えのある形の問題は `recall` で確かめます。
+- **セッション同士はノートで仕事を渡します。** あるセッションが `remember` で引き継ぎノートを書き、別のセッション（`/clear` の後や別のターミナル）がそのノート番号で `recall` して引き継ぎます。
+- **朝は要約から始まります。** `brief`・`weekly_brief` ツールが最近の作業を新しい順に要約し、`make card` が朝の提案カードを Slack に送ります。
+
+---
+
+## エージェントにつないで作業を良くする
+
+エンジンは `http://localhost:7710/mcp` で MCP ツールを提供します。このリポジトリの `.mcp.json` が Claude Code に登録し、`install.sh` が Claude フックと Cursor/Codex の MCP 設定もつなぎます（[フックを手動で設定](#フックを手動で設定) 参照）。
+
+メモリが役に立つ輪:
+
+1. **書く** — 決まったら、完成したノートと claims を `remember` で残します。
+2. **解き直す前に読む** — もう一度考える前に `recall`・`decisions`・`next_actions` を呼びます。
+3. **役に立ったかを記録する** — `verdict` で、セッションに渡されたノートが使われたか（`used`）間違っていたか（`contested`）を残します。
+
+まず試すコマンド 3 つ:
+
+```bash
+make remember M="新しい clippy がビルドを壊したので Rust ツールチェーンを固定する。" T="ツールチェーン固定"
+make ask Q="Rust ツールチェーンはなぜ固定した?"
+make doctor     # スタック・フック/MCP・ワーカー/キュー・最新の取り込みを一画面で
+```
+
+---
+
+## ストレージ: pgvector または SurrealDB
+
+- **原本は pgvector です。** 既定値も pgvector です（`vector.backend` = `pgvector`）。
+- **SurrealDB は横で追従するコピーとして動かせます。** `vector.backend` を `surreal` にし、`docker compose --profile surreal up -d` で起動して、`vector-fill` で一度埋めます。するとベクトル検索の順位付けは SurrealDB で行われます。
+- **すべての書き込みはまず pgvector に入り、その後コピーされます。** チャンクと claim は書き込み直後に、文書とグラフのノード・エッジは sync の終わりごとに突き合わせて追いつき、4 つのログ表とコード索引の表は pgvector を読むパスが移します。`recurrences` は常に pgvector で動きます。
+- **原本はまだ移していません。** SurrealDB はまだコピーで、原本を SurrealDB に切り替える作業はまだ行っていません。
+- SurrealDB の検索候補数 `ef` の既定値は **2000** です。
+
+---
+
+## コード同期: どう蓄積され、つながり、使われるか
+
+**蓄積。** `code_index.sources[]` に書いたリポジトリごとに（書かなければ無効）、`code-sync` が Rust（`.rs`）・Python（`.py`）・シェル（`.sh`、`.bash`）のファイルを Tree-sitter で解析し、repository・file・symbol・relation の 4 つの表に入れます。コードは `vault/wiki` にコピーしません。
+
+**つながり。** ノートを保存するとき、本文中の `path/to/file.rs:123` という言及がアンカーになります。主語か値にそのファイル名を含む claim がアンカーを受け取り、エンジンはその行を覆うシンボル本体のハッシュ（行番号がなければファイル全体のハッシュ）を保存します。予定された sync のたびにそのシンボルを再ハッシュし、位置が動いただけならアンカーが追いかけ、本体が変わったか消えたなら claim を **stale** と記録します。
+
+**使われ方。** エージェントは `code_search` でコード索引を探し、`code_symbol` でシンボル 1 つとその到達先を読み、`code_index_status` で索引の範囲を確かめます。`corpus_status` の `claims_stale` は、決まった事実のうち指しているコードがその後変わったものの数です。
+
+**限界。** 呼び出し・import・参照の対象は解決されないテキストのまま残ります。それをシンボルに解決する段階はまだありません。
+
+---
+
 ## 取り込み (ingestion)
 
 メモリの入り口は 4 つ — セットアップ後、自動経路はほとんど触りません：
 
 | 方法 | コマンド | タイミング |
 | --- | --- | --- |
-| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。 |
+| **自動（セッション終了時）** | SessionEnd フック（`install.sh` が設定） | すべての Claude Code セッション — `hooks/distill-session.py` がトランスクリプトを蒸留し `remember` します。対になる `UserPromptSubmit` フック（`recall.py`）が関連する過去のメモリを新しいプロンプトへ自動注入します。最大 3 つのスニペットで、それぞれそのノートが決めた claim を同送します（`RECALL_CLAIMS_PER_HIT`）。 |
 | **自動（Codex ワーカー）** | ホスト launchd/cron ワーカー（`install.sh` が設定） | Codex には SessionEnd フックがありません。ホストワーカーが 20 分ごとに `~/.codex/sessions/**/*.jsonl` をスキャンし、まだ書き込み中のトランスクリプトと実際の subagent rollout はスキップし、取り込み可能なトランスクリプトを同じ `remember` 経路で保存します。`hermes-agent` が有効なら `codex-memory-ingest-worker` も設定されます。どちらも `make doctor` で確認します。 |
 | **過去セッションのバックフィル** | `make collect [N=20]` | インストール直後、空の vault を `~/.claude/projects` の履歴で埋めるとき。新しい順・冪等（セッションごとのマーカーで蒸留済みはスキップ）、1 回に `N` 件だけ処理し CPU を占有しません。 |
 | **今すぐ（セッションを終えずに）** | `make distill-now` · `make remember M="…"` | セッションを終了せずに即座に取り込みたいとき。`distill-now` は**現在の**トランスクリプトをキューに入れ、hermes（`boring-agent`）にその場で処理させるため、hermes が起動している必要があります。セッション終了時の通常の取り込みもその後そのまま動作します（初期ノート + 最終ノートの両方ができる場合あり）。`remember` は自分で書いたノートを保存します。 |
@@ -71,18 +125,29 @@ make ask Q="docker build cache の問題、どう直したっけ？"
 `install.sh` が自動で行います。やり直す場合（または `BORING_WIRE=0` で実行した場合）：
 
 ```bash
-python3 agents/shared/agent_wiring.py --install \
+uv run --locked python agents/shared/agent_wiring.py --install \
   --boring-home ~/oh-my-boring --server-name ohmyboring \
   --server-url http://localhost:7710/mcp
 ```
 
-このコマンドは Claude フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、`recall.py` を実行する `UserPromptSubmit` フックを追加します。
+このコマンドは Claude フック、Cursor/Codex MCP エントリ、Codex ホストワーカー、そして `hermes-agent` が有効な場合は Hermes cron ワーカーを設定します。Claude だけを手で編集する場合は、`~/.claude/settings.json` に `python3 ~/oh-my-boring/hooks/distill-session.py` を実行する `SessionEnd` フックと、下記の `UserPromptSubmit`・`SessionStart` フックを追加します。
+
+Claude Code のフックが呼ぶもの（`agents/shared/agent_wiring.py` がちょうどこの 4 つを設定します）:
+
+| フックイベント | 呼ぶもの | 内容 |
+| --- | --- | --- |
+| `SessionStart` | `agents/claude-code/session-start-recall.py` | 開いたプロジェクト（cwd / git remote から推定）の直近コンテキストカードを注入 |
+| `UserPromptSubmit` | `hooks/recall.py` | 関連する過去ノートをプロンプトへ注入 |
+| `UserPromptSubmit` | `hooks/rules.py` | 自分で決めた常設ルールを、トリガー語が出たときに提示 |
+| `SessionEnd` | `hooks/distill-session.py` | トランスクリプトを蒸留し `remember` で保存 |
+
+エージェント自身のメモリフォルダに `.md` を散らす代わりに、`remember` / `recall` で記憶してください。契約・決定・引き継ぎは `remember` で書き、`recall` で読み戻します。セッションがコンテキスト上限に達する前に `remember` で引き継ぎノートを残せば、次のセッションが `SessionStart` または明示的な `recall` で受け取って続けられます。
 
 ---
 
 ## メモリを見る
 
-ノートはただのマークダウンなので、**`vault/` フォルダを [Obsidian](https://obsidian.md) のvault（保管庫）として開く** だけで、グラフビュー・バックリンク・タグ・全文検索がそのまま使えます。コンパイル済みノートには Obsidian-safe な `tags` と `[[wiki-NNNN]]` の `relates_to` リンクが既に入っているため、グラフビューがメモリのつながりをそのまま描画します（`BORING_VECTOR=on` のとき GraphRAG グラフがこのリンクに投影され最も豊かになります）。専用 UI を作る必要はありません。Obsidian が作る `.obsidian/` ワークスペースフォルダは gitignore されているので、レイアウトはローカルに留まり git に漏れません。
+ノートはただのマークダウンなので、**`vault/` フォルダを [Obsidian](https://obsidian.md) のvault（保管庫）として開く** だけで、グラフビュー・バックリンク・タグ・全文検索がそのまま使えます。コンパイル済みノートには Obsidian-safe な `tags` と `[[wiki-00000000001]]` の `relates_to` リンクが既に入っているため、グラフビューがメモリのつながりをそのまま描画します（`BORING_VECTOR=on` のとき GraphRAG グラフがこのリンクに投影され最も豊かになります）。専用 UI を作る必要はありません。Obsidian が作る `.obsidian/` ワークスペースフォルダは gitignore されているので、レイアウトはローカルに留まり git に漏れません。
 
 Obsidian はコーパスが何を **持っているか** を見せます。コーパスが実際に何を **しているか** — recall
 フックがどのノートをセッションに注入したか、リトリーバがそれを見つけるまでどこまで手を伸ばしたか、
@@ -121,7 +186,12 @@ flowchart LR
 
 - **Read door** — 高速、LLM 不要。`make ask`、`recall.py`、MCP `recall` が `vault/wiki` を直接読みます。
 - **Write door** — gated。`distill-session.py` がローカル LLM を呼び出し、ohmyboring の `remember` MCP tool で書き込みます。
-- **Duplicate gate** — 重複ノートは通常スキップします。同じセッションまたは強い rollout コピーから、より内容の濃いノートが来た場合は、`remember` が同じ `wiki-NNNN.md` を書き換えて再取り込みします。
+- **Duplicate gate** — 重複ノートは通常スキップします。同じセッションまたは強い rollout コピーから、より内容の濃いノートが来た場合は、`remember` が同じ `wiki-00000000001.md` を書き換えて再取り込みします。
+
+**役割分担（エンジン・ツール・エージェント）。** 分担の根拠は `drudge/PHILOSOPHY.md` です。最小の構造で最も多くの誤った状態を防ぎ（Layer 3、54 行）、悪い入力は内側の奥ではなく境界で拒否します（Layer 2、47 行）。
+- **エンジン**（`drudge`）— 決定論的で LLM を使わない: ゲート・重複排除・検索・上限と停止はプロンプトではなくコードにあります。
+- **ツール**（MCP）— 両者の契約: 25 個のツール（`remember`、`recall` …）がエージェントの呼ぶものです。
+- **エージェント** — 判断: 何を書き何を尋ねるかを決めてツールを呼び、渡したものはエンジンが検査します。
 
 ### ワークフローグラフ契約
 
@@ -165,8 +235,13 @@ flowchart LR
 | `llm.embed_model` / `llm.embed_dim` | 埋め込みモデル + そのベクトル次元（カーネル唯一のモデル） |
 | `llm.bootstrap` | `auto` = ブートストラップが起動/pull 可能 · `manual` = ヘルスチェックのみ（サーバーはユーザー所有） |
 | `repos[]` | パス/remote ルール → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | 独立した AST コードコーパスへ明示的に追加するソースルート。現在は Rust/Tree-sitter のみで、opt-in するまで無効 |
+| `code_index.sources[]` | 独立した AST コードコーパスへ明示的に追加するソースルート。Tree-sitter で Rust・Python・シェルに対応し、opt-in するまで無効 |
 | `agents[]` | エージェントのセッション対話記録・アダプター設定（生のリポジトリ・コードベース取り込み用ではない） |
+| `allow_company_origin` | boolean、既定 `false`。`true` = `origin:company` ノート（会社業務のセッション経験）を受け入れ済みコーパスとして扱い、監査の "clean" 表示を反転させない。`false` はレビュー対象としてフラグ。セッション経験のみ対象 — 会社 KB の原本は引き続きポリシー外 |
+| `checkout_roots` | git チェックアウトを置くディレクトリの一覧（`~` 展開、深さ ≤ 3）。夜間の衛生チェックが、リモートのリポジトリ名ではなくチェックアウトのフォルダ名で付いたプロジェクトを報告。未設定 = チェックを実行しない（0 ではなく「スキャンなし」と報告） |
+| `card.note_links` | 朝のカードでノート id の横に出すリンク（順番どおり）。キーを省くとそのリンクは非表示。`obsidian`（`vault`、任意で `folder`）· `file`（`folder` = ホストの絶対パス、`~` 不可；`editor` は URL スキーム、既定 `vscode`） |
+| `embed_model` / `embed_dim`（最上位） | 非推奨の v1 キー（既定 `bge-m3` / `1024`）。`llm.embed_model` / `llm.embed_dim` が未設定のときだけ代替として読む — `llm.*` キーを使ってください |
+| `vector.backend` | エンジンのベクトルインデックスのバックエンド。`pgvector`（既定）または `surreal`。`surreal` は `vector.surreal`（`url`、`namespace`、`database`、`user`、`password_env`）の SurrealDB からベクトルを読む（`--profile surreal` で起動、`vector-fill` コマンドで充填）。充填後は chunk・claim の書き込みを先に `pgvector` へ、続けて SurrealDB へ行い、SurrealDB への書き込みが失敗すると「`pgvector` には記録済み」というエラーになり、`vector-fill` を再実行して復旧する（`vector-check` と doctor が両者を照合）。`recurrences` は `pgvector` のまま。`config_get` と起動ログが両方を知らせる。他の値でもエンジンは止まらず `pgvector` で動き、`config_get` と起動ログがそれを知らせる |
 
 コードは `vault/wiki` にコピーしません。`boring.example.json` を参考に source を有効化し、`cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>` で取り込み、`code-status` または MCP の `code_search`、`code_symbol`、`code_index_status` で照会します。Tree-sitter は構文とパースエラーだけを記録し、call・import・reference の対象文字列は semantic resolver を追加するまで未解決のまま保持します。
 
@@ -242,7 +317,7 @@ make readiness
 | `BORING_READINESS_PENDING_TTL` | readiness で stale `.pending` とみなす閾値。`INGEST_PENDING_TTL`、次に `1800` 秒へフォールバック |
 | `BORING_READINESS_RETRY_TTL` | readiness で stale `.retry` とみなす閾値。`INGEST_RETRY_TTL`、次に pending 閾値へフォールバック |
 | `BORING_OWNER_TOKEN` | オーナー呼び出し(`supersedes` 訂正・カード判定ボタン)に必要な共有シークレット。エンジン・ドア・カードが同じ値を見る必要があり、compose が両コンテナに渡す。未設定 = 誰もオーナーとして書けない |
-| `BORING_DOOR_URL` | 朝カードと Claude Code SessionStart フックがドアを探す URL — 両方の利用者に必須。なければカードは起動拒否(exit 2)、フックは `오늘 승인한 것` 節を省略する。利用者側に既定値はない |
+| `BORING_DOOR_URL` | 朝カードと Claude Code SessionStart フックがドアを探す URL — 両方の利用者に必須。なければカードは起動拒否(exit 2)、フックは `오늘 승인한 것` 節(フックが出力する韓国語ヘッダーそのまま、「本日承認したもの」)を省略する。利用者側に既定値はない |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプションの Slack 秘書（`make secretary`）。ボットトークンには `message.channels` スコープが必要 — スレッド返信が訂正を記憶に届ける経路 |
 
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。イベントはまず OpenTelemetry 形式のログレコードとしてローカルエンジン DB に保存されます。NDJSON ファイルはエンジン停止時の fallback スプールで、`BORING_EVENT_SINK=spool` または `both` を選んだ場合だけ意図的にファイル中心/同時記録になります。DB view は HTTP `/events`（`/otel-events` alias も同じ）または MCP `events`、`make events` は DB を先に読み、失敗時はファイルスプールを読みます。
@@ -337,7 +412,7 @@ make collect N=20
 
 # GitHub Codex（通常は Hermes ワーカーが処理）
 make doctor
-COLLECT_LIMIT=20 python3 agents/codex/collect-sessions.py
+COLLECT_LIMIT=20 uv run --locked python agents/codex/collect-sessions.py
 ```
 
 ### 日次/週次の消費
@@ -354,7 +429,7 @@ curl -s -X POST http://localhost:7710/weekly \
   -d '{"project":"omb"}' | jq .
 
 # Slack に送られる朝のブリーフィング本文をプレビュー
-python3 agents/hermes/briefing.py
+uv run --locked python agents/hermes/briefing.py
 
 # Stalled register — 7日以上動いていない項目（BORING_VECTOR=on が必要）
 curl -s -X POST http://localhost:7710/stalled \
@@ -363,6 +438,12 @@ curl -s -X POST http://localhost:7710/stalled \
 ```
 
 Hermes cron はブリーフィングスクリプトの stdout を Slack `mrkdwn` テキストとして送信します。`make eval` の fixture ノートはゲート実行中は検索に使われますが、終了後に prune され、recency/claim ブリーフィング surface からも除外されるため、日次/週次ブリーフィングには混ざりません。
+
+記録の残し方の案内 (ブロックではなく推奨です):
+
+- 契約・引き継ぎ・判定などの記録は、ローカルの `.md` ファイルではなく `remember` で残します。
+- 新しい版は `supersedes` で前の版を指します。
+- `remember` がタイムアウトしたように見えたら、書き直す前にボールトでタイトルから保存済みかを確認します: `rg -l --no-ignore '<タイトルの一部>' vault/wiki`。
 
 ### PII / 機密データゲート
 
@@ -388,11 +469,17 @@ rules:
     reason: "Staging credential"
 ```
 
+既定のポリシーは `vault/rules/pii.yaml`（住民番号など）として同梱され、`pii.local.yaml` がその上にマージされます。ルールに `action` がなく `default_action` も省略した場合は `flag` になります。
+
 `block` ルールは `remember` 時にノートを拒否、`redact` ルールは保存前にマスク、`flag` ルールはノートを保存しつつ `pii-flag` タグを付けます。特定の行だけ flag ルールを通したい場合は、その行に免除マーカーを追加してください:
 
 ```markdown
 Jira チケット PROJ-1234 <!-- pii-allow: internal-ticket --> は公開情報です。
 ```
+
+**シークレットのマスク（ユーザー設定なし）。** PII ルールとは別に、`remember` はノートのタイトルと本文にある既知の認証情報の形を `‹REDACTED›` に置き換え、クエリログにも同じマスクをかけます。対象は Slack トークン、`sk-` / `sk-ant-` API キー、AWS `AKIA…` キー、GitHub トークン、Google `AIza…` キー、JWT、`-----BEGIN … PRIVATE KEY-----` ヘッダー、値が 12 文字以上の `api_key` / `secret` / `token` / `password` / `bearer` の代入です。このリストは設定ではなくコード内の定数（`drudge/src/redact.rs`）で、オフにしたり拡張したりする設定キーやファイルはありません。マスク範囲を変えるには `redact.rs` を直して再ビルドしてください。独自の形には上の PII ルールを使います。
+
+**会社情報の切り分け。** `allow_company_origin`（gitignore された `boring.json`、既定 `false`）は、監査が `origin:company` ノート（会社業務のセッション経験）をどう扱うかを決めます。`false`: レビュー対象としてフラグされ、監査の "clean" 表示が反転します。`true`: 受け入れ済みコーパスとして扱い、表示は維持されます。`false`（既定）のときは `decisions`・`risks`・`next_actions`・`stalled` レジスタからも `company` ノートを除きます。書き込みは止めません。どのノートが `company` になるかは、設定表の `repos[]` ルールが決めます。
 
 ### MCP tool 呼び出し例（raw JSON-RPC）
 
@@ -427,10 +514,11 @@ curl -s -X POST http://localhost:7710/mcp \
 | アダプター | パス | 消費主体 | エントリポイント | 役割 |
 |---|---|---|---|---|
 | Claude Code | `agents/claude-code/distill-session.py` | `SessionEnd` / `Stop` hook | セッションを要約し `remember` を呼び出す |
+| Claude Code | `agents/claude-code/session-start-recall.py` | `SessionStart` hook | 最初のターンの前に構造化 context（`/context`）を読み込む |
 | Claude Code | `agents/claude-code/recall.py` | `UserPromptSubmit` hook | 関連 snippet を取得しプロンプト context に注入 |
 | Cursor | `agents/cursor/README.md` | MCP only | `~/.cursor/mcp.json` | `ohmyboring` を MCP サーバーとして公開 |
 | Codex | `agents/codex/README.md` | MCP + ホストワーカーのバックフィル | `~/.codex/mcp.json` / launchd または cron / `collect-sessions.py` | `ohmyboring` を MCP サーバーとして公開し、取り込み可能な Codex セッションをバックフィル。設定済みワーカーは安定した rollout トランスクリプトを取り込み、実際の subagent はスキップ |
-| hermes-agent | `agents/hermes/ingest-worker.py` | `hermes cron --script` | Claude/Codex 取り込みワーカーと定期ブリーフィングを実行 |
+| hermes-agent | `agents/hermes/` | `hermes cron --script` + MCP | 設定駆動の cron（`briefing`、`morning-card`、`weekly-card`）+ 直列のバックフィルワーカー（`ingest-worker.py`、Codex コレクター）。カード job は `card_runner.py` 経由でカードプログラムを実行します（配信は `local` — ツールが Slack に直接投稿）。カードのスケジュールは hermes cron が持ちます（launchd の `com.ohmyboring.morning-card` job は 2026-09-28 に削除） |
 | scheduler | `agents/schedulers/collect-sessions.py` | cron / launchd / 手動 | 古い Claude Code セッションの lazy バックフィル |
 | shared | `src/ohmyboring/config.py` | アダプター import | `boring.json` ポリシーローダー |
 | shared | `agents/shared/agent_wiring.py` | `install.sh` | 有効なエージェントの hook/MCP 設定を idempotent に構成 |
@@ -452,9 +540,9 @@ curl -s -X POST http://localhost:7710/mcp \
 | `POST /ask` / `ask` | メモリから直接答える質問 | 不要 |
 | `POST /search` / `recall` | 生のメモリ抜粋。各 hit は、配信経路に比較可能な数値がある場合に `dist` と `dist_kind`(`vector_cosine` または `text_rank`)を伴います。wiki-recall フォールバックでは、比較できない第三の尺度のスコアを報告する代わりに両方を省きます | 不要。セマンティック検索は有効時にベクトルを使用 |
 | `/remember` / `remember` | 整えたノートを保存 | — |
-| `POST /gap` / `gap` | 欠落を記録 — `session_id`、`query`、`kind`(`missing`・`stale`・`broken`)、`handed`(ノートの source_path、`stale` は必須)。ドアは記録のみで判断しません | 不要 |
+| `POST /gap` / `gap` | 欠落を記録 — `session_id`、`query`、`kind`(`missing`・`stale`・`broken`)、`handed`(ノートの source_path、`stale` は必須)。記録のみで判断しません。`DOOR_LINK_WRITER=engine`（compose の既定）ならエンジンが、`python` ならドアが答えます | 不要 |
 
-ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、独自のルート `GET /approved`・`GET /claim-source`・`GET /claim-sources`・`GET /projects?active_days=`・`GET`/`POST /repairs/split-subjects`・`POST /gap` には自ら答える。未登録のパスは 404 — 万能プロキシではない。
+ドア（`127.0.0.1:7710`）はエンジンのルート表を中継し（起動時に契約スナップショットから読んでエンジンに従う）、一部のルートは `docker-compose.yml` の `DOOR_*` スイッチ（11 個）に応じて自ら答える（`engine` はルートをエンジンに渡してドアはプロキシ、`python` はドアが答える）。`DOOR_LINK_WRITER=engine` なら `GET`/`POST /repairs/split-subjects` と `POST /gap` はエンジンが答え、ドアは POST split の row 検証・再読み込み・カード行の後始末だけを担う。`DOOR_MEMORY_READER` は `GET /approved`・`/claim-source`・`/claim-sources`・`/rules` を、`DOOR_SEARCH_READER` は `/projects` と `/search` を振り分ける。`GET /projects?active_days=` はドア自身の DB ベースの変種である。本番では 11 個のスイッチがすべて `engine` である。ドアに `/run/*` ルートはない — カードプログラムは hermes cron が直接実行する。未登録のパスは 404 — 万能プロキシではない。
 
 ### トークン予算
 
@@ -488,9 +576,9 @@ MCP に対応したエージェントならどれも ohmyboring を利用でき�
 
 （VS Code Copilot は root key `servers` を使う `.vscode/mcp.json` を使用します。CLI 代替: `claude mcp add --transport http --scope project ohmyboring http://localhost:7710/mcp`。compose の sibling コンテナは `http://boring-door:7710/mcp` でアクセスします。）
 
-利用可能な tools（24個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief`（生成 — LLM 実行）· `decisions` · `risks` · `next_actions` · `stalled` · `recurrences` · `project_status`（レジスタ — 行・素材を返す、LLM なし）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）· `verdict`（渡されたノートへの判定）。
+利用可能な tools（25個）: `recall` · `neighbors` · `claims`（記憶検索）· `code_search` · `code_symbol` · `code_index_status`（独立した AST コードコーパス）· `ask` · `brief` · `weekly_brief`（生成 — LLM 実行）· `decisions` · `risks` · `next_actions` · `stalled` · `recurrences` · `project_status`（レジスタ — 行・素材を返す、LLM なし）· `context` · `corpus_status` · `events` · `config_get`（構造化 / introspection）· `remember` · `forget` · `classify_repo` · `sync`（書き込み / メンテナンス）· `verdict`（渡されたノートへの判定）· `gap`（記憶が答えられなかった質問の報告）。
 
-デフォルトの wiki-first モード（`BORING_VECTOR=off`）では、recency/vector 順序、グラフ、ローカルイベント DB に依存する tool が pgvector バックエンドを必要とし、`BORING_VECTOR=on` を設定するまで JSON-RPC `-32603` を返します: `neighbors`、`claims`、`corpus_status`、`events`、`brief`、`weekly_brief`、`project_status`、`decisions`、`risks`、`next_actions`、`stalled`、`recurrences`、`verdict`。`recall` と `ask` は `vault/wiki` を直接読み、`context` は呼び出し可能ですが store がない場合は空の claim card を返します。`remember`、`forget`、`sync`、`config_get`、`classify_repo`、`code_search`、`code_symbol`、`code_index_status` は vector モードを必要としません。3 つのコード tool には有効な `code_index` source と事前の `code-sync` が必要です。
+デフォルトの wiki-first モード（`BORING_VECTOR=off`）では、recency/vector 順序、グラフ、ローカルイベント DB に依存する tool が pgvector バックエンドを必要とし、`BORING_VECTOR=on` を設定するまで JSON-RPC `-32603` を返します: `neighbors`、`claims`、`corpus_status`、`events`、`brief`、`weekly_brief`、`project_status`、`decisions`、`risks`、`next_actions`、`stalled`、`recurrences`、`verdict`、`gap`。`recall` と `ask` は `vault/wiki` を直接読み、`context` は呼び出し可能ですが store がない場合は空の claim card を返します。`remember`、`forget`、`sync`、`config_get`、`classify_repo`、`code_search`、`code_symbol`、`code_index_status` は vector モードを必要としません。3 つのコード tool には有効な `code_index` source と事前の `code-sync` が必要です。
 
 - `next_actions` *(`BORING_VECTOR=on` が必要)* — 次のアクション レジスタ: 最近の `next` claim とアクティブな `blocked` claim を短い ToDo/ブロッカー リストにまとめます。プロジェクト フィルタは optional。
 - `stalled` *(`BORING_VECTOR=on` が必要)* — 停滞レジスタ: `older_than_days`（デフォルト 7）より古い `next`、`blocked` claim を表示します。
@@ -533,7 +621,23 @@ curl -s -X POST http://localhost:7710/mcp \
 
 [hermes-agent](https://hermes-agent.org) はサードパーティの自律 supervisor です。Slack、オーケストレーション、cron ベースのバックフィルを ohmyboring の MCP バックエンド経由で動かせます。イメージを別途ビルドすれば `make up` が自動的に検出します。
 
-設定は hermes-agent プロジェクト**自身のドキュメント**に従います（ここでは対象外）— `~/.hermes/config.yaml` を ohmyboring の MCP（`http://boring-door:7710/mcp`）に向けてください。ohmyboring が同梱するのはこれを Slack assistant として配線するところまでで、それ以上に使うにはイメージを自分でビルドまたは改変してください。
+`boring.json` で hermes-agent を有効にすると、`make up` が自動で配線します:
+
+- `~/.hermes/config.yaml` に `mcp_servers.ohmyboring` を追加
+- 正本の `~/.hermes/scripts/briefing.py` をインストール（ドアへは `door_url()`、つまり `BORING_DOOR_URL` で到達）
+- `make smoke` で接続を検証
+
+`boring.json` で有効にします:
+
+```json
+{
+  "id": "hermes-agent",
+  "enabled": true,
+  "adapter": "cron"
+}
+```
+
+`~/.hermes/config.yaml` や `~/.hermes/scripts/briefing.py` を自分で変更している場合は先にバックアップしてください。`make up` は上書きの前に `.omb-bak` のコピーを残します。
 
 ---
 
@@ -551,9 +655,9 @@ curl -s -X POST http://localhost:7710/mcp \
 ## 開発 · ガードレール
 
 - SSOT ドキュメント: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test`
+- `make guard` = fmt + clippy + test + py-compile + py-unit-tests（`scripts/guard.sh`）、続いて vault データ衛生の dry-run
 - `make quality` = MCP tool、vector モード文書、削除済み危険 surface のリリース受け入れ drift ゲート
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy`
+- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
 
 ---
@@ -610,13 +714,22 @@ make sync
 ```text
 oh-my-boring/
 ├─ drudge/                  # Rust エンジン
+├─ src/ohmyboring/          # Python パッケージ (エンジン移植、ドアのロジック)
+├─ integrations/            # LangChain · LangGraph · Deep Agents パッケージ
 ├─ agents/                  # ホスト側エージェントアダプター
 │  ├─ claude-code/          # Claude Code hooks
-│  ├─ hermes/               # hermes-agent cron
+│  ├─ codex/                # Codex アダプター
+│  ├─ cursor/               # Cursor アダプター
+│  ├─ door/                 # ドア (:7710)
+│  ├─ hermes/               # hermes-agent cron + card_runner.py
+│  ├─ memory/               # Deep Agents メモリストア
 │  ├─ schedulers/           # cron/launchd バックフィル
-│  └─ shared/               # ポリシー/設定ライブラリ
+│  ├─ shared/               # ポリシー/設定ライブラリ
+│  └─ slack/                # カードプログラム
 ├─ hooks/                   # backward-compatible symlink → agents/
-├─ scripts/                 # guard.sh · smoke.sh
+├─ scripts/                 # guard.sh · smoke.sh · doctor.sh · …
+├─ docs/                    # PRD · RUNBOOK · reports
+├─ config/                  # (空、.gitkeep)
 ├─ vault/                   # raw → wiki メモリ
 ├─ data/                    # Postgres データ (gitignored)
 ├─ docker-compose.yml
@@ -625,6 +738,6 @@ oh-my-boring/
 └─ Makefile
 ```
 
-> **vault/wiki ID について:** `wiki-0000.md` は repo に含まれるサンプルノートです。個人ノートは `wiki-0001.md` から始まり gitignore されているため、private な内容が git に混ざることはありません。
+> **vault/wiki ID について:** `wiki-0000.md` は repo に含まれるサンプルノートで、ID が 4 桁の唯一のノートです。個人ノートは 11 桁の ID で `wiki-00000000001.md` から始まり gitignore されているため、private な内容が git に混ざることはありません。
 >
 > **プラットフォームについて:** macOS と Linux でテストされています。`hooks/` が backward-compatible な symlink を使用しているため、Windows はまだ公式にサポートされていません。

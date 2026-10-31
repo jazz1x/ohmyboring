@@ -4,8 +4,7 @@
 The product definition for this repository. `GOALS.md` is the "current-slice execution contract" derived from it.
 
 > For the 39 commits before this document, defect discovery dragged the documentation along. This document exists to reverse that direction.
-> Draft → six-seat panel review → two independent advisor rounds; the record of that process is in
-> `docs/reports/2026-08-25-panel-review.md` — read the reasoning there, and read
+> Draft → six-seat panel review → two independent advisor rounds; the process record is not kept in the repository, so read
 > **only the decisions** here.
 
 ## 0. BLUF
@@ -137,7 +136,7 @@ The first-class measurement is M8 (uptake), the diagnostic is M1 (precision). De
 ### R3. Solved experience does not silently vanish
 The gate stays (verifier → one repair → dead-letter), but **the key decision of a session that passed must not drop out of distillation.**
 
-A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all** (`docs/reports/2026-08-20-rag-usage-probe.md` §4 D2). And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
+A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all** (the 2026-08-20 rag-usage probe, §4 D2). And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
 
 **Derived work (scheduled)**: remove the structural fixed claim count per note, or split distillation per decision. Honest cost **1–2 weeks** — the prompt/verifier change itself is 2–4 days but it cuts across dedup, claim upsert, eval fixtures and mutation verification. And it is **forward-only**: the engine refused re-distillation 3/3 and the original raws are gone, so the compression of existing notes cannot be undone.
 
@@ -243,8 +242,8 @@ it moves the constants in `verdict_core` in a dated commit and cites this table.
 | 2026-08-31 | D1 — first window (08-26→09-09) reset: the control was counted per hit, not per prompt (`#242`); the hook was registered twice and doubled the sample (`#245`, `#246`). Reset at sample 0/0 | `#242` `#245` `#246`, this file's history |
 | 2026-09-02 | D4 — ledger expiry (3 days) shorter than session lifetime (median 48h, max 177h); 78% of ledger rows lost before scoring. Expiry moved to 14 days; window kept, sample split at the repair commit (`LEDGER_REPAIR_AT`); verdict reads post-repair only | `1f45fec`, `scripts/peek.py`, this file's history |
 | 2026-09-07 | D7/D8 — a mid-window baseline was hand-computed, then found double-counted and contaminated by filename matches from sessions inspecting the corpus. Figures void; only `event_log` rows at SessionEnd are the contract's value | this file's history |
-| 2026-09-11 | D9 — second window (08-31→09-14) abandoned: 26 of 36 rows were mid-session snapshots from a drain forging SessionEnd (`#312`); the scorer missed `wiki-NNNN` without `.md` (`#313`). New window registered in code at sample 0/0; repair boundary = `#313` commit instant | `#312` `#313` `#314`, vault `wiki-1676` `wiki-1677` |
-| 2026-09-11 | D10 — three channel changes landed before the window opened: fence usage protocol (`#316`), in-session dedup (`#317`, D6 built), concept-linked notes in the injection (`#318` `#319`). The window measures this channel. Still owed: consumption as edges, after the window | `#316`–`#320`, vault `wiki-1679` |
+| 2026-09-11 | D9 — second window (08-31→09-14) abandoned: 26 of 36 rows were mid-session snapshots from a drain forging SessionEnd (`#312`); the scorer missed `wiki-NNNN` without `.md` (`#313`). New window registered in code at sample 0/0; repair boundary = `#313` commit instant | `#312` `#313` `#314`, vault `wiki-00000001676` `wiki-00000001677` |
+| 2026-09-11 | D10 — three channel changes landed before the window opened: fence usage protocol (`#316`), in-session dedup (`#317`, D6 built), concept-linked notes in the injection (`#318` `#319`). The window measures this channel. Still owed: consumption as edges, after the window | `#316`–`#320`, vault `wiki-00000001679` |
 
 | 2026-09-17 | D11 — third window (09-12→09-26) reset: the SessionEnd hook was registered as `nohup … &`, and a process backgrounded in a non-interactive shell reads `/dev/null`, so the payload never reached the script; `>/dev/null` swallowed the error. What made the earlier windows look alive was the backfill collector forging `hook_event_name: SessionEnd`, removed in `#312` — so D9 measured the collector's schedule, not session ends. Registration repaired 2026-09-17T01:51:35Z; `LEDGER_REPAIR_AT` moves to that instant, not a commit, because no repository holds `~/.claude/settings.json`. New window registered at sample 0/0. Double-firing ruled out before the reset: of 858 sessions in `distill_resolution`, 27 have repeat rows and the smallest gap is 353s — the collector's period, not a second delivery | `#337` `#338`, this file's history |
 

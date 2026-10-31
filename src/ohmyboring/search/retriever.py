@@ -33,6 +33,8 @@ MCP_MAX_TOKENS = 16_384
 SEARCH_MAX_CLAIMS = 10
 #: serve.rs:785-787 — related 는 머리 hit 하나당 이 값까지만 (req.related().min(3)).
 SEARCH_MAX_RELATED = 3
+#: http.rs SEARCH_RELATED_MIN_SHARED — /search 의 related 는 공유 점수(claim 2 · concept 1) 합 2 이상만.
+SEARCH_RELATED_MIN_SHARED = 2
 #: drudge/src/serve/http.rs:35 — RELATED_SNIPPET_CHARS.
 RELATED_SNIPPET_CHARS = 1200
 
@@ -187,9 +189,10 @@ def _claims(state: _State) -> Either[_State, SearchFailure]:
     per_hit = min(max(state.claims, 0), SEARCH_MAX_CLAIMS)
     if per_hit <= 0:
         return Ok(state)
+    # /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
     return _capture(
         state,
-        pg.declared_claims(state.conn, _paths(state.ordered), per_hit),
+        pg.current_claims(state.conn, _paths(state.ordered), per_hit),
         "claims",
         "declared",
     )
@@ -204,7 +207,10 @@ def _related(state: _State) -> Either[_State, SearchFailure]:
     lists: list[list[tuple[str, str]]] = []
     for scored in heads:
         match _map_err(
-            pg.related_by_shared_ground(state.conn, scored.hit.source_path, state.related),
+            # /search 는 2: 점수 1 사용 1/1,300 (C-RELATED0, 10-27). 브리프는 옛 이유로 1
+            pg.related_by_shared_ground(
+                state.conn, scored.hit.source_path, state.related, min_shared=SEARCH_RELATED_MIN_SHARED
+            ),
             _pg_failure("related"),
         ):
             case Err(failure):

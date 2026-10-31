@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ READ_ONLY_OPTIONS = "-c default_transaction_read_only=on"
 _DEFAULT_RESULTS = 5
 _DEFAULT_TOKENS = 2000
 _CLAIMS_PER_NOTE = 5
+MAX_CONCEPTS = 6
 #: 2026-10-23 모의(82 질의): wiki 단독 밖 37/82 → wiki+벡터 RRF 26/82, 제목 일치 wiki-7115 1위 유지
 RRF_K = 60
 FULL_BODY_HINT = "(본문 전체: query 에 wiki-NNNN 을 넣으면 그 노트 전체 블록이 앞에 붙는다)"
@@ -80,6 +81,16 @@ class WikiPool:
 
 
 @dataclass(frozen=True)
+class RefineContext:
+    """refined 를 다시 짤 python 쪽 재료 — block_paths 는 (recall_line 블록, 경로) 후보 전부."""
+
+    superseded: dict[str, list[str]]
+    titles: dict[str, str]
+    concepts: dict[str, list[str]]
+    block_paths: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class Recalled:
     text: str
     path: str  # 줄을 낸 길 — wiki | vector | wiki+vector
@@ -90,6 +101,9 @@ class Recalled:
     pool: WikiPool | None = None  # wiki 길만
     shown: tuple[str, ...] = ()  # 답에 실린 줄의 경로 — handover 가 쓸 목록(엔진 mcp_recall 의 paths)
     failed: tuple[tuple[str, str], ...] = ()  # (길, 사유) — wiki 가 답했는데 벡터가 실패한 경우
+    context: RefineContext | None = field(
+        default=None, compare=False
+    )  # 그림자 전용 — 엔진 블록에 같은 refine 을 태울 재료
 
 
 @dataclass(frozen=True)
@@ -99,6 +113,7 @@ class Seams:
     vector: Callable[[Args], Either[list[Line], str]]
     superseded_by: Callable[[list[str]], Either[dict[str, list[str]], str]]
     current_claims: Callable[[list[str]], Either[dict[str, pg.RegisterRows], str]]
+    concepts: Callable[[list[str]], Either[dict[str, list[str]], str]]
 
 
 def _trimmed(value: Any) -> str | None:
@@ -134,40 +149,67 @@ def _basename(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
-def recall_line(path: str, body: str, superseded: dict[str, list[str]]) -> str:
+def concepts_line(names: list[str]) -> str:
+    """노트 한 줄 밑의 `  concepts: a, b` — 최대 6개, 없으면 줄 없음. 엔진 mcp.rs concepts_line 과 같은 모양."""
+    return f"\n  concepts: {', '.join(names[:MAX_CONCEPTS])}" if names else ""
+
+
+def recall_line(
+    path: str, body: str, superseded: dict[str, list[str]], concepts: dict[str, list[str]] | None = None
+) -> str:
     newer = superseded.get(path)
     label = _basename(path)
     if newer:
         label = f"{label} (superseded by {', '.join(_basename(p) for p in newer)})"
-    return f"- [{label}] {body}"
+    return f"- [{label}] {body}" + concepts_line((concepts or {}).get(path, []))
 
 
-def recall_text(lines: list[Line], superseded: dict[str, list[str]]) -> str:
-    return "\n\n".join(recall_line(path, body, superseded) for path, body in lines)
+def recall_text(
+    lines: list[Line], superseded: dict[str, list[str]], concepts: dict[str, list[str]] | None = None
+) -> str:
+    return "\n\n".join(recall_line(path, body, superseded, concepts) for path, body in lines)
 
 
 def _claim_line(row: pg.RegisterRow) -> str:
     return f"  · {row.kind} {row.subject}/{row.predicate}: {row.value}"
 
 
-def _refined_entry(
+def _refined_entry(  # noqa: PLR0913
     path: str,
-    body: str,
+    block: str,
     superseded: dict[str, list[str]],
     claims: dict[str, pg.RegisterRows],
     titles: dict[str, str],
+    concepts: dict[str, list[str]],
 ) -> tuple[str, bool]:
     register = claims.get(path)
     if register is None or not register.rows:
-        return recall_line(path, body, superseded), False
+        return block, False
     head = recall_line(path, "", superseded).rstrip()
     title = titles.get(path, "")
     head = f"{head} {title}" if title else head
-    lines = [head, *(_claim_line(row) for row in register.rows)]
+    lines = [
+        head,
+        *concepts_line(concepts.get(path, [])).lstrip("\n").splitlines(),
+        *(_claim_line(row) for row in register.rows),
+    ]
     hidden = register.total_matching - len(register.rows)
     if hidden > 0:
         lines.append(f"  · … +{hidden} more")
     return "\n".join(lines), True
+
+
+def refine_blocks(
+    blocks: list[tuple[str, str]],
+    superseded: dict[str, list[str]],
+    claims: dict[str, pg.RegisterRows],
+    titles: dict[str, str],
+    concepts: dict[str, list[str]],
+) -> str:
+    """(경로, recall_line 블록) 을 문이 내보내는 모양으로 — 그림자가 엔진 쪽 블록에도 같은 걸음을 태운다."""
+    entries = [_refined_entry(path, block, superseded, claims, titles, concepts) for path, block in blocks]
+    text = "\n\n".join(entry for entry, _ in entries)
+    return f"{text}\n\n{FULL_BODY_HINT}" if any(has for _, has in entries) else text
 
 
 def refined_text(
@@ -175,10 +217,10 @@ def refined_text(
     superseded: dict[str, list[str]],
     claims: dict[str, pg.RegisterRows],
     titles: dict[str, str],
+    concepts: dict[str, list[str]],
 ) -> str:
-    entries = [_refined_entry(path, body, superseded, claims, titles) for path, body in lines]
-    text = "\n\n".join(entry for entry, _ in entries)
-    return f"{text}\n\n{FULL_BODY_HINT}" if any(has for _, has in entries) else text
+    blocks = [(path, recall_line(path, body, superseded, concepts)) for path, body in lines]
+    return refine_blocks(blocks, superseded, claims, titles, concepts)
 
 
 @dataclass(frozen=True)
@@ -196,6 +238,7 @@ class _Selected:
     size: int = 0
     titles: tuple[tuple[str, str], ...] = ()  # (경로, 제목) — wiki 길만, 머리줄에 붙는다
     failed: tuple[tuple[str, str], ...] = ()
+    superseded: frozenset[str] = frozenset()  # wiki 길이 이미 물은 대체 여부
 
 
 def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[_Selected, Failed]:
@@ -220,12 +263,20 @@ def _wiki_selected(result: wiki.WikiResult, args: Args, seams: Seams) -> Either[
             ordered = rank.order_within_set(scored, facts)
             lines = [(item.hit.source_path, item.hit.content) for item in ordered]
             titles = tuple((hit.source_path, hit.title) for hit in pool_hits)
-            return Ok(_Selected("wiki", lines, result.skipped, pool, size, titles))
+            sunk = frozenset(path for path, f in facts.items() if f.superseded)
+            return Ok(_Selected("wiki", lines, result.skipped, pool, size, titles, superseded=sunk))
 
 
-def _fused(selected: _Selected, vector: list[Line], max_results: int) -> _Selected:
+def _fused(selected: _Selected, vector: list[Line], args: Args, seams: Seams) -> Either[_Selected, Failed]:
     """wiki 줄과 벡터 줄을 RRF(k=60)로 합친다 — 제목 일치로 앞에 선 wiki 줄은 그 자리에 고정(#491).
-    같은 노트가 두 길에 다 있으면 점수를 더하고 wiki 줄(스니펫)을 보인다. 동점은 wiki 순위 → 벡터 순위."""
+    같은 노트가 두 길에 다 있으면 점수를 더하고 wiki 줄(스니펫)을 보인다. 동점은 wiki 순위 → 벡터 순위.
+    누가 드는지는 RRF 순으로 먼저 정하고, 든 줄 안에서만 대체된 노트를 뒤로 민다 — 밀리되 잘리지 않는다."""
+    vector_only = sorted({path for path, _ in vector} - {path for path, _ in selected.lines})
+    match seams.rank_facts(vector_only) if vector_only else Ok({}):
+        case Err(detail):
+            return Err(Failed(f"wiki recall order: rank: rank facts lookup: {detail}"))
+        case Ok(facts):
+            sunk = selected.superseded | {path for path, f in facts.items() if f.superseded}
     exact = {c.hit.source_path for c in selected.pool if c.hit.exact_title}
     pinned = list(itertools.takewhile(lambda line: line[0] in exact, selected.lines))
     pinned_paths = {path for path, _ in pinned}
@@ -245,10 +296,12 @@ def _fused(selected: _Selected, vector: list[Line], max_results: int) -> _Select
         )
 
     rest = sorted((path for path in body if path not in pinned_paths), key=score)
-    lines = [*pinned, *((path, body[path]) for path in rest)][:max_results]
+    admitted = rest[: max(args.max_results - len(pinned), 0)]
+    settled = sorted(admitted, key=lambda path: (path in sunk, score(path)))
+    lines = [*pinned, *((path, body[path]) for path in settled)][: args.max_results]
     shown = {path for path, _ in lines}
     contributed = [name for name, at in (("wiki", wiki_at), ("vector", vector_at)) if shown & at.keys()]
-    return replace(selected, path="+".join(contributed), lines=lines)
+    return Ok(replace(selected, path="+".join(contributed), lines=lines))
 
 
 def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
@@ -266,16 +319,18 @@ def _select(args: Args, seams: Seams) -> Either[_Selected, Failed]:
         case Ok(selected), Err(detail):
             return Ok(replace(selected, failed=(("vector", detail),)))
         case Ok(selected), Ok(lines):
-            return Ok(_fused(selected, lines, args.max_results))
+            return _fused(selected, lines, args, seams)
 
 
-def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool | None:
+def _pool_of(
+    selected: _Selected, superseded: dict[str, list[str]], concepts: dict[str, list[str]]
+) -> WikiPool | None:
     if not selected.pool:
         return None
     entries = tuple(
         PoolEntry(
             c.hit.source_path,
-            recall_line(c.hit.source_path, c.hit.snippet, superseded),
+            recall_line(c.hit.source_path, c.hit.snippet, superseded, concepts),
             c.hit.score,
             c.key,
         )
@@ -284,7 +339,7 @@ def _pool_of(selected: _Selected, superseded: dict[str, list[str]]) -> WikiPool 
     return WikiPool(entries, selected.size)
 
 
-def _failed_tail(failed: tuple[tuple[str, str], ...]) -> str:
+def failed_tail(failed: tuple[tuple[str, str], ...]) -> str:
     return "".join(f"\n\n({name} 길 실패: {why})" for name, why in failed)
 
 
@@ -293,7 +348,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
         case Err(failure):
             return Err(failure)
         case Ok(selected) if not selected.lines:
-            refined = NO_EXPERIENCE + _failed_tail(selected.failed)
+            refined = NO_EXPERIENCE + failed_tail(selected.failed)
             return Ok(
                 Recalled(NO_EXPERIENCE, selected.path, refined, selected.skipped, failed=selected.failed)
             )
@@ -306,14 +361,28 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                     return Err(Failed(f"recall superseded: {detail}"))
                 case Ok(superseded):
                     shown = tuple(path for path, _ in selected.lines)
-                    match seams.current_claims(list(shown)):
-                        case Err(detail):
+                    match seams.current_claims(list(shown)), seams.concepts(paths):
+                        case Err(detail), _:
                             return Err(Failed(f"recall claims: {detail}"))
-                        case Ok(claims):
-                            text = recall_text(selected.lines, superseded)
-                            refined = refined_text(selected.lines, superseded, claims, dict(selected.titles))
-                            refined += _failed_tail(selected.failed)
-                            pool = _pool_of(selected, superseded)
+                        case _, Err(detail):
+                            return Err(Failed(f"recall concepts: {detail}"))
+                        case Ok(claims), Ok(concepts):
+                            text = recall_text(selected.lines, superseded, concepts)
+                            refined = refined_text(
+                                selected.lines, superseded, claims, dict(selected.titles), concepts
+                            )
+                            refined += failed_tail(selected.failed)
+                            pool = _pool_of(selected, superseded, concepts)
+                            candidates = [
+                                *((p, recall_line(p, b, superseded, concepts)) for p, b in selected.lines),
+                                *((e.path, e.line) for e in (pool.entries if pool else ())),
+                            ]
+                            context = RefineContext(
+                                superseded,
+                                dict(selected.titles),
+                                concepts,
+                                tuple((block, path) for path, block in dict.fromkeys(candidates)),
+                            )
                             return Ok(
                                 Recalled(
                                     text,
@@ -323,6 +392,7 @@ def answer(args: Args, seams: Seams) -> Either[Recalled, Failed]:
                                     pool,
                                     shown,
                                     selected.failed,
+                                    context,
                                 )
                             )
 
@@ -348,6 +418,21 @@ def _vector_lines(read_only_dsn: str, args: Args) -> Either[list[Line], str]:
             return Err(detail)
         case Ok(documents):
             return Ok([(doc.metadata["source_path"], doc.page_content) for doc in documents])
+
+
+def claims_of(dsn: str, paths: list[str]) -> Either[dict[str, pg.RegisterRows], str]:
+    """읽기 전용 연결로 경로들의 현재 claims 를 한 번 읽는다 — 그림자가 엔진이 고른 노트에 쓴다."""
+    try:
+        read_only_dsn = make_conninfo(dsn, options=READ_ONLY_OPTIONS)
+    except psycopg.Error as e:
+        return Err(f"pg dsn: {e}")
+    match pg.connect(read_only_dsn):
+        case Err(failure):
+            return Err(f"pg connect: {failure.detail}")
+        case Ok(conn):
+            pass
+    with contextlib.closing(conn):
+        return _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE))
 
 
 def run(
@@ -379,6 +464,7 @@ def run(
         vector=lambda a: _vector_lines(read_only_dsn, a),
         superseded_by=lambda paths: _detail(pg.superseded_by(conn, paths)),
         current_claims=lambda paths: _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE)),
+        concepts=lambda paths: _detail(pg.concepts_by_doc(conn, paths)),
     )
     with contextlib.closing(conn):
         return answer(args, seams)

@@ -20,10 +20,23 @@ use crate::pii;
 use crate::store::{LoggedHit, Store};
 use crate::wiki_recall;
 
+#[cfg(test)]
+mod gap_tests;
 mod http;
 mod mcp;
-mod owner;
+mod note_index;
+pub(crate) mod owner;
+#[cfg(test)]
+mod pg_failure_tests;
+mod remember_defer;
+#[cfg(test)]
+mod remember_defer_tests;
 mod scheduler;
+mod search_route;
+#[cfg(test)]
+mod split_tests;
+#[cfg(test)]
+mod surreal_graph_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbHealthState {
@@ -60,6 +73,11 @@ pub struct AppState {
     pub(crate) cfg: Arc<config::BoringConfig>,
     pub(crate) cfg_path: Arc<Option<PathBuf>>,
     pub(crate) sync_lock: Arc<Mutex<()>>,
+    /// Orders remembers so a duplicate check and the note write it guards are one step.
+    pub(crate) remember_gate: Arc<Mutex<()>>,
+    /// Notes saved while a sync held `sync_lock`, waiting to be indexed.
+    pub(crate) deferred: Arc<remember_defer::DeferredNotes>,
+    pub(crate) note_index: Arc<note_index::NoteIndex>,
     pub(crate) wiki_index: Arc<std::sync::Mutex<wiki_recall::WikiIndex>>,
     pub(crate) last_compact: Arc<Mutex<Option<std::time::Instant>>>,
     pub(crate) compact_failure: Arc<Mutex<Option<CompactFailure>>>,
@@ -67,15 +85,30 @@ pub struct AppState {
     pub(crate) owner_token: Arc<Option<String>>,
 }
 
+/// Hand-written: `owner_token` is a secret and `llm`/`store` reach keys and the DSN.
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("store", &self.store)
+            .field("code_index", &self.code_index)
+            .field("llm", &self.llm)
+            .field(
+                "owner_token",
+                &self.owner_token.as_ref().as_ref().map(|_| "***"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl AppState {
     pub(crate) fn wiki_dir(&self) -> Option<PathBuf> {
         (*self.vault_dir).as_ref().map(|v| v.join("wiki"))
     }
 
-    pub(crate) fn wiki_recall(
+    /// Every matching wiki note in Python order, uncut — the MCP recall picks its own pool.
+    pub(crate) fn wiki_recall_ranked(
         &self,
         query: &str,
-        k: usize,
         project: Option<&str>,
         since_hours: Option<i32>,
     ) -> Result<Vec<wiki_recall::WikiHit>> {
@@ -87,7 +120,7 @@ impl AppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         idx.refresh(&dir)?;
-        Ok(idx.search(query, k, project, since_hours))
+        Ok(idx.search_ranked(query, project, since_hours))
     }
 
     pub(crate) async fn probe_db_health(&self) -> (Option<bool>, Option<String>) {
@@ -161,7 +194,7 @@ fn transition_log(prev: DbHealthState, next: DbHealthState, error: Option<&str>)
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::{
         Author, CompactFailure, DbHealthState, HealthResp, RecurrencesResp, SyncState,
@@ -169,6 +202,397 @@ mod tests {
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn register_json_missing_field_is_422_with_json_body() {
+        use axum::extract::FromRequest;
+        let req = axum::extract::Request::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let Err(err) = super::RegisterJson::<super::StatusReq>::from_request(req, &()).await else {
+            panic!("body without project should be rejected");
+        };
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], br#"{"error":"unprocessable entity"}"#);
+    }
+
+    #[tokio::test]
+    async fn register_routes_reject_bad_json_with_422_json_body() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let paths = [
+            "/status",
+            "/decisions",
+            "/risks",
+            "/next_actions",
+            "/stalled",
+            "/recurrences",
+            "/context",
+            "/consumption",
+            "/handover",
+        ];
+        for path in paths {
+            let req = axum::extract::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{"))
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], br#"{"error":"unprocessable entity"}"#, "{path}");
+        }
+    }
+    #[tokio::test]
+    async fn rules_without_store_is_503_with_python_body() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let req = axum::extract::Request::builder()
+            .uri("/rules")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = super::build_router(state).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], br#"{"error":"store not configured"}"#);
+    }
+
+    // Expected values: Python door `_claim_source` + Starlette JSONResponse, 2026-10-28.
+    // PG paths (200/404/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn claim_source_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let cases: [(&str, StatusCode, &[u8]); 6] = [
+            (
+                "/claim-source",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject query param is required"}"#,
+            ),
+            (
+                "/claim-source?subject=%1F",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject query param is required"}"#,
+            ),
+            (
+                "/claim-source?subject=a&subject=",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject query param is required"}"#,
+            ),
+            (
+                "/claim-source?subject=a%00b",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"subject must not contain NUL"}"#,
+            ),
+            (
+                "/claim-source?subject=%EB%B0%B0%ED%8F%AC",
+                StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"error":"store not configured"}"#,
+            ),
+            (
+                "/claim-source?subject=x&subject=y",
+                StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"error":"store not configured"}"#,
+            ),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), status, "{uri}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], want, "{uri}");
+        }
+    }
+
+    // Expected values: Python door `_claim_sources` + Starlette JSONResponse, 2026-10-28.
+    // PG paths (200/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn claim_sources_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let cases: [(&str, StatusCode, &[u8]); 5] = [
+            (
+                "/claim-sources",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"predicate query param is required"}"#,
+            ),
+            (
+                "/claim-sources?predicate=%1F",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"predicate query param is required"}"#,
+            ),
+            (
+                "/claim-sources?predicate=a%00b",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"predicate must not contain NUL"}"#,
+            ),
+            (
+                "/claim-sources?predicate=%ED%95%9C+%EA%B8%80%2B%25",
+                StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"error":"store not configured"}"#,
+            ),
+            (
+                "/claim-sources?subject=x",
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"predicate query param is required"}"#,
+            ),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), status, "{uri}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], want, "{uri}");
+        }
+    }
+
+    // Expected values: Python door `_approved` + Starlette JSONResponse, 2026-10-28.
+    // PG paths (200/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn approved_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let bad = br#"{"error":"since_hours must be an integer in [1, 8760]"}"#;
+        let no_store = br#"{"error":"store not configured"}"#;
+        let cases: [(&str, StatusCode, &[u8]); 8] = [
+            ("/approved?since_hours=abc", StatusCode::BAD_REQUEST, bad),
+            ("/approved?since_hours=", StatusCode::BAD_REQUEST, bad),
+            ("/approved?since_hours=8761", StatusCode::BAD_REQUEST, bad),
+            (
+                "/approved?since_hours=1&since_hours=0",
+                StatusCode::BAD_REQUEST,
+                bad,
+            ),
+            ("/approved", StatusCode::SERVICE_UNAVAILABLE, no_store),
+            (
+                "/approved?since_hours=%2024%20",
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store,
+            ),
+            (
+                "/approved?since_hours=0&since_hours=%EF%BC%92%EF%BC%94",
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store,
+            ),
+            (
+                "/approved?other=x",
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store,
+            ),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), status, "{uri}");
+            let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+            assert_eq!(&body[..], want, "{uri}");
+        }
+    }
+
+    // Expected values: Python door `_projects` via Starlette TestClient with no store configured,
+    // 2026-10-28. The names branch (no `active_days`) is the engine's own answer, pinned as it was.
+    // PG paths (200/502) are unverified: the Docker VM is down.
+    #[tokio::test]
+    async fn projects_active_days_400_and_503_have_python_bodies() {
+        use tower::ServiceExt;
+        let cfg = crate::config::BoringConfig::default();
+        let state = super::AppState {
+            store: None,
+            code_index: None,
+            llm: std::sync::Arc::new(crate::llm::Llm::from_config(&cfg)),
+            vault_dir: std::sync::Arc::new(None),
+            pii: std::sync::Arc::new(None),
+            cfg: std::sync::Arc::new(cfg),
+            cfg_path: std::sync::Arc::new(None),
+            sync_lock: std::sync::Arc::default(),
+            remember_gate: std::sync::Arc::default(),
+            deferred: std::sync::Arc::default(),
+            note_index: std::sync::Arc::default(),
+            wiki_index: std::sync::Arc::default(),
+            last_compact: std::sync::Arc::default(),
+            compact_failure: std::sync::Arc::default(),
+            db_healthy_last: std::sync::Arc::default(),
+            owner_token: std::sync::Arc::new(None),
+        };
+        let router = super::build_router(state);
+        let int_msg = r#"{"error":"active_days must be an integer 1..365"}"#.to_string();
+        let no_store = r#"{"error":"store not configured"}"#.to_string();
+        let range = |got: &str| format!(r#"{{"error":"active_days must be 1..365, got {got}"}}"#);
+        let bad = StatusCode::BAD_REQUEST;
+        let off = StatusCode::SERVICE_UNAVAILABLE;
+        let names_off = StatusCode::INTERNAL_SERVER_ERROR;
+        let names_msg = r#"{"error":"BORING_VECTOR=off — this feature requires the vector backend (pgvector). Set BORING_VECTOR=on and start Postgres."}"#.to_string();
+        let cases: Vec<(String, StatusCode, String)> = vec![
+            ("/projects?active_days=14".into(), off, no_store.clone()),
+            ("/projects?active_days=%2014".into(), off, no_store.clone()),
+            ("/projects?active_days=+14".into(), off, no_store.clone()),
+            ("/projects?active_days=%2B14".into(), off, no_store.clone()),
+            ("/projects?active_days=1_0".into(), off, no_store.clone()),
+            ("/projects?active_days=0".into(), bad, range("0")),
+            ("/projects?active_days=366".into(), bad, range("366")),
+            ("/projects?active_days=-1".into(), bad, range("-1")),
+            ("/projects?active_days=abc".into(), bad, int_msg.clone()),
+            ("/projects?active_days=".into(), bad, int_msg.clone()),
+            ("/projects?active_days=1.5".into(), bad, int_msg.clone()),
+            (
+                "/projects?active_days=%EF%BC%91%EF%BC%94".into(),
+                off,
+                no_store.clone(),
+            ),
+            (
+                format!("/projects?active_days={}", "9".repeat(4301)),
+                bad,
+                int_msg.clone(),
+            ),
+            (
+                format!("/projects?active_days={}", "1".repeat(4300)),
+                bad,
+                range(&"1".repeat(4300)),
+            ),
+            (
+                "/projects?active_days=1&active_days=2".into(),
+                off,
+                no_store.clone(),
+            ),
+            (
+                "/projects?active_days=0&active_days=2".into(),
+                off,
+                no_store.clone(),
+            ),
+            (
+                "/projects?active_days=2&active_days=0".into(),
+                bad,
+                range("0"),
+            ),
+            (
+                "/projects?foo=1&active_days=7".into(),
+                off,
+                no_store.clone(),
+            ),
+            ("/projects?foo=1".into(), names_off, names_msg.clone()),
+            ("/projects".into(), names_off, names_msg),
+        ];
+        for (uri, status, want) in cases {
+            let req = axum::extract::Request::builder()
+                .uri(&uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let res = router.clone().oneshot(req).await.unwrap();
+            let shown = &uri[..uri.len().min(48)];
+            assert_eq!(res.status(), status, "{shown}");
+            let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], want.as_bytes(), "{shown}");
+        }
+    }
 
     #[test]
     fn recurrences_days_defaults_to_30() {
@@ -672,6 +1096,24 @@ mod tests {
     }
 }
 
+/// Register reads (HTTP tag, then `mcp.` tag) leave no query_log row, as on the door.
+const UNLOGGED_REGISTER_READS: [&str; 14] = [
+    "decisions",
+    "risks",
+    "next_actions",
+    "stalled",
+    "recurrences",
+    "context",
+    "status",
+    "mcp.decisions",
+    "mcp.risks",
+    "mcp.next_actions",
+    "mcp.stalled",
+    "mcp.recurrences",
+    "mcp.context",
+    "mcp.project_status",
+];
+
 #[allow(clippy::needless_borrow)]
 pub(crate) fn spawn_query_log(
     store: Option<Arc<Store>>,
@@ -686,6 +1128,9 @@ pub(crate) fn spawn_query_log(
         return;
     };
     let endpoint = endpoint.into();
+    if UNLOGGED_REGISTER_READS.contains(&endpoint.as_str()) {
+        return;
+    }
     tokio::spawn(async move {
         let latency_ms = i32::try_from(elapsed.as_millis()).ok();
         if let Err(e) = store
@@ -716,6 +1161,30 @@ impl AppError {
             status: StatusCode::BAD_REQUEST,
             error: anyhow::anyhow!(message.into()),
         }
+    }
+
+    fn unprocessable() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            error: anyhow::anyhow!("unprocessable entity"),
+        }
+    }
+}
+
+/// Body extractor of the register routes: a body that does not parse into `T` answers 422
+/// `{"error":"unprocessable entity"}`, the door's wording (agents/door/door.py `_reject`).
+pub(crate) struct RegisterJson<T>(pub(crate) T);
+
+impl<S: Send + Sync, T: serde::de::DeserializeOwned> axum::extract::FromRequest<S>
+    for RegisterJson<T>
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, AppError> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(body)| Self(body))
+            .map_err(|_| AppError::unprocessable())
     }
 }
 
@@ -801,7 +1270,7 @@ impl SearchReq {
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id
             .as_deref()
-            .map(str::trim)
+            .map(search_route::py_strip)
             .filter(|s| !s.is_empty())
     }
 }
@@ -1122,6 +1591,7 @@ pub(crate) struct CompactResp {
     pub(crate) gc_concept: usize,
     pub(crate) gc_claim_nodes: usize,
     pub(crate) gc_claim_edges: usize,
+    pub(crate) skipped_lock_timeout: Vec<String>,
     pub(crate) total_ms: u128,
 }
 
@@ -1273,6 +1743,15 @@ pub(crate) enum SyncState {
     Idle,
 }
 
+impl SyncState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Idle => "idle",
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct HealthResp {
     pub(crate) status: &'static str,
@@ -1373,6 +1852,9 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         cfg: Arc::new(cfg),
         cfg_path: Arc::new(cfg_path),
         sync_lock: Arc::new(Mutex::new(())),
+        remember_gate: Arc::new(Mutex::new(())),
+        deferred: std::sync::Arc::default(),
+        note_index: Arc::default(),
         last_compact: Arc::clone(&last_compact),
         compact_failure: Arc::clone(&compact_failure),
         wiki_index: Arc::new(std::sync::Mutex::new(wiki_recall::WikiIndex::default())),
@@ -1390,7 +1872,42 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         Arc::clone(&compact_failure),
     );
 
-    let router = axum::Router::new()
+    spawn_note_index_prefill(&state);
+
+    let router = build_router(state);
+
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
+    eprintln!("[serve] listening on {addr}");
+
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| anyhow::anyhow!("axum serve: {e}"))
+}
+
+/// Fill the remember duplicate-gate index in the background so startup is not blocked; a
+/// remember arriving before it finishes scans the disk as before. The log line is the fill time.
+fn spawn_note_index_prefill(state: &AppState) {
+    let Some(wiki_dir) = state.wiki_dir() else {
+        return;
+    };
+    let index = Arc::clone(&state.note_index);
+    tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        match index.prefill(&wiki_dir) {
+            Ok(count) => eprintln!(
+                "[serve] note index ready: {count} notes in {:.3}s",
+                started.elapsed().as_secs_f64()
+            ),
+            Err(e) => eprintln!("[serve] note index prefill failed (remember scans the disk): {e}"),
+        }
+    });
+}
+
+/// 서버가 쓰는 라우트 표. 테스트가 같은 표를 라우터로 호출한다.
+pub(crate) fn build_router(state: AppState) -> axum::Router {
+    axum::Router::new()
         .route("/health", get(http::health))
         .route("/ask", post(http::handle_ask))
         .route("/brief", post(http::handle_brief))
@@ -1414,6 +1931,20 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
             get(http::handle_recall_labels).post(http::handle_recall_label_record),
         )
         .route("/projects", get(http::handle_projects))
+        .route("/rules", get(http::handle_rules))
+        .route("/claim-source", get(http::handle_claim_source))
+        .route("/claim-sources", get(http::handle_claim_sources))
+        .route("/claim-priors", get(http::handle_claim_priors))
+        .route("/approved", get(http::handle_approved))
+        .route("/gap", post(http::handle_gap))
+        .route(
+            "/repairs/split-subjects",
+            get(http::handle_split_subjects).post(http::handle_split_merge),
+        )
+        .route(
+            "/repairs/split-subjects/samples",
+            get(http::handle_split_samples),
+        )
         .route("/recall-label-stats", get(http::handle_recall_label_stats))
         .route(
             "/events",
@@ -1426,14 +1957,5 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .route("/sync", post(http::handle_sync))
         .route("/compact", post(http::handle_compact))
         .route("/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
-    eprintln!("[serve] listening on {addr}");
-
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| anyhow::anyhow!("axum serve: {e}"))
+        .with_state(state)
 }

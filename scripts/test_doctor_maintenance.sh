@@ -98,8 +98,24 @@ rm "$tmp/.pre-commit-config.yaml"
 rm "$tmp/.git/hooks/pre-commit"
 hook_probe "no config means no demand for a hook" 0 "$tmp"
 
+# Unset BORING_HOME means the checkout doctor.sh lives in, not ~/oh-my-boring: a clone elsewhere
+# was read as the developer's install. HOME points at an empty dir so ~/oh-my-boring cannot exist.
+clone="$tmp/clone"
+mkdir -p "$clone/scripts" "$clone/vault/wiki" "$tmp/home"
+cp "$ROOT/scripts/doctor.sh" "$clone/scripts/"
+cp -R "$ROOT/scripts/lib" "$clone/scripts/"
+out="$(env -u BORING_HOME HOME="$tmp/home" BORING_URL="http://127.0.0.1:1" BORING_SKIP_LEDGER_PROBE=1 \
+    BORING_HERMES_HOME="/tmp/doctor-maintenance-hermes-never-exists-$$" \
+    sh "$clone/scripts/doctor.sh" 2>&1 || true)"
+if printf '%s' "$out" | grep -qF "no distilled notes in $clone/vault/wiki/"; then
+    echo "ok - unset BORING_HOME resolves to the checkout holding doctor.sh"
+else
+    echo "FAIL: unset BORING_HOME did not resolve to $clone — saw: $(printf '%s' "$out" | grep 'distilled note')"
+    fails=$((fails + 1))
+fi
+
 if [ "$fails" -eq 0 ]; then
-    echo "doctor maintenance guardrails: 5 passed, 0 failed."
+    echo "doctor maintenance guardrails: 6 passed, 0 failed."
     exit 0
 fi
 echo "doctor maintenance guardrails: $fails failed."

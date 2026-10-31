@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::FrontMatter;
 use drudge::store::Store;
+use drudge::vector::VectorIndex;
 
 fn test_dsn() -> Option<String> {
     std::env::var("BORING_TEST_DATABASE_URL").ok()
@@ -109,7 +110,7 @@ async fn current_claims_respects_exclude_origins() {
         .await
         .expect("personal only");
     assert_eq!(personal_only.len(), 1, "company claim should be excluded");
-    assert_eq!(personal_only[0].subject, project);
+    assert_eq!(personal_only[0].claim.subject, project);
 
     store.delete_document(&p_path).await.expect("cleanup p");
     store.delete_document(&c_path).await.expect("cleanup c");

@@ -466,3 +466,171 @@ async fn initialize_widens_a_pre_existing_rust_only_language_check() {
     .await
     .expect("clean up legacy-check repository");
 }
+
+#[tokio::test]
+async fn python_under_claude_and_venv_directories_is_not_indexed() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("app.py"), "def kept():\n    pass\n").unwrap();
+    for ignored in [".claude/worktrees/agent-x", ".venv/lib"] {
+        let dir = root.path().join(ignored);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("dep.py"), "def skipped():\n    pass\n").unwrap();
+    }
+    let repository_id = unique_id("code-ignored-dirs");
+    let configured = source_with_language(&repository_id, root.path(), CodeLanguage::Python);
+    let mut store = initialized_store(&dsn).await;
+    let report = sync_repository(&mut store, &configured)
+        .await
+        .expect("sync ignored-dir fixture");
+    assert_eq!(report.scanned, 1, "only app.py may be scanned");
+    assert_eq!(
+        store.status(Some(&repository_id)).await.unwrap()[0].files,
+        1
+    );
+
+    let db = connect(&dsn).await;
+    db.execute(
+        "DELETE FROM code_index.repository WHERE id = $1",
+        &[&repository_id],
+    )
+    .await
+    .expect("clean up test repository");
+}
+
+async fn index_state(db: &Client, name: &str) -> Option<(u32, bool)> {
+    db.query_opt(
+        "SELECT c.oid, i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relnamespace = 'code_index'::regnamespace AND c.relname = $1",
+        &[&name],
+    )
+    .await
+    .unwrap()
+    .map(|row| (row.get(0), row.get(1)))
+}
+
+#[tokio::test]
+async fn an_invalid_file_id_index_is_dropped_and_recreated_valid() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let db = connect(&dsn).await;
+    let store = initialized_store(&dsn).await;
+    for name in [
+        "code_index_symbol_file",
+        "code_index_relation_file",
+        "code_index_relation_source_symbol",
+        "code_index_relation_target_symbol",
+    ] {
+        let (before_oid, valid) = index_state(&db, name)
+            .await
+            .expect("index missing after initialize");
+        assert!(valid, "{name} must be valid after a fresh initialize");
+        db.execute(
+            "UPDATE pg_index SET indisvalid = false WHERE indexrelid = $1::oid",
+            &[&before_oid],
+        )
+        .await
+        .expect("mark index invalid");
+
+        store.initialize().await.expect("re-initialize");
+        let (after_oid, valid) = index_state(&db, name).await.expect("recreated");
+        assert!(valid, "{name} still invalid after initialize");
+        assert_ne!(before_oid, after_oid, "{name} was not rebuilt");
+    }
+}
+
+/// Seeds `background` unrelated relation rows plus one file whose `symbols` symbols are each the
+/// source and target of one relation, deletes that file, and returns microseconds per symbol.
+async fn delete_file_micros_per_symbol(db: &Client, background: i64, symbols: i64) -> f64 {
+    let repo = unique_id("code-symdel");
+    let bg_file = format!("{repo}-bg");
+    let victim_file = format!("{repo}-victim");
+    db.execute(
+        "INSERT INTO code_index.repository (id, name, root_path, language, last_synced_at)
+         VALUES ($1, $1, '/x', 'rust', now())",
+        &[&repo],
+    )
+    .await
+    .unwrap();
+    for file in [&bg_file, &victim_file] {
+        db.execute(
+            "INSERT INTO code_index.file
+               (id, repository_id, relative_path, sha256, parse_status, error_count, updated_at)
+             VALUES ($1, $2, $1, 'x', 'parsed', 0, now())",
+            &[file, &repo],
+        )
+        .await
+        .unwrap();
+    }
+    for (file, count) in [(&bg_file, 1_i64), (&victim_file, symbols)] {
+        db.execute(
+            "INSERT INTO code_index.symbol
+               (id, repository_id, file_id, kind, name, qualified_name,
+                start_byte, end_byte, start_line, end_line)
+             SELECT $1 || '-s' || g, $2, $1, 'function', 'n', 'n', 0, 1, 1, 1
+               FROM generate_series(1, $3::bigint) g",
+            &[file, &repo, &count],
+        )
+        .await
+        .unwrap();
+    }
+    db.execute(
+        "INSERT INTO code_index.relation
+           (id, repository_id, file_id, source_symbol_id, kind, target_symbol_id,
+            start_byte, end_byte)
+         SELECT $1 || '-bg' || g, $2, $1, $1 || '-s1', 'calls', $1 || '-s1', 0, 1
+           FROM generate_series(1, $3::bigint) g",
+        &[&bg_file, &repo, &background],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO code_index.relation
+           (id, repository_id, file_id, source_symbol_id, kind, target_symbol_id,
+            start_byte, end_byte)
+         SELECT $1 || '-r' || g, $3, $1, $1 || '-s' || g, 'calls', $1 || '-s' || g, 0, 1
+           FROM generate_series(1, $2::bigint) g",
+        &[&victim_file, &symbols, &repo],
+    )
+    .await
+    .unwrap();
+    db.batch_execute("ANALYZE code_index.relation; ANALYZE code_index.symbol")
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    db.execute("DELETE FROM code_index.file WHERE id = $1", &[&victim_file])
+        .await
+        .unwrap();
+    let micros = started.elapsed().as_secs_f64() * 1e6 / f64::from(u32::try_from(symbols).unwrap());
+
+    db.execute("DELETE FROM code_index.repository WHERE id = $1", &[&repo])
+        .await
+        .unwrap();
+    micros
+}
+
+#[tokio::test]
+async fn deleting_a_file_costs_the_same_per_symbol_whatever_the_relation_table_size() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let db = connect(&dsn).await;
+    let _store = initialized_store(&dsn).await;
+    let small = delete_file_micros_per_symbol(&db, 20_000, 200).await;
+    let large = delete_file_micros_per_symbol(&db, 400_000, 200).await;
+    eprintln!(
+        "per-symbol delete: small={small:.1}us large={large:.1}us ratio={:.1}",
+        large / small
+    );
+    assert!(
+        large < small * 3.0,
+        "per-symbol delete grew with relation size: {small:.1}us -> {large:.1}us"
+    );
+}

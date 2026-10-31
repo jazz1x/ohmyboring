@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 
 use crate::store::Store;
 use crate::vault::{is_seed_note, set_relates_to, split_frontmatter, wiki_stem};
+use crate::vector::VectorIndex;
 
 /// Project the Postgres graph (`related_docs`) into each wiki note's `relates_to` wikilinks.
 /// Makes the Obsidian graph view draw the GraphRAG connections directly. Idempotent (recomputed and rewritten every time).

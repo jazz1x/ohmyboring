@@ -31,8 +31,15 @@ jobs:
       # guard.sh runs the Python suites too, and two of them need PyYAML. Until 2026-09-19 nothing
       # installed it and the job was green because the runner image ships it — an accident, not a
       # gate. scripts/test_python_deps.py fails if this list and the imports drift apart.
+      - uses: astral-sh/setup-uv@v7
+      # uv.lock pins only pyproject.toml's dependencies; requirements*.txt (what the door, the
+      # secretary and the gates import beyond them) go in on top of the same .venv, and ruff
+      # (guard.sh step 4b calls it by name) comes from there.
       - name: install the declared Python dependency
-        run: python3 -m pip install --quiet -r requirements.txt -r requirements-dev.txt .
+        run: |
+          uv sync --locked
+          uv pip install --quiet -r requirements.txt -r requirements-dev.txt
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       # scripts/guard.sh = rustfmt --check + clippy -D warnings + test (스택-프리).
       - name: structural gate (guard.sh)
         run: ./scripts/guard.sh
@@ -117,14 +124,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.x"
+      - uses: astral-sh/setup-uv@v7
       # before the DB gate suites: search/test_pg.py imports psycopg
       - name: install python deps (door + search/pg.py)
         run: |
-          pip install -r requirements.txt
-          pip install .
+          uv sync --locked
+          uv pip install --quiet -r requirements.txt
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -160,19 +165,19 @@ jobs:
           # The door's python /search store queries (search/pg.py) — same disposable-DB
           # convention: a separate schema, dropped afterwards. Skips without the URL.
           echo "::group::python search/pg.py integration"
-          if ! python3 src/ohmyboring/search/test_pg.py; then
+          if ! uv run --locked python src/ohmyboring/search/test_pg.py; then
             echo "FAILED: search/test_pg.py"
             fail=1
           fi
           echo "::endgroup::"
           echo "::group::python remember/writer.py integration"
-          if ! python3 src/ohmyboring/remember/test_writer.py; then
+          if ! uv run --locked python src/ohmyboring/remember/test_writer.py; then
             echo "FAILED: remember/test_writer.py"
             fail=1
           fi
           echo "::endgroup::"
           echo "::group::python registers read-path integration"
-          if ! python3 src/ohmyboring/registers/test_pg.py; then
+          if ! uv run --locked python src/ohmyboring/registers/test_pg.py; then
             echo "FAILED: registers/test_pg.py"
             fail=1
           fi
@@ -186,7 +191,7 @@ jobs:
             -c "CREATE DATABASE boring OWNER boring;"
       - name: start offline stub embedder (recorded bge-m3 replay)
         run: |
-          python3 data/eval/stub_embedder.py &
+          uv run --locked python data/eval/stub_embedder.py &
           for _ in $(seq 1 20); do curl -sf http://localhost:11434/v1/models >/dev/null && break; sleep 0.5; done
           curl -sf http://localhost:11434/v1/models
       - name: prepare config + mounts
@@ -211,7 +216,7 @@ jobs:
           DOOR_PG_DSN=postgresql://boring:boring@127.0.0.1:5432/boring \
           DOOR_UPSTREAM=http://127.0.0.1:7700 \
           BORING_LLM_BASE_URL=http://127.0.0.1:11434/v1 \
-          python3 -m uvicorn agents.door.door:app --host 127.0.0.1 --port 7710 &
+          uv run --locked python -m uvicorn agents.door.door:app --host 127.0.0.1 --port 7710 &
           for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7710/health >/dev/null 2>&1 && break; sleep 1; done
           curl -sf -m3 http://127.0.0.1:7710/health
       # A DB upgraded from the shipped schema must equal one built fresh. Every other DB suite
@@ -229,7 +234,7 @@ jobs:
       - name: engine contract parity (MCP tools · HTTP routes · GET shapes == data/contract snapshot)
         env:
           DRUDGE_URL: http://127.0.0.1:7700
-        run: python3 scripts/contract-parity.py --check
+        run: uv run --locked python scripts/contract-parity.py --check
       - name: engine logs on failure
         if: failure()
         run: docker compose --profile vector logs boring-drudge boring-postgres

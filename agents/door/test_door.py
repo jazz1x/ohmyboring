@@ -55,7 +55,6 @@ import json
 import os
 import shutil
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -65,7 +64,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -113,8 +112,6 @@ TOOLS_LIST_BODY = (
 )
 
 #: 문이 tools/list 에 gap 을 덧붙인 뒤의 기대 — 엔진 도구는 앞에 그대로, gap 은 맨 끝.
-TOOLS_LIST_WITH_GAP = json.loads(TOOLS_LIST_BODY)
-TOOLS_LIST_WITH_GAP["result"]["tools"].append(door.gap_parse.TOOL)
 
 #: 엔진 recall 응답의 실측 모양(content-type application/json) — 문이 번호 블록을 앞에
 #: 붙이는 대상. "boom" 이 들어간 query 면 isError 답을 준다(통제군).
@@ -434,14 +431,12 @@ class DoorTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(StubHandler.seen_bodies[-1], payload)
         self.assertEqual(StubHandler.seen_content_types[-1], "application/json")
-        self.assertEqual(json.loads(body), TOOLS_LIST_WITH_GAP)
+        self.assertEqual(json.loads(body), json.loads(TOOLS_LIST_BODY))
         self.assertEqual(content_type, STUB_CONTENT_TYPE)
         names = [t["name"] for t in json.loads(body)["result"]["tools"]]
         self.assertEqual(
-            names, ["alpha", "beta", "gamma", "gap"], "엔진 도구는 순서 그대로 앞에, gap 은 끝에"
+            names, ["alpha", "beta", "gamma"], "스위치 기본 engine — 문은 도구 목록을 안 건드린다"
         )
-        engine_tools = json.loads(TOOLS_LIST_BODY)["result"]["tools"]
-        self.assertEqual(json.loads(body)["result"]["tools"][:3], engine_tools)
 
     def test_tools_list_non_2xx_and_non_list_answers_pass_through_untouched(self):
         payload = json.dumps(
@@ -489,7 +484,7 @@ class DoorTest(unittest.TestCase):
             expected.add((method, path))
         actual = {(method, route.path) for route in door.app.routes for method in route.methods}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(contract["http_routes"]), 30)
+        self.assertEqual(len(contract["http_routes"]), 39)
 
     def test_events_get_passes_through_byte_identical(self):
         # E4-α — /events entered the proxy table with the contract re-snapshot; the door
@@ -925,6 +920,17 @@ date: 2026-09-29
         self.assertIn("vault", lines[0])
 
 
+class VerdictLabelTests(unittest.TestCase):
+    """MCP verdict 의 세션 node.label — 엔진 mcp.rs verdict_label 시험과 같은 시각, 같은 글자."""
+
+    def test_six_fractional_digits(self):
+        whole = datetime(2026, 10, 27, 13, 53, 56, tzinfo=UTC)
+        self.assertEqual(door._verdict_label(whole), "2026-10-27T13:53:56.000000+00:00")
+        self.assertEqual(
+            door._verdict_label(whole.replace(microsecond=123456)), "2026-10-27T13:53:56.123456+00:00"
+        )
+
+
 class RememberShadowTests(unittest.TestCase):
     """E3a-2 — 문을 지난 remember 는 엔진 답을 바이트 그대로 돌려주고, 응답 뒤에 그림자가
     파이썬 쓰기 경로의 결정(PII 게이트·중복 문 갈래, 걸러진 것은 결정만)을 엔진 응답의
@@ -1065,25 +1071,6 @@ POST /remember 도 문을 지난다.
             }
         ).encode()
 
-    def _shadow_events(self) -> list[dict]:
-        path = Path(os.environ["BORING_EVENT_LOG"])
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and json.loads(line).get("event") == "remember_shadow"
-        ]
-
-    def _wait_for_shadow(self, timeout: float = 5.0) -> dict:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            events = self._shadow_events()
-            if events:
-                return events[-1]
-            time.sleep(0.05)
-        self.fail(f"remember_shadow event did not land in {os.environ['BORING_EVENT_LOG']}")
-
     def test_mcp_remember_answer_is_byte_identical(self):
         payload = self._mcp_payload(self._MCP_ARGS)
         status, body, content_type = _req(
@@ -1105,192 +1092,33 @@ POST /remember 도 문을 지난다.
         self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(REMEMBER_HTTP_BODY).hexdigest())
         self.assertEqual(content_type, STUB_CONTENT_TYPE)
 
-    def test_mcp_remember_leaves_one_shadow_event(self):
-        _req(
-            self.door_port,
-            "POST",
-            "/mcp",
-            body=self._mcp_payload(self._MCP_ARGS),
-            headers={"content-type": "application/json"},
-        )
-        event = self._wait_for_shadow()
-        self.assertEqual(event["component"], "door")
-        self.assertEqual(event["status"], "ok")
-        self.assertEqual(event["source_path"], "/vault/wiki/wiki-2901.md")
-        self.assertEqual(event["omb_session_id"], "sess-door-1")
-        self.assertEqual(event["fields"], [])
-        self.assertIn("excluded", event["relates_to"])
-        # DSN 이 없는 시험 환경이라 임베딩 갈래는 못 보고 「저장(미확인)」이지만,
-        # 결정 대조 자체는 engine stored 와 맞아 ok 다.
-        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
-        self.assertEqual(event["engine_decision"], "stored:/vault/wiki/wiki-2901.md")
-
-    def test_http_remember_leaves_one_shadow_event(self):
-        _req(
-            self.door_port,
-            "POST",
-            "/remember",
-            body=json.dumps(self._HTTP_ARGS).encode(),
-            headers={"content-type": "application/json"},
-        )
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "ok")
-        self.assertEqual(event["source_path"], "/vault/wiki/wiki-2902.md")
-
-    def test_shadow_scans_through_the_prefilled_note_index(self):
-        """E3b-2 — 문 안의 노트 색인을 미리 채워 두면 그림자의 중복 문 스캔은 쓰기마다
-        디렉터리 목록·stat 만 보고 노트를 새로 읽지 않는다(읽기는 채우기 때 딱 한 바퀴).
-        결정은 디스크 훑기와 같아 사건은 ok — 색인이 판정을 바꾸거나 읽기를 새로 하는
-        변이가 이 단언에서 빨갛게 끝난다."""
-        vault = Path(os.environ["BORING_VAULT_DIR"])
-        reads: list[str] = []
-
-        def counting_read(vault_dir: str, note_id: str) -> str | None:
-            reads.append(note_id)
-            return door.vault_notes.read_note(vault_dir, note_id)
-
-        index = door.remember_index.NoteIndex(
-            door.remember_index.DiskSeams(
-                vault_dir=str(vault),
-                list_notes=lambda: door._list_wiki_notes(str(vault)),
-                read_note=counting_read,
-                split_frontmatter=door.vault_note.split_frontmatter,
-            )
-        )
-        index.prefill()
-        self.assertTrue(index.usable, "픽스처 볼트는 채울 수 있다")
-        reads.clear()
-        previous = getattr(door.app.state, "note_index", None)
-        door.app.state.note_index = index
-        try:
-            _req(
+    def test_proxied_answers_stay_the_engines_bytes_and_queue_no_background_task(self):
+        """C-PYRETIRE1 — remember(MCP·HTTP)와 recall(MCP)은 엔진 답 그대로 가고 그림자 백그라운드
+        작업을 안 얹는다. 회상은 번호 블록 보강이 붙을 수 있어 답 본문 대신 상태만 본다."""
+        mcp = self._mcp_payload(self._MCP_ARGS)
+        recall = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "recall", "arguments": {"query": "문"}},
+            }
+        ).encode()
+        headers = {"content-type": "application/json"}
+        with mock.patch("starlette.background.BackgroundTasks.add_task") as add_task:
+            mcp_status, mcp_body, _ = _req(self.door_port, "POST", "/mcp", body=mcp, headers=headers)
+            http_status, http_body, _ = _req(
                 self.door_port,
                 "POST",
-                "/mcp",
-                body=self._mcp_payload(self._MCP_ARGS),
-                headers={"content-type": "application/json"},
+                "/remember",
+                body=json.dumps(self._HTTP_ARGS).encode(),
+                headers=headers,
             )
-            event = self._wait_for_shadow()
-        finally:
-            door.app.state.note_index = previous
-        self.assertEqual(event["status"], "ok", event.get("reason"))
-        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
-        self.assertEqual(
-            reads,
-            [],
-            f"색인이 채워져 있으니 쓰기의 재고는 목록·stat 만 — 노트를 새로 읽으면 안 된다: {reads}",
-        )
-
-    _PII_YAML = """---
-version: "1.0"
-rules:
-  - name: ipv4_any
-    regex: '\\b(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\b'
-    action: redact
-    replacement: "[IP]"
-    severity: warning
-    reason: IPv4
-"""
-
-    def test_vault_pii_rules_are_loaded_by_the_shadow(self):
-        # 볼트에 rules/pii.yaml 이 있으면 문이 그림자에 게이트를 싣는다. 엔진 노트의
-        # 본문만 가려져 있고(엔진이 게이트를 지난 흔적) 요청에는 원문이 있어도, 같은
-        # 규칙으로 가린 파이썬 렌더와 칸이 맞아 사건은 ok 다 — E3a-1 의 pii_not_ported
-        # 어긋남이 이 wiring 에서 풀리는 사례다.
-        vault = Path(os.environ["BORING_VAULT_DIR"])
-        rules = vault / "rules"
-        rules.mkdir(exist_ok=True)
-        (rules / "pii.yaml").write_text(self._PII_YAML, encoding="utf-8")
-        # 엔진이 실제로 쓴 것은 게이트를 지난 본문 — IP 가 가려진 채로 디스크에 있다.
-        note = self._WIKI_2901.replace(
-            "문을 지난 remember 는 엔진 답을 바이트 그대로 돌려준다.",
-            "문은 [IP] 에 묶인다.",
-        )
-        (vault / "wiki" / "wiki-2901.md").write_text(note, encoding="utf-8")
-        args = dict(self._MCP_ARGS)
-        args["body"] = "문은 10.1.2.3 에 묶인다."
-        _req(
-            self.door_port,
-            "POST",
-            "/mcp",
-            body=self._mcp_payload(args),
-            headers={"content-type": "application/json"},
-        )
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "ok", event.get("reason"))
-        self.assertTrue(event["decision"].startswith("stored"), event["decision"])
-
-    def test_shadow_event_reason_sorts_a_mismatch(self):
-        # 걸러둘 결정이 갈리면 사건 사유는 decision 으로 시작한다 — (가)/(나)/(다) 판별
-        # 재료가 사건 한 줄에 있는지를 문 wiring 에서도 본다. 엔진은 wiki-2901 로
-        # 저장했는데(답이 그러니) 같은 세션 노트 wiki-2999 가 볼트에 있으면 파이썬은
-        # 걸러둘 것이다 — 경로가 갈려 어긋남.
-        vault = Path(os.environ["BORING_VAULT_DIR"])
-        ghost = self._WIKI_2901.replace("wiki-2901", "wiki-2999")
-        (vault / "wiki" / "wiki-2999.md").write_text(ghost, encoding="utf-8")
-        _req(
-            self.door_port,
-            "POST",
-            "/mcp",
-            body=self._mcp_payload(self._MCP_ARGS),
-            headers={"content-type": "application/json"},
-        )
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "mismatch")
-        self.assertTrue(event["reason"].startswith("decision "), event.get("reason"))
-        self.assertIn("engine=stored", event["reason"])
-        self.assertIn("python=skipped", event["reason"])
-
-    def test_a_raising_shadow_cannot_change_the_answer(self):
-        payload = self._mcp_payload(self._MCP_ARGS)
-        # 그림자는 응답 뒤에 도니, 패치·stderr 갈무리는 사건이 뜰 때까지 살아 있어야 한다.
-        with mock.patch.object(door.remember_shadow, "run_shadow", side_effect=RuntimeError("boom")):
-            buf = io.StringIO()
-            with contextlib.redirect_stderr(buf):
-                status, body, _ = _req(
-                    self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
-                )
-                event = self._wait_for_shadow()
-        self.assertEqual(status, 200)
-        self.assertEqual(body, REMEMBER_MCP_BODY, "그림자 예외는 응답을 바꾸지 못한다")
-        self.assertEqual(len([ln for ln in buf.getvalue().splitlines() if ln.strip()]), 1)
-        self.assertEqual(event["status"], "error")
-        self.assertIn("RuntimeError", event["reason"])
-        self.assertEqual(event["omb_session_id"], "sess-door-1")
-
-    def test_the_answer_does_not_wait_for_the_shadow(self):
-        started = time.monotonic()
-
-        # run_shadow 는 ShadowRequest 하나를 위치 인자로 받는다 — 이 목도 그 모양을 따라야
-        # 진짜로 0.6s 자고, 응답 앞에서 그림자를 기다리는 변이가 이 단언으로 빨갛게 끝난다.
-        def slow_shadow(_request, **_kwargs):
-            time.sleep(0.6)
-            return door.remember_shadow.ShadowEvent("ok")
-
-        with mock.patch.object(door.remember_shadow, "run_shadow", slow_shadow):
-            status, body, _ = _req(
-                self.door_port,
-                "POST",
-                "/mcp",
-                body=self._mcp_payload(self._MCP_ARGS),
-                headers={"content-type": "application/json"},
-            )
-            elapsed = time.monotonic() - started
-            event = self._wait_for_shadow()
-        self.assertEqual(status, 200)
-        self.assertEqual(body, REMEMBER_MCP_BODY)
-        self.assertEqual(event["status"], "ok", "자고 난 그림자의 사건은 ok — 목 깨짐을 덮지 않는다")
-        self.assertLess(elapsed, 0.6, "응답이 그림자를 기다리면 이 값이 0.6s 를 넘는다")
-
-    def test_non_remember_calls_leave_no_shadow_event(self):
-        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
-        status, body, _ = _req(
-            self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"}
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), TOOLS_LIST_WITH_GAP)
-        time.sleep(0.3)
-        self.assertEqual(self._shadow_events(), [], "회상·다른 도구엔 그림자가 따라붙지 않는다")
+            recall_status, _, _ = _req(self.door_port, "POST", "/mcp", body=recall, headers=headers)
+        self.assertEqual((mcp_status, mcp_body), (200, REMEMBER_MCP_BODY))
+        self.assertEqual((http_status, http_body), (200, REMEMBER_HTTP_BODY))
+        self.assertEqual(recall_status, 200)
+        self.assertEqual(add_task.call_count, 0)
 
 
 class RememberWriterSwitchTests(unittest.TestCase):
@@ -1805,6 +1633,54 @@ class ApprovedSelectTests(unittest.TestCase):
         self.assertIsNone(approved.parse_session_ts("session:ff8b2f41-uuid"))
 
 
+class ApprovedContractTests(unittest.TestCase):
+    """Tie order, unconvertible ts, and the skipped rows in the payload (C-PORT5)."""
+
+    NOW = datetime(2026, 9, 22, 12, 0, 0, tzinfo=approved.SEOUL)
+
+    def test_ties_sort_session_then_note_ascending_whatever_the_input_order(self):
+        ts = self.NOW.timestamp() - 3600
+        rows = [
+            (f"session:slack:C2:{ts}", "/b.md", "used"),
+            (f"session:slack:C1:{ts}", "/z.md", "used"),
+            (f"session:slack:C1:{ts}", "/a.md", "used"),
+            (f"session:slack:C2:{ts}", "/a.md", "contested"),
+            (f"session:slack:C1:{ts}", "/a.md", "contested"),
+        ]
+        for order in (rows, rows[::-1]):
+            sel = approved.select_approved(order, since_hours=24, now=self.NOW)
+            self.assertEqual(
+                [(a.session[:8], a.note) for a in sel.approved],
+                [("slack:C1", "/a.md"), ("slack:C1", "/z.md"), ("slack:C2", "/b.md")],
+            )
+            self.assertEqual(
+                [(a.session[:8], a.note) for a in sel.contested],
+                [("slack:C1", "/a.md"), ("slack:C2", "/a.md")],
+            )
+
+    def test_unconvertible_ts_is_skipped_not_raised(self):
+        for tail in ("inf", "-inf", "nan", "1e400", "1e20", "-1e20"):
+            src = f"session:slack:C1:{tail}"
+            sel = approved.select_approved([(src, "/a.md", "used")], since_hours=24, now=self.NOW)
+            self.assertEqual(sel.approved, [], tail)
+            self.assertEqual(sel.skipped, [approved.Skipped(src, "session ts out of range")], tail)
+
+    def test_payload_carries_skipped_count_only(self):
+        ts = self.NOW.timestamp() - 60
+        rows = [
+            ("session:uuid-b", "/x.md", "used"),
+            ("session:slack:C1:inf", "/x.md", "used"),
+            ("session:slack:C1", "/x.md", "used"),
+            ("session:uuid-b", "/y.md", "used"),
+            (f"session:slack:C1:{ts}", "/a.md", "used"),
+        ]
+        selection = approved.select_approved(rows, 24, self.NOW)
+        out = approved.payload(selection, 24)
+        self.assertEqual(list(out), ["since_hours", "approved", "contested", "skipped_rows"])
+        self.assertEqual(out["skipped_rows"], 4)
+        self.assertEqual(out["approved"][0]["at"], "2026-09-22T11:59:00+09:00")
+
+
 class ApprovedRouteTests(unittest.TestCase):
     """GET /approved through the real door app — stub rows, no DB (AC2)."""
 
@@ -1941,6 +1817,27 @@ class ClaimSourcePureTests(unittest.TestCase):
         out = claim_source.pick_current("배포 요일", rows)
         self.assertEqual((out["note"], out["value"]), ("/vault/wiki/wiki-1001.md", "not friday"))
 
+    def test_ties_break_by_source_path_ascending_whatever_the_input_order(self):
+        at = datetime(2026, 9, 1, tzinfo=approved.SEOUL)
+        rows = [
+            ("/vault/wiki/b.md", at, "vb", "unknown"),
+            ("/vault/wiki/a.md", at, "va", "unknown"),
+            ("/vault/wiki/c.md", at, "vc", "unknown"),
+        ]
+        for order in (rows, rows[::-1], [rows[1], rows[2], rows[0]]):
+            out = claim_source.pick_current("동률", order)
+            self.assertEqual(out["note"], "/vault/wiki/a.md")
+            self.assertEqual(
+                [c["note"] for c in out["candidates"]],
+                ["/vault/wiki/a.md", "/vault/wiki/b.md", "/vault/wiki/c.md"],
+            )
+
+    def test_owner_ties_also_break_by_path(self):
+        at = datetime(2026, 9, 1, tzinfo=approved.SEOUL)
+        rows = [("/z.md", at, "vz", "owner"), ("/y.md", at, "vy", "owner"), ("/a.md", at, "va", "x")]
+        out = claim_source.pick_current("s", rows)
+        self.assertEqual([c["note"] for c in out["candidates"]], ["/y.md", "/z.md", "/a.md"])
+
     def test_empty_rows_is_none_the_doors_404(self):
         self.assertIsNone(claim_source.pick_current("없는 주어", []))
 
@@ -2017,6 +1914,13 @@ class ClaimSourceRouteTests(unittest.TestCase):
             self.assertEqual(status, 400, path)
             self.assertIn("subject", json.loads(body)["error"])
 
+    def test_nul_in_subject_is_400_before_the_store(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [("/a.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v", "unknown")]
+        status, body, _ = _req(self.door_port, "GET", "/claim-source?subject=a%00b")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "subject must not contain NUL"})
+
     def test_unknown_subject_is_404_json(self):
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
         self._rows = []
@@ -2057,6 +1961,28 @@ class ClaimSourceRouteTests(unittest.TestCase):
         self.assertEqual(payload["predicate"], "p")
         self.assertEqual([c["subject"] for c in payload["claims"]], ["s-a", "s-b"])
 
+    def test_nul_in_predicate_is_400_before_the_store(self):
+        os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
+        self._rows = [("s", "/a.md", datetime(2026, 9, 1, tzinfo=approved.SEOUL), "v", "unknown")]
+        status, body, _ = _req(self.door_port, "GET", "/claim-sources?predicate=a%00b")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "predicate must not contain NUL"})
+
+
+class SplitSubjectsGroupOrderTests(unittest.TestCase):
+    def test_rows_desc_then_canon_code_point(self):
+        rows = [
+            ("Éclair", "n1"),
+            ("éclair", "n2"),
+            ("Zeta", "n3"),
+            ("zeta", "n4"),
+            ("Mid", "n5"),
+            ("mid", "n6"),
+            ("MID", "n7"),
+        ]
+        subjects = [g["subject"] for g in door._group_split_subjects(rows)]
+        self.assertEqual(subjects, ["mid", "zeta", "éclair"])
+
 
 class SplitSubjectsGetRouteTests(unittest.TestCase):
     """GET /repairs/split-subjects through the real door app — stub rows, no DB (AC2).
@@ -2087,6 +2013,8 @@ class SplitSubjectsGetRouteTests(unittest.TestCase):
         cls.door_server.should_exit = True
 
     def setUp(self):
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_LINK_WRITER", None)
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         self._rows: list[tuple[str, str]] = []
         self._orig_fetch = door._fetch_split_subject_rows
@@ -2180,6 +2108,8 @@ class SplitSubjectsPostRouteTests(unittest.TestCase):
         cls.door_server.should_exit = True
 
     def setUp(self):
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_LINK_WRITER", None)
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:5432/boring"
         self.order: list[str] = []
@@ -2508,203 +2438,6 @@ class RulesRouteTests(unittest.TestCase):
         )
 
 
-class RunCardRouteTests(unittest.TestCase):
-    """POST /run/morning-card · /run/weekly-card — the door runs the card programs as
-    subprocesses (stubbed here) and answers {ok, exit, posted_ts?, tail}. Covered: a healthy
-    run, a non-zero exit surfacing as ok:false with the code (never hidden), the tool's
-    "already posted" line parsing into posted_ts, a timeout, and one run at a time per route
-    (a second call while one runs is 409)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.door_port = _free_port()
-        cls.door_server = uvicorn.Server(
-            uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
-        )
-        cls.door_thread = threading.Thread(target=cls.door_server.run, daemon=True)
-        cls.door_thread.start()
-        deadline = 10.0
-        while deadline > 0:
-            try:
-                with socket.create_connection(("127.0.0.1", cls.door_port), timeout=1):
-                    break
-            except OSError:
-                pass
-            time.sleep(0.05)
-            deadline -= 0.05
-        else:
-            raise RuntimeError("door did not come up within 10s")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.door_server.should_exit = True
-
-    def test_a_healthy_run_answers_ok_with_the_ts(self):
-        calls = []
-
-        def fake_run(script, timeout_s):
-            calls.append((script, timeout_s))
-            return subprocess.CompletedProcess(
-                ["x"], 0, stdout="[card] posted ts=1727480000.000100\n", stderr=""
-            )
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, content_type = _req(self.door_port, "POST", "/run/morning-card")
-        self.assertEqual(status, 200)
-        self.assertIn("application/json", content_type)
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], True)
-        self.assertEqual(payload["exit"], 0)
-        self.assertEqual(payload["posted_ts"], "1727480000.000100")
-        self.assertIn("posted ts=", payload["tail"])
-        self.assertTrue(str(calls[0][0]).endswith(os.path.join("agents", "slack", "card.py")))
-
-    def test_the_weekly_route_runs_the_weekly_program(self):
-        calls = []
-
-        def fake_run(script, timeout_s):
-            calls.append(script)
-            return subprocess.CompletedProcess(["x"], 0, stdout="[weekly] posted ts=2.0\n", stderr="")
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, _ = _req(self.door_port, "POST", "/run/weekly-card")
-        self.assertEqual(status, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], True)
-        self.assertEqual(payload["posted_ts"], "2.0")
-        self.assertTrue(
-            str(calls[0]).endswith(os.path.join("agents", "slack", "weekly_card.py")),
-            "the weekly route must execute the weekly poster, not the morning card",
-        )
-
-    def test_the_repair_judge_route_runs_the_judge_program(self):
-        """POST /run/repair-judge — morning-card 와 같은 {ok, exit, tail} 모양으로 판정
-        실행을 돌린다. The mutation this kills: the route wired to the wrong program (or
-        folded into the card's own run) — the judge must run as its own subprocess."""
-        calls = []
-
-        def fake_run(script, timeout_s):
-            calls.append(script)
-            return subprocess.CompletedProcess(
-                ["x"], 0, stdout="[repair-judge] judged=2 failed=0\n", stderr=""
-            )
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, _ = _req(self.door_port, "POST", "/run/repair-judge")
-        self.assertEqual(status, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], True)
-        self.assertEqual(payload["exit"], 0)
-        self.assertIn("judged=2", payload["tail"])
-        self.assertTrue(
-            str(calls[0]).endswith(os.path.join("agents", "slack", "card_repair_judge.py")),
-            "the repair-judge route must execute the judge, not the morning card",
-        )
-
-    def test_the_advice_write_route_runs_the_advice_program(self):
-        """POST /run/advice-write — the pre-card advice step runs as its own subprocess, not
-        inside the morning card (whose run must make no model call) and not as the judge."""
-        calls = []
-
-        def fake_run(script, timeout_s):
-            calls.append(script)
-            return subprocess.CompletedProcess(
-                ["x"], 0, stdout="[advice-write] written=2 rewritten=2\n", stderr=""
-            )
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, _ = _req(self.door_port, "POST", "/run/advice-write")
-        self.assertEqual(status, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], True)
-        self.assertIn("written=2", payload["tail"])
-        self.assertTrue(
-            str(calls[0]).endswith(os.path.join("agents", "slack", "card_advice_write.py")),
-            "the advice-write route must execute the advice step, not the morning card",
-        )
-
-    def test_a_nonzero_exit_is_ok_false_with_the_code_and_tail(self):
-        """The mutation this kills: the route folding a failed card into ok:true — the exit
-        code and the tool's own refusal line must reach the caller verbatim."""
-
-        def fake_run(script, timeout_s):
-            return subprocess.CompletedProcess(
-                ["x"], 3, stdout="", stderr="[card] 카드 거부: 문이 응답하지 않음\n"
-            )
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, _ = _req(self.door_port, "POST", "/run/morning-card")
-        self.assertEqual(
-            status, 200, "the run completed — the tool's answer rides in the body, not the status"
-        )
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], False)
-        self.assertEqual(payload["exit"], 3)
-        self.assertIn("카드 거부", payload["tail"])
-        self.assertNotIn("posted_ts", payload)
-
-    def test_the_already_posted_line_still_carries_the_ts(self):
-        def fake_run(script, timeout_s):
-            return subprocess.CompletedProcess(
-                ["x"], 0, stdout="[card] already posted today (ts=1727480000.999900)\n", stderr=""
-            )
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, _ = _req(self.door_port, "POST", "/run/morning-card")
-        self.assertEqual(status, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], True)
-        self.assertEqual(payload["exit"], 0)
-        self.assertEqual(payload["posted_ts"], "1727480000.999900")
-
-    def test_a_timeout_is_ok_false_with_a_null_exit(self):
-        def fake_run(script, timeout_s):
-            raise subprocess.TimeoutExpired(["x"], timeout_s)
-
-        with mock.patch.object(door, "_run_card_subprocess", fake_run):
-            status, body, _ = _req(self.door_port, "POST", "/run/weekly-card")
-        self.assertEqual(status, 200)
-        payload = json.loads(body)
-        self.assertEqual(payload["ok"], False)
-        self.assertIsNone(payload["exit"])
-        self.assertIn("timeout", payload["error"])
-
-    def test_a_second_call_while_one_runs_is_409(self):
-        entered = threading.Event()
-        release = threading.Event()
-        results = []
-        results_lock = threading.Lock()
-
-        def slow_run(script, timeout_s):
-            entered.set()
-            release.wait(15)
-            return subprocess.CompletedProcess(["x"], 0, stdout="[card] posted ts=3.0\n", stderr="")
-
-        def fire():
-            result = _req(self.door_port, "POST", "/run/morning-card")
-            with results_lock:
-                results.append(result)
-
-        try:
-            with mock.patch.object(door, "_run_card_subprocess", slow_run):
-                first = threading.Thread(target=fire)
-                first.start()
-                self.assertTrue(entered.wait(10), "the first run never started")
-                fire()  # the second call lands while the first still holds the route
-                release.set()
-                first.join(10)
-        finally:
-            release.set()
-
-        self.assertEqual(len(results), 2)
-        statuses = sorted(r[0] for r in results)
-        self.assertEqual(statuses, [200, 409], f"one run completes, the concurrent one is refused: {results}")
-        by_status = {r[0]: json.loads(r[1]) for r in results}
-        self.assertEqual(by_status[409], {"error": "morning-card already running"})
-        self.assertEqual(by_status[200]["ok"], True)
-        self.assertEqual(by_status[200]["posted_ts"], "3.0")
-
-
 class _FakeWeb:
     """A Slack message the door reads and rewrites — history returns it as it stands now."""
 
@@ -2944,187 +2677,11 @@ class _RegisterTestHarness:
         os.environ["BORING_EVENT_SINK"] = "spool"
         os.environ["BORING_EVENT_LOG"] = str(Path(self._tmp.name) / f"events-{time.time_ns()}.ndjson")
         os.environ["DOOR_PG_DSN"] = "postgresql://unused/unused"  # 읽기 길은 목으로 둔다
-        # 그림자는 응답 뒤(백그라운드)에 돌아 — mock 은 _req 블록이 끝나기 전에 풀리면 안 된다.
-        # 테스트마다 덮어쓰는 self._shadow_query_impl 을 경유하게 핀다(지금 값이 아니라 호출 시점을 본다).
-        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok({})
-        self._shadow_query_patch = mock.patch.object(
-            door,
-            "_register_shadow_query",
-            side_effect=lambda surface, transport, arguments: self._shadow_query_impl(
-                surface, transport, arguments
-            ),
-        )
-        self._shadow_query_patch.start()
 
     def _tearDown(self):
-        self._shadow_query_patch.stop()
         StubHandler.register_mode = False
         os.environ.pop("DOOR_REGISTER_READER", None)
         os.environ.pop("DOOR_RECALL_READER", None)
-
-    def _read_shadow_events(self) -> list[dict]:
-        path = Path(os.environ["BORING_EVENT_LOG"])
-        if not path.exists():
-            return []
-        return [
-            parsed
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and (parsed := json.loads(line)).get("event") == "read_shadow"
-        ]
-
-    def _wait_for_shadow(self, timeout: float = 5.0) -> dict:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            events = self._read_shadow_events()
-            if events:
-                return events[-1]
-            time.sleep(0.05)
-        self.fail("read_shadow event not written within timeout")
-
-
-class RegisterShadowTests(_RegisterTestHarness, unittest.TestCase):
-    """E4-1 읽기 그림자 — 스위치 기본(engine)에서 일곱 레지스터 경로는 엔진 답 바이트
-    그대로 가고, 응답 뒤 그림자가 같은 요청을 파이썬 읽기 길에 태워 read_shadow 사건
-    한 줄을 남긴다. 사건의 사유는 (가)/(나)/(다) 갈래로 남는다."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls._start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._stop()
-
-    def setUp(self):
-        self._setUp(register_mode=True)
-
-    def tearDown(self):
-        self._tearDown()
-
-    def _mcp_call(self, tool: str, arguments: dict, request_id: int = 5) -> bytes:
-        return json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "tools/call",
-                "params": {"name": tool, "arguments": arguments},
-            }
-        ).encode()
-
-    def test_http_register_answer_is_byte_identical_and_shadow_ok(self):
-        engine_payload = json.loads(REGISTER_HTTP_BODY)
-        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(engine_payload)
-        status, body, _ = _req(
-            self.door_port,
-            "POST",
-            "/decisions",
-            body=json.dumps({"project": "omb"}).encode(),
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(body, REGISTER_HTTP_BODY, "기본은 엔진 답 바이트 그대로")
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "ok")
-        self.assertEqual(event["event"], "read_shadow")
-        self.assertEqual(event["surface"], "decisions")
-        self.assertEqual(event["transport"], "http")
-
-    def test_mcp_register_tool_shadow_uses_structured_content(self):
-        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(REGISTER_MCP_PAYLOAD)
-        status, body, _ = _req(
-            self.door_port,
-            "POST",
-            "/mcp",
-            body=self._mcp_call("risks", {"project": "omb", "limit": 5}),
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(body, REGISTER_MCP_BODY, "MCP 도구 답도 바이트 그대로")
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "ok")
-        self.assertEqual(event["surface"], "risks")
-        self.assertEqual(event["transport"], "mcp")
-        self.assertEqual(event["engine_rows"], 1)
-        self.assertEqual(event["python_rows"], 1)
-
-    def test_shadow_mismatch_is_classified_python_defect(self):
-        self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(
-            {"answer": "No decisions recorded yet.", "sources": []}
-        )
-        _req(
-            self.door_port,
-            "POST",
-            "/decisions",
-            body=json.dumps({"project": "omb"}).encode(),
-            headers={"content-type": "application/json"},
-        )
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "mismatch")
-        self.assertGreaterEqual(event["python_defect"], 1)
-        self.assertIn("(가)", event["reason"])
-
-    def test_shadow_race_rerun_match_stays_ok_with_unknown_reason(self):
-        first = {"answer": "No decisions recorded yet.", "sources": []}
-        calls = {"n": 0}
-
-        def racy(surface, transport, arguments):
-            calls["n"] += 1
-            return door.Ok(first if calls["n"] == 1 else json.loads(REGISTER_HTTP_BODY))
-
-        self._shadow_query_impl = racy
-        _req(
-            self.door_port,
-            "POST",
-            "/decisions",
-            body=json.dumps({"project": "omb"}).encode(),
-            headers={"content-type": "application/json"},
-        )
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "ok")
-        self.assertGreaterEqual(event["unknown"], 1, "어긋난 칸마다 레이스 사유가 남는다")
-        self.assertIn("race (다)", event["reason"])
-
-    def test_shadow_raising_cannot_change_the_answer(self):
-        def boom(surface, transport, arguments):
-            raise RuntimeError("boom")
-
-        self._shadow_query_impl = boom
-        status, body, _ = _req(
-            self.door_port,
-            "POST",
-            "/next_actions",
-            body=json.dumps({"project": ""}).encode(),
-            headers={"content-type": "application/json"},
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(body, REGISTER_HTTP_BODY)
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "error")
-        self.assertIn("RuntimeError", event["reason"])
-
-    def test_status_shadow_compares_sources_only_when_generated(self):
-        engine_payload = {
-            "answer": "## Status\n\n- Done: one thing\n- Next: another",
-            "sources": ["wiki/wiki-0001.md"],
-        }
-        original = _REGISTER_STUB_PATHS["/status"]
-        _REGISTER_STUB_PATHS["/status"] = json.dumps(engine_payload, ensure_ascii=False).encode()
-        try:
-            self._shadow_query_impl = lambda surface, transport, arguments: door.Ok(engine_payload)
-            status, body, _ = _req(
-                self.door_port,
-                "POST",
-                "/status",
-                body=json.dumps({"project": "omb"}).encode(),
-                headers={"content-type": "application/json"},
-            )
-        finally:
-            _REGISTER_STUB_PATHS["/status"] = original
-        self.assertEqual(json.loads(body), engine_payload)
-        event = self._wait_for_shadow()
-        self.assertEqual(event["status"], "ok")
-        self.assertEqual(event["surface"], "status")
-        self.assertFalse(event["answer_compared"], "생성 답은 대조 안 함 — sources 만 맞춘다")
 
 
 class RegisterReaderSwitchTests(_RegisterTestHarness, unittest.TestCase):
@@ -3323,96 +2880,6 @@ class _RecallTestBase(_RegisterTestHarness):
         self.fail("recall_shadow event not written within timeout")
 
 
-class RecallShadowTests(_RecallTestBase, unittest.TestCase):
-    """E4-2 회상 그림자 — MCP recall 은 엔진 답 바이트(번호 보강만 예외) 그대로 가고, 응답 뒤
-    파이썬 회상이 같은 인자로 돌아 recall_shadow 사건 한 줄을 남긴다. 파이썬 길(_recall_python)은
-    목으로 두고 선로(대조 시점·응답 비대기·예외 접기)만 본다. 진짜 길은 recall/test_recall.py."""
-
-    def test_same_text_is_ok_and_the_answer_is_the_engines_bytes(self):
-        status, body, _ = self._recall("그냥 검색해줘", project="omb")
-        self.assertEqual((status, body), (200, RECALL_BODY))
-        event = self._wait_for_event()
-        self.assertEqual((event["status"], event["path"]), ("ok", "wiki"))
-        self.assertEqual(event["engine_lines"], 1)
-        self.assertEqual(
-            self.python_calls, [{"query": "그냥 검색해줘", "project": "omb"}], "인자는 요청 그대로"
-        )
-
-    def test_a_different_text_is_a_mismatch_with_the_first_differing_line(self):
-        self._python_impl = lambda arguments: door.Ok(
-            door.recall_answer.Recalled("- [other.md] 다름", "vector", "- [other.md] 다름")
-        )
-        status, body, _ = self._recall("그냥 검색해줘")
-        self.assertEqual((status, body), (200, RECALL_BODY), "어긋나도 응답은 엔진 그대로")
-        event = self._wait_for_event()
-        self.assertEqual((event["status"], event["path"]), ("mismatch", "vector"))
-        self.assertEqual(
-            event["first_diff"], {"line": 1, "engine": self.ENGINE_TEXT, "python": "- [other.md] 다름"}
-        )
-        self.assertNotIn("그냥 검색해줘", json.dumps(event, ensure_ascii=False), "사건에 질의를 싣지 않는다")
-
-    def test_a_raising_shadow_costs_one_log_line_and_an_error_event_and_never_the_answer(self):
-        def boom(arguments):
-            raise RuntimeError("boom")
-
-        self._python_impl = boom
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            status, body, _ = self._recall("그냥 검색해줘")
-            event = self._wait_for_event()
-        self.assertEqual((status, body), (200, RECALL_BODY))
-        self.assertEqual(event["status"], "error")
-        self.assertIn("RuntimeError", event["reason"])
-        lines = [ln for ln in buf.getvalue().splitlines() if "recall_shadow" in ln]
-        self.assertEqual(len(lines), 1, buf.getvalue())
-
-    def test_the_answer_does_not_wait_for_the_shadow(self):
-        def slow(arguments):
-            time.sleep(0.6)
-            return door.Ok(door.recall_answer.Recalled(self.ENGINE_TEXT, "wiki", self.ENGINE_TEXT))
-
-        self._python_impl = slow
-        started = time.monotonic()
-        status, body, _ = self._recall("그냥 검색해줘")
-        elapsed = time.monotonic() - started
-        event = self._wait_for_event()
-        self.assertEqual((status, body), (200, RECALL_BODY))
-        self.assertEqual(event["status"], "ok", "자고 난 그림자의 사건은 ok — 목 깨짐을 덮지 않는다")
-        self.assertLess(elapsed, 0.6, "응답이 그림자를 기다리면 이 값이 0.6s 를 넘는다")
-
-    def test_the_shadow_compares_the_engine_text_from_before_the_note_blocks_were_prepended(self):
-        with tempfile.TemporaryDirectory() as vault, mock.patch.dict(os.environ, {"BORING_VAULT_DIR": vault}):
-            status, body, _ = self._recall("wiki-2229 봐")
-        text = json.loads(body)["result"]["content"][0]["text"]
-        self.assertEqual(status, 200)
-        self.assertTrue(text.startswith("- wiki-2229 은 볼트에 없음\n\n"), "통제군: 응답은 보강된다")
-        self.assertTrue(text.endswith(self.ENGINE_TEXT))
-        event = self._wait_for_event()
-        self.assertEqual(event["status"], "ok", "보강 뒤 텍스트로 대조하면 줄 수가 달라 mismatch 가 된다")
-        self.assertEqual(event["engine_lines"], 1)
-
-    def test_an_engine_error_answer_leaves_an_error_event_and_the_same_bytes(self):
-        status, body, _ = self._recall("boom")
-        self.assertEqual((status, body), (200, RECALL_ERROR_BODY))
-        event = self._wait_for_event()
-        self.assertEqual(event["status"], "error")
-        self.assertIn("engine unreadable", event["reason"])
-
-    def test_other_tools_leave_no_recall_shadow(self):
-        payload = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {"name": "search", "arguments": {"query": "x"}},
-            }
-        ).encode()
-        _req(self.door_port, "POST", "/mcp", body=payload, headers={"content-type": "application/json"})
-        time.sleep(0.3)
-        self.assertEqual(self._events(), [])
-        self.assertEqual(self.python_calls, [])
-
-
 _REAL_RECALL_PYTHON = door._recall_python
 
 
@@ -3503,11 +2970,8 @@ class RecallReaderSwitchTests(_RecallTestBase, unittest.TestCase):
                     os.environ["DOOR_RECALL_READER"] = value
                 self.assertEqual(door._recall_reader(), "engine")
                 status, body, _ = self._recall("그냥 검색해줘", session_id="sess-1")
-                event = self._wait_for_event()
                 self.assertEqual((status, body), (200, RECALL_BODY))
-                self.assertEqual(event["reader"], "engine")
                 self.assertEqual(self.handovers, [], "엔진이 답하면 문은 handover 를 안 쓴다")
-                Path(os.environ["BORING_EVENT_LOG"]).unlink()
 
     def test_empty_query_is_the_engines_32602(self):
         self._python_impl = _REAL_RECALL_PYTHON
@@ -3564,6 +3028,8 @@ class GapRouteTests(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
 
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_LINK_WRITER", None)
         self._saved_dsn = os.environ.get("DOOR_PG_DSN")
         os.environ["DOOR_PG_DSN"] = "postgresql://boring:boring@127.0.0.1:9/none"
         self.client = TestClient(door.app)
@@ -3650,6 +3116,130 @@ class GapRouteTests(unittest.TestCase):
         self.assertEqual(self.http(self.ARGS).status_code, 503)
         self.assertEqual(self.mcp(self.ARGS).json()["error"]["code"], -32603)
         self.assertEqual(self.recorded, [])
+
+
+class LinkWriterSwitchTests(unittest.TestCase):
+    """C-PORT4 — 잇기 쓰기 주인 스위치 (DOOR_LINK_WRITER). 기본·엉뚱한 값이면 gap(HTTP·MCP)과
+    split-subjects 셋은 엔진으로 간다(문 핸들러 호출 0). python 이면 엔진을 안 부른다. 엔진 길의
+    POST split 은 row 400 을 엔진 앞에서, 응답 없음이면 개수 없이 다시 읽기를 잇고 카드 행을 정산한다."""
+
+    ENGINE = b'{"from":"engine"}'
+    GAP = {"session_id": "s-1", "query": "q", "kind": "missing"}
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        self._saved = os.environ.pop("DOOR_LINK_WRITER", None)
+        self.addCleanup(self._restore)
+        self.client = TestClient(door.app)
+        patcher = mock.patch.object(
+            door, "_fetch", return_value=door._pass_through(200, self.ENGINE, "application/json")
+        )
+        self.fetch = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _restore(self):
+        os.environ.pop("DOOR_LINK_WRITER", None)
+        if self._saved is not None:
+            os.environ["DOOR_LINK_WRITER"] = self._saved
+
+    def mcp(self, method, params=None):
+        return self.client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 4, "method": method, "params": params or {}}
+        )
+
+    def test_default_and_garbage_values_proxy_all_four_to_the_engine(self):
+        with (
+            mock.patch.object(door, "_gap_record") as record,
+            mock.patch.object(door, "_fetch_split_subject_rows") as rows,
+        ):
+            for value in (None, "engine", "python2", "Python", ""):
+                if value is None:
+                    os.environ.pop("DOOR_LINK_WRITER", None)
+                else:
+                    os.environ["DOOR_LINK_WRITER"] = value
+                self.assertEqual(door._link_writer(), "engine", value)
+                self.fetch.reset_mock()
+                responses = (
+                    self.client.get("/repairs/split-subjects"),
+                    self.client.get("/repairs/split-subjects/samples?variant=a"),
+                    self.client.post("/gap", json=self.GAP),
+                    self.mcp("tools/call", {"name": "gap", "arguments": self.GAP}),
+                )
+                for response in responses:
+                    self.assertEqual(response.content, self.ENGINE, f"{value!r}: 엔진 답 바이트 그대로")
+                self.assertEqual(self.fetch.call_count, 4, f"{value!r}: 네 면 모두 엔진으로")
+        record.assert_not_called()
+        rows.assert_not_called()
+
+    def test_tools_list_gap_appears_once_in_either_owner(self):
+        listing = {"jsonrpc": "2.0", "id": 4, "result": {"tools": [{"name": "recall"}, {"name": "gap"}]}}
+        self.fetch.return_value = door._pass_through(200, json.dumps(listing).encode(), "application/json")
+        for value in (None, "python"):
+            if value is None:
+                os.environ.pop("DOOR_LINK_WRITER", None)
+            else:
+                os.environ["DOOR_LINK_WRITER"] = value
+            names = [t["name"] for t in self.mcp("tools/list").json()["result"]["tools"]]
+            self.assertEqual(names.count("gap"), 1, f"{value!r}: {names}")
+
+    def test_python_answers_gap_without_the_engine(self):
+        os.environ["DOOR_LINK_WRITER"] = "python"
+        report = door.Ok(door.gap_pg.GapReport("gap:abc", "missing", 0, 0))
+        with (
+            mock.patch.object(door, "_gap_record", return_value=report),
+            mock.patch.dict(os.environ, {"DOOR_PG_DSN": "postgresql://x:x@127.0.0.1:9/none"}),
+        ):
+            self.assertEqual(self.client.post("/gap", json=self.GAP).status_code, 200)
+            self.mcp("tools/call", {"name": "gap", "arguments": self.GAP})
+        self.fetch.assert_not_called()
+
+    def split_post(self, body):
+        return self.client.post("/repairs/split-subjects", json=body)
+
+    ROW = {"channel": "C1", "card_ts": "1.2", "idx": 0}
+
+    def test_engine_split_rejects_bad_row_before_the_engine(self):
+        response = self.split_post({"subject": "a", "row": {"channel": "C1"}})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.split_post({}).status_code, 400)
+        self.fetch.assert_not_called()
+
+    def test_engine_split_202_queues_the_reread_with_the_engines_counts(self):
+        answer = {
+            "subject": "a",
+            "deleted_rows": 2,
+            "reread_notes": 1,
+            "remaining_variants": None,
+            "owner_held": ["/o.md"],
+            "sync": "started",
+        }
+        self.fetch.return_value = door._pass_through(202, json.dumps(answer).encode(), "application/json")
+        with mock.patch.object(door, "_reread_in_background") as reread:
+            response = self.split_post({"subject": "a", "row": self.ROW})
+        self.assertEqual((response.status_code, response.json()), (202, answer))
+        merged = reread.call_args.args[0]
+        self.assertEqual((merged.subject, merged.deleted_rows, merged.reread_notes), ("a", 2, 1))
+        self.assertEqual(merged.owner_held, ["/o.md"])
+        self.assertEqual(merged.row, door.card_types.RowRef(**self.ROW))
+
+    def test_engine_split_without_an_answer_still_rereads_and_settles_the_row(self):
+        for failure in (OSError("timed out"), None):
+            if failure is None:
+                self.fetch.side_effect = None
+                self.fetch.return_value = door._pass_through(502, b'{"error":"bad"}', "application/json")
+            else:
+                self.fetch.side_effect = failure
+            with (
+                mock.patch.object(door, "_reread_in_background") as reread,
+                mock.patch.object(door, "_show_row") as show,
+            ):
+                response = self.split_post({"subject": "a", "row": self.ROW})
+            self.assertEqual(response.status_code, 502)
+            merged = reread.call_args.args[0]
+            self.assertEqual((merged.subject, merged.deleted_rows, merged.reread_notes), ("a", None, None))
+            self.assertEqual(show.call_count, 1, "카드 행은 응답 없음으로 한 번 정산")
+            self.assertIsInstance(show.call_args.args[1], door.card_types.Done)
 
 
 class VerdictWriterSwitchTests(unittest.TestCase):
@@ -4133,6 +3723,97 @@ class EventsOwnerSelfQueueTests(unittest.TestCase):
             Path(os.environ["BORING_EVENT_LOG"]).exists(),
             "싱크가 200 을 받았다 — 스풀로 떨어지지 않는다",
         )
+
+
+_REAL_FETCH = door._fetch
+
+
+class HandoverSwitchTest(unittest.TestCase):
+    """1차 넘김 — DOOR_MEMORY_READER(/approved·/claim-source·/claim-sources·/rules)와
+    DOOR_SEARCH_READER(/projects·/search 함께). 값이 정확히 engine 일 때만 엔진(프록시)으로,
+    그 밖(없음·python·오타)은 문 Python 이 답한다. 엔진 이음매(_fetch)는 목, 저장소는 꺼 둔다."""
+
+    ENGINE = b'{"from":"engine"}'
+    MEMORY = (
+        ("GET", "/approved", None),
+        ("GET", "/claim-source?subject=s", None),
+        ("GET", "/claim-sources?predicate=p", None),
+        ("GET", "/rules", None),
+    )
+    SEARCH = (
+        ("GET", "/projects?active_days=7", None),
+        ("POST", "/search", {"query": "q"}),
+    )
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        names = ("DOOR_MEMORY_READER", "DOOR_SEARCH_READER", "DOOR_PG_DSN")
+        self._saved = {name: os.environ.get(name) for name in names}
+        for name in names:
+            os.environ.pop(name, None)
+        self.client = TestClient(door.app)
+        fetch = mock.patch.object(
+            door, "_fetch", return_value=door._pass_through(200, self.ENGINE, "application/json")
+        )
+        self.fetch = fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def check_switch(self, env, requests):
+        os.environ[env] = "engine"
+        for method, path, body in requests:
+            self.fetch.reset_mock()
+            response = self.client.request(method, path, json=body)
+            self.assertEqual(response.content, self.ENGINE, f"{env}=engine {path}")
+            self.assertEqual(self.fetch.call_count, 1, f"{env}=engine {path}")
+        for value in (None, "python", "Engine", "engin", ""):
+            if value is None:
+                os.environ.pop(env, None)
+            else:
+                os.environ[env] = value
+            for method, path, body in requests:
+                self.fetch.reset_mock()
+                response = self.client.request(method, path, json=body)
+                self.assertNotEqual(response.content, self.ENGINE, f"{env}={value!r} {path}")
+                self.fetch.assert_not_called()
+
+    def test_memory_reader_engine_only_when_exactly_engine(self):
+        self.check_switch("DOOR_MEMORY_READER", self.MEMORY)
+
+    def test_search_reader_engine_only_when_exactly_engine(self):
+        self.check_switch("DOOR_SEARCH_READER", self.SEARCH)
+
+    def test_the_two_switches_do_not_cross(self):
+        os.environ["DOOR_MEMORY_READER"] = "engine"
+        for method, path, body in self.SEARCH:
+            self.client.request(method, path, json=body)
+        self.fetch.assert_not_called()
+        os.environ.pop("DOOR_MEMORY_READER")
+        os.environ["DOOR_SEARCH_READER"] = "engine"
+        for method, path, body in self.MEMORY:
+            self.client.request(method, path, json=body)
+        self.fetch.assert_not_called()
+
+    def test_engine_search_header_survives_the_proxy(self):
+        os.environ["DOOR_SEARCH_READER"] = "engine"
+        upstream = mock.MagicMock()
+        upstream.__enter__.return_value = upstream
+        upstream.status = 200
+        upstream.read.return_value = self.ENGINE
+        upstream.headers = {"content-type": "application/json", "x-boring-search": "engine"}
+        with (
+            mock.patch.object(door, "_fetch", _REAL_FETCH),
+            mock.patch.object(door.urllib.request, "urlopen", return_value=upstream),
+        ):
+            response = self.client.post("/search", json={"query": "q"})
+        self.assertEqual(response.headers.get("x-boring-search"), "engine")
 
 
 if __name__ == "__main__":

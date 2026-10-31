@@ -260,6 +260,27 @@ def said_by_owner_counts(conn: psycopg.Connection, paths: list[str]) -> Either[d
     )
 
 
+#: 회상 한 줄에 싣는 개념 — about 간선의 concept 노드 label(적힌 그대로의 이름). neighbors 가 보여 주는
+#: 것과 같은 간선이라 「이미 쓰던 이름」을 여기서 읽는다. store.rs concepts_of 와 같은 질의.
+_CONCEPTS_SQL = (
+    "SELECT e.src, n.label FROM edge e JOIN node n ON n.id = e.dst"
+    " WHERE e.src = ANY(%s) AND e.kind = 'about' AND n.kind = 'concept'"
+    " ORDER BY e.src, n.label;"
+)
+
+
+def concepts_by_doc(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str, list[str]], PgError]:
+    doc_ids = [doc_node_id(path) for path in paths]
+
+    def run() -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for src, label in _exec_fetchall(conn, _CONCEPTS_SQL, (doc_ids,)):
+            out.setdefault(src.removeprefix("doc:"), []).append(label)
+        return out
+
+    return _attempt(run)
+
+
 def superseded_by(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str, list[str]], PgError]:
     """store.rs:3181 — supersedes 간선의 대상(옛 노트) 마다 새 노트 경로."""
     doc_ids = [doc_node_id(path) for path in paths]
@@ -299,7 +320,8 @@ _RELATED_BY_SHARED_GROUND_SQL = (
     " FROM shares s"
     " JOIN document od ON ('doc:' || od.source_path) = s.doc_node"
     " WHERE od.updated_at < (SELECT updated_at FROM document WHERE source_path = %s)"
-    " GROUP BY s.doc_node ORDER BY shared DESC, s.doc_node ASC LIMIT %s"
+    " GROUP BY s.doc_node HAVING sum(s.weight) >= %s"
+    " ORDER BY shared DESC, s.doc_node ASC LIMIT %s"
     ")"
     " SELECT d.source_path, d.project, d.tags,"
     " string_agg(c.content, E'\\n' ORDER BY c.chunk_idx) AS content"
@@ -312,9 +334,10 @@ _RELATED_BY_SHARED_GROUND_SQL = (
 
 
 def related_by_shared_ground(
-    conn: psycopg.Connection, source_path: str, limit: int
+    conn: psycopg.Connection, source_path: str, limit: int, min_shared: int = 1
 ) -> Either[list[RelatedDoc], PgError]:
-    """store.rs:1187 — self 의 claims/concept:% 간선 dst 를 공유하는 더 오래된 문서들."""
+    """store.rs:1187 — self 의 claims/concept:% 간선 dst 를 공유하는 더 오래된 문서들.
+    공유 점수 합이 min_shared 미만인 후보는 빠진다."""
 
     def run() -> list[RelatedDoc]:
         doc_id = doc_node_id(source_path)
@@ -328,7 +351,7 @@ def related_by_shared_ground(
             for row in _exec_fetchall(
                 conn,
                 _RELATED_BY_SHARED_GROUND_SQL,
-                (doc_id, doc_id, doc_id, doc_id, source_path, limit),
+                (doc_id, doc_id, doc_id, doc_id, source_path, min_shared, limit),
             )
         ]
 
@@ -354,8 +377,7 @@ def rank_facts(conn: psycopg.Connection, paths: list[str]) -> Either[dict[str, r
     return _attempt(run)
 
 
-#: {kinds} 자리: 등록부(declared_claims)는 fact 를 빼고, 회상(current_claims)은 kind 를 가리지
-#: 않는다 — 볼트 claims 15,395 중 fact 7,642(판정 wiki-5375).
+#: kind 를 가리지 않는다 — 볼트 claims 15,395 중 fact 7,642(판정 wiki-5375).
 _CLAIMS_SQL = (
     "WITH asked AS ("
     " SELECT unnest(%s::text[]) AS doc_id, unnest(%s::text[]) AS path"
@@ -372,7 +394,6 @@ _CLAIMS_SQL = (
     " JOIN document dm ON dm.source_path = c.source_path"
     " WHERE e.kind = 'claims'"
     " AND c.superseded_at IS NULL"
-    "{kinds}"
     "), ranked AS ("
     " SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project,"
     " CASE kind WHEN 'decision' THEN 0"
@@ -395,22 +416,14 @@ _CLAIMS_SQL = (
     " WHERE rn <= %s"
     " ORDER BY doc_path, rn;"
 )
-_DECLARED_CLAIMS_SQL = _CLAIMS_SQL.format(kinds=" AND c.kind <> 'fact'")
-_CURRENT_CLAIMS_SQL = _CLAIMS_SQL.format(kinds="")
-
-
-def declared_claims(
-    conn: psycopg.Connection, paths: list[str], per_doc: int
-) -> Either[dict[str, RegisterRows], PgError]:
-    """store.rs:1773 — 현재 claims→claim 간선이 잇는 행만(fact 제외), tier·최신 순, 한 문서당 per_doc."""
-    return _claims_by_doc(conn, _DECLARED_CLAIMS_SQL, paths, per_doc)
 
 
 def current_claims(
     conn: psycopg.Connection, paths: list[str], per_doc: int
 ) -> Either[dict[str, RegisterRows], PgError]:
-    """회상용 — declared_claims 와 같되 kind 를 가리지 않는다(fact 포함). 닫힌 claim 은 뺀다."""
-    return _claims_by_doc(conn, _CURRENT_CLAIMS_SQL, paths, per_doc)
+    """/search·회상용 — 현재 claims→claim 간선이 잇는 행(fact 포함), tier·최신 순, 한 문서당 per_doc.
+    등록부(registers/pg.py)는 자기 SQL 로 fact 를 뺀다."""
+    return _claims_by_doc(conn, _CLAIMS_SQL, paths, per_doc)
 
 
 def _claims_by_doc(
