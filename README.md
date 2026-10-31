@@ -57,6 +57,58 @@ Optional **pgvector** accelerator (`BORING_VECTOR=on`) adds similarity search + 
 
 ---
 
+## How I use it day to day
+
+- **Every session starts where the last one stopped.** When a session opens, the `SessionStart` hook injects a card for the project you opened: recent decisions, risks, facts and next steps. Every prompt after that gets up to three past notes that match its wording (`hooks/recall.py`).
+- **Settled things are written down the moment they settle.** A decision and its reason, a cause finally named, a rule you stated: the agent saves it with `remember` as one note, and puts what was decided into `claims` (subject, predicate, value, kind) so the registers can serve it.
+- **The next session reads before it re-derives.** `next_actions` answers "where were we", `decisions` is checked before deciding something that may already be decided, `recall` before solving a problem that has the shape of an old one.
+- **Sessions hand work to each other through notes.** One session writes a handoff note with `remember`; another session (after `/clear`, or a different terminal) reads it back by its note id with `recall`.
+- **Mornings start with a summary.** The `brief` and `weekly_brief` tools summarise recent work newest-first, and `make card` sends a morning proposal card to Slack.
+
+---
+
+## Connecting your agent so it improves your work
+
+The engine serves its tools over MCP at `http://localhost:7710/mcp`. This repository's `.mcp.json` registers it for Claude Code; `install.sh` also wires the Claude hooks and the Cursor/Codex MCP entries (see [Wiring the hooks manually](#wiring-the-hooks-manually)).
+
+The loop that makes the memory pay off:
+
+1. **Write** — when something is settled, call `remember` with the complete note and its claims.
+2. **Read before re-deriving** — before working something out again, call `recall`, `decisions` or `next_actions`.
+3. **Mark what helped** — `verdict` records whether the notes handed to a session were used (`used`) or wrong (`contested`).
+
+Three commands to try first:
+
+```bash
+make remember M="We pin the Rust toolchain because a newer clippy broke the build." T="toolchain pin"
+make ask Q="why is the Rust toolchain pinned?"
+make doctor     # stack, hooks/MCP, worker/queue and latest ingest in one view
+```
+
+---
+
+## Storage: pgvector or SurrealDB
+
+- **pgvector is the source of truth** and the default (`vector.backend` = `pgvector`).
+- **SurrealDB can run beside it as a follower copy.** Set `vector.backend` to `surreal`, start it with `docker compose --profile surreal up -d`, and fill it once with `vector-fill`. Vector searches are then ranked in SurrealDB.
+- **Every write lands in pgvector first, then is copied.** Chunks and claims are copied right after each write; documents and graph nodes/edges are compared and caught up at the end of every sync; the four log tables and the code index tables are copied by passes that read pgvector. `recurrences` always runs on pgvector.
+- **The source of truth has not moved.** SurrealDB is still the copy; switching the original to SurrealDB has not happened yet.
+- The SurrealDB query candidate list `ef` defaults to **2000**.
+
+---
+
+## Code sync: how code is stored, linked and used
+
+**Stored.** For each repository listed in `code_index.sources[]` (off unless you add one), `code-sync` parses Rust (`.rs`), Python (`.py`) and shell (`.sh`, `.bash`) files with Tree-sitter and writes them into four tables: repository, file, symbol and relation. Code is never copied into `vault/wiki`.
+
+**Linked.** When a note is saved, every `path/to/file.rs:123` mention in its body becomes an anchor. A claim whose subject or value names that file gets the anchor, and the engine stores a hash of the body of the symbol covering that line (or of the whole file when no line is given). On every scheduled sync the engine hashes those symbols again: if the symbol only moved, the anchor follows it; if its body changed or it disappeared, the claim is marked **stale**.
+
+**Used.** Agents search the code index with `code_search`, read one symbol and what it reaches with `code_symbol`, and check coverage with `code_index_status`. `corpus_status` reports `claims_stale`: how many settled facts point at code that has changed since.
+
+**Limits.** Call, import and reference targets are kept as unresolved text; nothing resolves them to a symbol yet.
+
+---
+
 ## Feeding it (ingestion)
 
 Memory gets in four ways — after setup you rarely touch the automatic paths:
@@ -184,13 +236,13 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `llm.embed_model` / `llm.embed_dim` | embedding model + its vector dimension (kernel's only model) |
 | `llm.bootstrap` | `auto` = bootstrap may start/pull · `manual` = health-check only (you own the server) |
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | explicit source roots for the separate AST code corpus; currently Rust/Tree-sitter, disabled unless opted in |
+| `code_index.sources[]` | explicit source roots for the separate AST code corpus; Rust, Python and shell via Tree-sitter, disabled unless opted in |
 | `agents[]` | agent session transcript and adapter configuration; not raw repository/codebase ingestion |
 | `allow_company_origin` | boolean, default `false`. `true` = `origin:company` notes (session experience from company work) count as accepted corpus and do not flip the audit "clean" flag; `false` flags them for review. Session experience only — company KB originals stay off-policy |
 | `checkout_roots` | list of directories (`~` expanded, depth ≤ 3) holding your git checkouts. The nightly hygiene pass reports projects named after a checkout folder instead of its remote repo. Unset = the check is not run (reported as not scanned, never as zero) |
 | `card.note_links` | links shown beside a note id on the morning card, in order; leave a key out to hide it. `obsidian` (`vault`, optional `folder`) · `file` (`folder` = absolute host path, no `~`; `editor` URL scheme, default `vscode`) |
 | `embed_model` / `embed_dim` (top level) | deprecated v1 keys (defaults `bge-m3` / `1024`), still honored as a fallback when `llm.embed_model` / `llm.embed_dim` are unset — use the `llm.*` keys |
-| `vector.backend` | vector index backend of the engine: `pgvector` (default) or `surreal`. `surreal` reads vectors from the SurrealDB in `vector.surreal` (`url`, `namespace`, `database`, `user`, `password_env`, `ef` = query candidate list, default 400; start it with `--profile surreal`, fill it with the `vector-fill` command). After the fill, every chunk and claim write is made in `pgvector` first and then in SurrealDB; a failed SurrealDB write is an error that says `pgvector` has it, and the fix is to run `vector-fill` again (`vector-check` and doctor compare the two). `recurrences` stays on `pgvector`; `config_get` and the startup log say both. Any other value does not stop the engine: it runs on `pgvector`, and `config_get` and the startup log say so |
+| `vector.backend` | vector index backend of the engine: `pgvector` (default) or `surreal`. `surreal` reads vectors from the SurrealDB in `vector.surreal` (`url`, `namespace`, `database`, `user`, `password_env`, `ef` = query candidate list, default 2000; start it with `--profile surreal`, fill it with the `vector-fill` command). After the fill, every chunk and claim write is made in `pgvector` first and then in SurrealDB; a failed SurrealDB write is an error that says `pgvector` has it, and the fix is to run `vector-fill` again (`vector-check` and doctor compare the two). `recurrences` stays on `pgvector`; `config_get` and the startup log say both. Any other value does not stop the engine: it runs on `pgvector`, and `config_get` and the startup log say so |
 
 Code is never copied into `vault/wiki`. After enabling a source from `boring.example.json`, run `cargo run --manifest-path drudge/Cargo.toml -- code-sync --repository <id>` and inspect it with `code-status` or the `code_search`, `code_symbol`, and `code_index_status` MCP tools. Tree-sitter records syntax and parse errors; call/import/reference target text remains unresolved until a semantic resolver is added.
 

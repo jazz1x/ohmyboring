@@ -57,6 +57,58 @@ make ask Q="docker build cache 문제 어떻게 고쳤더라?"
 
 ---
 
+## 평소에 이렇게 씁니다
+
+- **세션은 지난 세션이 멈춘 자리에서 시작합니다.** 세션을 열면 `SessionStart` 훅이 그 프로젝트의 카드(최근 결정·위험·사실·다음 할 일)를 넣어 줍니다. 그 뒤 프롬프트마다 문장과 맞는 지난 노트를 세 개까지 붙여 줍니다(`hooks/recall.py`).
+- **정해진 것은 정해진 그 자리에서 적습니다.** 결정과 그 이유, 마침내 찾은 원인, 내가 말한 규칙을 에이전트가 `remember` 로 노트 하나에 남기고, 정한 내용은 `claims`(주어·서술어·값·종류)에 넣어 목록에서 바로 꺼낼 수 있게 합니다.
+- **다음 세션은 다시 풀기 전에 먼저 읽습니다.** "어디까지 했지"는 `next_actions`, 이미 정했을지 모르는 것은 `decisions`, 예전에 본 모양의 문제는 `recall` 로 확인합니다.
+- **세션끼리 노트로 일을 넘깁니다.** 한 세션이 `remember` 로 인계 노트를 쓰면, 다른 세션(`/clear` 뒤나 다른 터미널)이 그 노트 번호로 `recall` 해서 이어받습니다.
+- **아침은 요약으로 시작합니다.** `brief`·`weekly_brief` 도구가 최근 작업을 최신순으로 요약하고, `make card` 가 아침 제안 카드를 Slack 으로 보냅니다.
+
+---
+
+## 에이전트에 연결해 작업을 개선하기
+
+엔진은 `http://localhost:7710/mcp` 에서 MCP 로 도구를 제공합니다. 이 저장소의 `.mcp.json` 이 Claude Code 에 등록하고, `install.sh` 가 Claude 훅과 Cursor/Codex MCP 항목도 연결합니다([훅 수동 연결](#훅-수동-연결) 참고).
+
+메모리가 쓸모를 내는 고리:
+
+1. **적기** — 정해지면 완성된 노트와 claims 를 `remember` 로 남깁니다.
+2. **다시 풀기 전에 읽기** — 다시 따져 보기 전에 `recall`·`decisions`·`next_actions` 를 부릅니다.
+3. **쓸모 표시** — `verdict` 로 세션이 받은 노트를 썼는지(`used`) 틀렸는지(`contested`) 남깁니다.
+
+처음 해볼 명령 셋:
+
+```bash
+make remember M="새 clippy 가 빌드를 깨서 Rust 툴체인을 고정한다." T="툴체인 고정"
+make ask Q="Rust 툴체인을 왜 고정했지?"
+make doctor     # 스택·훅/MCP·워커/큐·최근 적재를 한 화면에
+```
+
+---
+
+## 저장소: pgvector 또는 SurrealDB
+
+- **원본은 pgvector 입니다.** 기본값도 pgvector 입니다(`vector.backend` = `pgvector`).
+- **SurrealDB 는 옆에서 따라 쓰는 사본으로 돌릴 수 있습니다.** `vector.backend` 를 `surreal` 로 바꾸고 `docker compose --profile surreal up -d` 로 띄운 뒤 `vector-fill` 로 한 번 채웁니다. 그러면 벡터 검색 순위는 SurrealDB 에서 매깁니다.
+- **모든 쓰기는 pgvector 에 먼저 들어가고, 그다음 복사됩니다.** 청크·claim 은 쓰기 직후에, 문서와 그래프 노드·간선은 sync 끝마다 대조해 따라잡고, 로그 표 넷과 코드 색인 표는 pgvector 를 읽는 패스가 옮깁니다. `recurrences` 는 늘 pgvector 에서 돕니다.
+- **원본은 아직 옮기지 않았습니다.** SurrealDB 는 여전히 사본이고, 원본을 SurrealDB 로 바꾸는 일은 아직 하지 않았습니다.
+- SurrealDB 검색 후보 수 `ef` 의 기본값은 **2000** 입니다.
+
+---
+
+## 코드 싱크: 어떻게 쌓이고, 이어지고, 쓰이나
+
+**쌓임.** `code_index.sources[]` 에 적은 저장소마다(적지 않으면 꺼져 있음) `code-sync` 가 Rust(`.rs`)·Python(`.py`)·셸(`.sh`, `.bash`) 파일을 Tree-sitter 로 파싱해 repository·file·symbol·relation 네 표에 넣습니다. 코드는 `vault/wiki` 로 복사하지 않습니다.
+
+**이어짐.** 노트를 저장할 때 본문의 `path/to/file.rs:123` 언급이 앵커가 됩니다. 주어나 값에 그 파일 이름이 들어간 claim 이 앵커를 받고, 엔진은 그 줄을 덮는 심볼 본문의 해시(줄 번호가 없으면 파일 전체의 해시)를 저장합니다. 예약된 sync 마다 그 심볼을 다시 해시해서, 자리만 옮겼으면 앵커가 따라가고, 본문이 바뀌었거나 사라졌으면 claim 을 **stale** 로 표시합니다.
+
+**쓰임.** 에이전트는 `code_search` 로 코드 색인을 찾고, `code_symbol` 로 심볼 하나와 그것이 닿는 곳을 읽고, `code_index_status` 로 색인 범위를 확인합니다. `corpus_status` 의 `claims_stale` 은 정해진 사실 가운데 가리키는 코드가 그 뒤 바뀐 것의 수입니다.
+
+**한계.** 호출·import·참조 대상은 풀리지 않은 텍스트로 남습니다. 아직 그것을 심볼로 풀어 주는 단계가 없습니다.
+
+---
+
 ## 적재하기 (ingestion)
 
 메모리가 들어오는 경로는 네 가지입니다 — 설정 후 자동 경로들은 거의 손댈 일이 없습니다:
@@ -183,7 +235,7 @@ flowchart LR
 | `llm.embed_model` / `llm.embed_dim` | 임베딩 모델 + 그 벡터 차원(커널의 유일한 모델) |
 | `llm.bootstrap` | `auto` = 부트스트랩이 기동/pull 가능 · `manual` = 헬스체크만(서버는 사용자 소유) |
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | 별도 AST 코드 코퍼스에 명시적으로 넣을 소스 루트. 현재 Rust/Tree-sitter만 지원하며 opt-in 전에는 비활성 |
+| `code_index.sources[]` | 별도 AST 코드 코퍼스에 명시적으로 넣을 소스 루트. Tree-sitter 로 Rust·Python·셸을 지원하며 opt-in 전에는 비활성 |
 | `agents[]` | 에이전트 세션 대화 기록·어댑터 설정(원시 저장소·코드베이스 적재 아님) |
 | `allow_company_origin` | boolean, 기본 `false`. `true` = `origin:company` 노트(회사 업무의 세션 경험)를 받아들인 코퍼스로 보고 감사 "clean" 표시를 뒤집지 않음. `false` 는 검토 대상으로 표시. 세션 경험에만 적용 — 회사 KB 원본은 계속 정책 밖 |
 | `checkout_roots` | git 체크아웃이 들어 있는 디렉터리 목록(`~` 확장, 깊이 ≤ 3). 야간 위생 점검이 원격 저장소 이름 대신 체크아웃 폴더 이름으로 잡힌 프로젝트를 보고. 미설정 = 점검을 돌리지 않음(0 이 아니라 "스캔 안 함"으로 보고) |
