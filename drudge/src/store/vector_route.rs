@@ -1,7 +1,6 @@
 //! The one place `vector.backend` is folded: `Store` implements `VectorIndex` by sending each query
-//! to the backend the process was started on. `recurrences` (pair distances) has no SurrealDB
-//! counterpart — stage 0 measured no radius join there — so it is pinned to pgvector on every
-//! backend, and the startup log and `config_get` say so.
+//! to the backend the process was started on. `recurrences` too: on Surreal it pairs the claims in
+//! the engine (`vector_surreal::recurrences`), since Surreal has no radius join.
 
 use anyhow::{Result, anyhow};
 
@@ -228,7 +227,10 @@ impl VectorIndex for Store {
         project: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Recurrence>> {
-        Pg(self).recurrences(days, project, limit).await
+        self.vector_route
+            .view(self)
+            .recurrences(days, project, limit)
+            .await
     }
 
     async fn current_claims(

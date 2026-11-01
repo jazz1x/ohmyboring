@@ -355,9 +355,9 @@ async fn five_methods_match_exact_brute_force() {
         "anchor_path must exclude anchor-less claims"
     );
 
-    // recurrences is pinned to pgvector on a Surreal route: it still answers.
+    // recurrences answers on a Surreal route too.
     store
         .recurrences(30, Some(&project), 10)
         .await
-        .expect("recurrences stays on pgvector");
+        .expect("recurrences on surreal");
 }

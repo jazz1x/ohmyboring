@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Fixed
+- **`recurrences` 를 backend=surreal 에서도 Surreal 사본으로 (C-SURALL2 A6 4단계)** — 지금까지 `vector.backend=surreal` 이어도 pgvector 로 보냈다. 이제 `claim_row`(값·봉인·노트 project)와 `claim`(임베딩)에서 후보를 읽어 엔진이 pg 질의와 같은 조건·순서·f32 거리로 짝을 짓는다(`vector_surreal/recurrences.rs`). 기본 backend(pg)는 그대로.
 - **원본 세션 보존(retention)을 엔진 서브커맨드로 (C-RUSTB1 행 23)** — `drudge retention [--apply [--yes]]` 가 `scripts/retention.py` 와 같은 판정(처리됨 30일·미처리 90일 보관, 아카이브 180일 삭제, 미처리 세션은 `delete_only` 여도 삭제 안 함)을 하고 `schedule-maintenance.sh` 가 이를 부른다. 롤백 스위치 `BORING_RETENTION_IMPL=python`(Python 구현은 그대로). retention 단계가 실패하면(옛 바이너리·깨진 boring.json) 출력에 `✗ retention failed` 한 줄과 Slack 알림을 남기고 나머지 단계는 돌되 스크립트 종료 코드는 1.
 - **recall 훅의 관련도 상한 판정을 엔진 /search 로 (C-RUSTB1 행 11)** — `POST /search` 가 선택 인자 `max_dist` 를 받으면 그보다 먼 `vector_cosine` hit 에 `over_ceiling: true` 를 싣는다(인자가 없으면 응답은 그대로, 아무것도 버리지 않음 — 지금처럼 보고만). 훅은 `max_dist` 를 보내고 표시만 읽는다(`would drop` 줄). 스로틀은 훅에 남는다. 롤백 스위치 `BORING_RECALL_CEILING=python`(`exceeds_relevance_ceiling` 그대로; 문이 `DOOR_SEARCH_READER=python` 으로 /search 를 답할 때도 이 값을 쓴다).
 - **rules 트리거 맞춤을 엔진으로 (C-RUSTB1 행 12)** — `POST /rules/match {prompt}` 가 발화한 규칙만 돌려주고(`rules::fired`, rules_core.py 와 같은 의미), 훅은 `GET /rules` 한 호출을 이 한 호출로 바꿨다. 롤백 스위치 `BORING_RULES_MATCHER=python`(Python 구현은 그대로). door.py 머리 주석의 낡은 recall 기본값도 고침.
