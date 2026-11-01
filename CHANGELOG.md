@@ -7,6 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 
 ### Fixed
 - **MCP `recurrences` 의 f32 표기를 HTTP 와 같게 (C-RUSTA1 2단계)** — `json!` 이 f32 를 f64 로 넓혀 `max_distance` 가 0.20000000298023224, 행 `distance` 도 긴 꼴로 나갔다(HTTP 본문과 문은 0.2). 응답을 텍스트로 한 번 직렬화해 같은 최단 표기를 낸다. MCP 도구 중 f32 를 `Value` 로 넘기는 것은 이 하나.
+- **`backend=surreal` 이어 채우기: claim 전체 행·레지스터 동률·대량 삭제·stale_at (C-SURALL2 A3)** — claim 의 봉인 행까지 `claim_row` 사본에 따라 쓰고 레지스터(recent_register_rows·recent_claims)를 Surreal 에서도 읽는다. 레지스터 동률은 Rust·Python 모두 `(subject, predicate) COLLATE "C"` 로 끊는다(같은 DB 에서 엔진 대 Python 레지스터 10/12 같음, 남은 2 는 recurrences 의 f32 표기). 2,000건 넘는 claim 삭제는 HNSW 인덱스를 떼고 지운 뒤 새 세대를 정의하고, Surreal 이 「정리 중」으로 거절하면 상한까지 기다렸다 다시 하며(넘으면 `ReclaimTimeout`), sync 시작·끝에 인덱스가 없으면 정의한다. 인덱스 없던 시간은 `[vector]` 줄로 남는다(claim 전부 삭제 143k 실측 689s). 같은 키의 `stale_at` 변경을 catch-up 이 벡터 claim 표에 옮기고 `vector-check` 가 `claim(stale_at)` 로 대조한다(실측 100/14,325 → 0).
 - **소유자 판정이 이미 있는 간선의 judge 를 순위로 올린다 (C-OWNEREDGE1)** — 간선이 이미 있으면 먼저 쓴 judge 가 남아(`ON CONFLICT DO NOTHING`) 세션 끝에 distill 이 쓴 `inferred` 위에 소유자 눌림이 닿지 않았다(소유자 동의 눌림이 간선에 닿은 것 0/42). 이제 owner > `agent:*` > inferred > NULL·그 밖 순으로 높은 쪽만 덮고, 같거나 낮으면 행을 쓰지 않는다. 순위는 `judge_rank_sql` 한 곳.
 
 ### Added

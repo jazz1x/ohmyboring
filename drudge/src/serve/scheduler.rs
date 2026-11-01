@@ -164,7 +164,7 @@ async fn surreal_last_stage(store: &Store) -> Result<()> {
     }
     anyhow::ensure!(
         !swaps.iter().any(crate::store::Swap::failed),
-        "vector-swap 실패 — 옛 인덱스는 그대로 (drudge vector-swap 으로 다시 확인)"
+        "vector-swap 실패 — 실패한 테이블은 위 [scheduler] vector-swap 줄 (drudge vector-swap 으로 다시 확인)"
     );
     log_copy.map(|_| ())
 }
