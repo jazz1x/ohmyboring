@@ -516,7 +516,7 @@ async fn main() -> Result<()> {
                 }
                 anyhow::ensure!(
                     !swaps.iter().any(store::Swap::failed),
-                    "vector-swap: 실패한 테이블이 있음 — 옛 인덱스는 그대로"
+                    "vector-swap: 실패한 테이블이 있음 — 위 줄 참조"
                 );
             }
             config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {

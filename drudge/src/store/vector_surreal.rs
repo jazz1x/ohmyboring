@@ -73,6 +73,37 @@ const MASS_DELETE: usize = 2_000;
 /// filtering inside the global one (measured p95 120-150 ms for the in-KNN filter).
 const PROJECT_TABLE_PREFIX: &str = "chunk_p_";
 
+/// What the server refused that a caller acts on, parsed once from the reply text in `rejection`
+/// (the server gives no code for it).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// A table's document-ID space is still being reclaimed after a mass delete or an index
+    /// removal; `DEFINE INDEX` is refused until the cleanup ends, and the server says to retry.
+    #[error("surreal: {0}")]
+    Reclaiming(String),
+}
+
+/// The table has no HNSW index and the wait for the server to let one be defined ran out.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{table} 에 HNSW 인덱스를 못 만듦 — 문서 ID 공간 정리가 {waited_s}s 안에 안 끝남 (인덱스 없음)"
+)]
+pub struct ReclaimTimeout {
+    pub table: String,
+    pub waited_s: u64,
+}
+
+/// The server's own sentence for `Refusal::Reclaiming` (v3.3.5); anything else stays a plain error.
+const RECLAIMING: &str = "is still being reclaimed";
+
+fn rejection(statement: &str, message: &str) -> anyhow::Error {
+    if message.contains(RECLAIMING) {
+        anyhow::Error::new(Refusal::Reclaiming(message.to_owned()))
+    } else {
+        anyhow!("{statement}{message}")
+    }
+}
+
 /// Why a project slug cannot name a table. The name is spliced into SurrealQL (a table name cannot
 /// be bound), so it is parsed once here and never mapped: a slug outside `[a-z0-9_-]` has no
 /// project table, and every caller says so.
@@ -197,7 +228,7 @@ impl Swap {
                 status,
             } => format!("{table}: swapped {old} -> {new} (바뀐 행 {changed}, {status})"),
             Self::Failed { table, error } => {
-                format!("{table}: FAILED — 옛 인덱스 그대로: {error}")
+                format!("{table}: FAILED — {error}")
             }
         }
     }
@@ -224,6 +255,27 @@ impl ChunkSource {
 /// holds `[a-z0-9_-]` (`ProjectTable::parse`), so nothing can close the quote.
 fn quote_ident(name: &str) -> String {
     format!("`{name}`")
+}
+
+/// Both step results when all succeeded; else the first failure with the later ones in its
+/// message, so a step that ran after another failed is never silent.
+fn first_failure<A, B>(
+    others: [Option<anyhow::Error>; 2],
+    a: Result<A>,
+    b: Result<B>,
+) -> Result<(A, B)> {
+    match (a, b) {
+        (Ok(a), Ok(b)) if others.iter().all(Option::is_none) => Ok((a, b)),
+        (a, b) => {
+            let mut failures: Vec<anyhow::Error> = a.err().into_iter().chain(b.err()).collect();
+            failures.extend(others.into_iter().flatten());
+            let mut all = failures.into_iter();
+            let head = all
+                .next()
+                .unwrap_or_else(|| anyhow!("first_failure called with no failure"));
+            Err(all.fold(head, |e, next| e.context(format!("그리고: {next:#}"))))
+        }
+    }
 }
 
 /// `chunk_embedding` -> `chunk_embedding_g1` -> `chunk_embedding_g2`: the next name is derived from
@@ -420,14 +472,21 @@ impl SurrealClient {
         let reply: RpcReply = serde_json::from_str(&text)
             .with_context(|| format!("surreal reply (http {status}) is not an rpc reply"))?;
         match (reply.error, reply.result) {
-            (Some(e), _) => Err(anyhow!("surreal: {}", e.message)),
+            (Some(e), _) => Err(rejection("surreal: ", &e.message)),
             (None, Some(statements)) => statements
                 .into_iter()
                 .map(|s| {
                     if s.status == "OK" {
                         Ok(s.result)
                     } else {
-                        Err(anyhow!("surreal statement {}: {}", s.status, s.result))
+                        let message = s
+                            .result
+                            .as_str()
+                            .map_or_else(|| s.result.to_string(), str::to_owned);
+                        Err(rejection(
+                            &format!("surreal statement {}: ", s.status),
+                            &message,
+                        ))
                     }
                 })
                 .collect(),
@@ -1649,22 +1708,7 @@ impl SurrealClient {
 
     /// The table's HNSW index: its name and the server's own `DEFINE INDEX` text for it.
     async fn hnsw_index(&self, table: &str) -> Result<(String, String)> {
-        let info = format!("INFO FOR TABLE {};", quote_ident(table));
-        let first = self
-            .run(&info)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("surreal answered no statement to: {info}"))?;
-        let indexes = first
-            .get("indexes")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("{info} has no indexes object: {first}"))?;
-        let hnsw: Vec<(String, String)> = indexes
-            .iter()
-            .filter_map(|(name, def)| def.as_str().map(|d| (name.clone(), d.to_owned())))
-            .filter(|(_, def)| def.contains(" HNSW "))
-            .collect();
+        let hnsw = self.hnsw_indexes(table).await?;
         match <[(String, String); 1]>::try_from(hnsw) {
             Ok([one]) => Ok(one),
             Err(found) => Err(anyhow!(
@@ -1676,6 +1720,44 @@ impl SurrealClient {
                     .join(", ")
             )),
         }
+    }
+
+    /// Define the table's HNSW index when it has none (a rebuild that was refused or timed out
+    /// left it bare). Returns how long the table had been without one in this call's reach, or
+    /// `None` when it already had one.
+    async fn ensure_hnsw(&self, table: &str, dim: usize) -> Result<Option<Duration>> {
+        if self.hnsw_indexes(table).await?.is_empty() {
+            let started = std::time::Instant::now();
+            let old = format!("{table}_embedding");
+            let def = format!(
+                "DEFINE INDEX {} ON {} FIELDS embedding HNSW DIMENSION {dim} DIST COSINE TYPE F32 EFC 64 M 16",
+                quote_ident(&old),
+                quote_ident(table)
+            );
+            self.define_next_generation(table, &old, &def).await?;
+            Ok(Some(started.elapsed()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn hnsw_indexes(&self, table: &str) -> Result<Vec<(String, String)>> {
+        let info = format!("INFO FOR TABLE {};", quote_ident(table));
+        let first = self
+            .run(&info)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("surreal answered no statement to: {info}"))?;
+        let indexes = first
+            .get("indexes")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("{info} has no indexes object: {first}"))?;
+        Ok(indexes
+            .iter()
+            .filter_map(|(name, def)| def.as_str().map(|d| (name.clone(), d.to_owned())))
+            .filter(|(_, def)| def.contains(" HNSW "))
+            .collect())
     }
 
     /// Poll `INFO FOR INDEX` until `building.status` is `ready`; `error`/`failed`, a missing
@@ -1766,11 +1848,11 @@ impl SurrealClient {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        let mut removed: Vec<(String, String, String)> = Vec::new();
+        let mut removed: Vec<((String, String, String), std::time::Instant)> = Vec::new();
         let mut dropped: Result<()> = Ok(());
         for table in tables {
             match self.remove_hnsw(table).await {
-                Ok(gone) => removed.push(gone),
+                Ok(gone) => removed.push((gone, std::time::Instant::now())),
                 Err(e) => {
                     dropped = Err(e);
                     break;
@@ -1782,7 +1864,7 @@ impl SurrealClient {
             Err(e) => Err(e),
         };
         let mut rebuilt: Result<()> = Ok(());
-        for (table, old, def) in &removed {
+        for ((table, old, def), since) in &removed {
             // The new index is built from every row `work` wrote, so the swap that follows the
             // sync has nothing left to rebuild for them (a second build measured +0.67 GiB).
             let step = match self.dirty(table).await {
@@ -1792,9 +1874,20 @@ impl SurrealClient {
                     .map(|_| changed),
                 Err(e) => Err(e),
             };
+            let window = since.elapsed().as_secs_f64();
             let settled = match step {
-                Ok(changed) => self.settle_dirty(table, changed).await,
-                Err(e) => Err(e),
+                Ok(changed) => {
+                    eprintln!(
+                        "[vector] {table}: HNSW 인덱스 없던 시간 {window:.1}s (제거 → ready)"
+                    );
+                    self.settle_dirty(table, changed).await
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[vector] {table}: HNSW 인덱스 없음, 제거 후 {window:.1}s 째 — 다시 만들지 못함"
+                    );
+                    Err(e)
+                }
             };
             if let Err(e) = settled {
                 rebuilt = rebuilt.and(Err(e));
@@ -1839,9 +1932,12 @@ impl SurrealClient {
             .map(|(_, rest)| rest)
             .ok_or_else(|| anyhow!("{old} 의 정의를 읽지 못함: {def}"))?;
         let (q_table, q_new) = (quote_ident(table), quote_ident(&new));
-        self.run(&format!("DEFINE INDEX {q_new} ON {rest} CONCURRENTLY;"))
-            .await
-            .with_context(|| format!("새 인덱스 {new} 정의 실패"))?;
+        self.define_when_reclaimed(
+            table,
+            &format!("DEFINE INDEX {q_new} ON {rest} CONCURRENTLY;"),
+        )
+        .await
+        .with_context(|| format!("새 인덱스 {new} 정의 실패"))?;
         match self.await_ready(&q_new, &q_table).await {
             Ok(building) => Ok(building),
             Err(e) => {
@@ -1850,6 +1946,28 @@ impl SurrealClient {
                 Err(e.context(format!("새 인덱스 {new} 가 ready 가 되지 못함")))
             }
         }
+    }
+
+    /// Root cause: after a mass delete the server frees the table's document-ID space in the
+    /// background and refuses `DEFINE INDEX` until that ends ("retry DEFINE INDEX after cleanup
+    /// completes"); the end is not observable from the client, so it is the server's own
+    /// instruction that is followed, bounded like the build wait. Past the bound the caller gets
+    /// `ReclaimTimeout`, not a hang.
+    async fn define_when_reclaimed(&self, table: &str, define: &str) -> Result<()> {
+        let polls = INDEX_BUILD_WAIT.as_millis() / INDEX_BUILD_POLL.as_millis();
+        for _ in 0..polls {
+            match self.run(define).await {
+                Ok(_) => return Ok(()),
+                Err(e) if matches!(e.downcast_ref::<Refusal>(), Some(Refusal::Reclaiming(_))) => {
+                    tokio::time::sleep(INDEX_BUILD_POLL).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(anyhow::Error::new(ReclaimTimeout {
+            table: table.to_owned(),
+            waited_s: INDEX_BUILD_WAIT.as_secs(),
+        }))
     }
 
     /// A project table is only read when it exists, so it must be complete when it appears: define
@@ -2376,12 +2494,40 @@ impl SurrealClient {
         }
         // The one table whose rows change value under a key both sides hold (a seal, an unseal, a
         // stale mark written straight to pg), so it is compared by value, not by key.
-        let (vectors_written, vectors_deleted) = self.catch_up_vectors(store).await?;
-        let (rows_written, rows_deleted) = self.repair_claim_rows(store).await?;
+        // A mass-delete rebuild that failed leaves a table without an index; the claim_row repair
+        // does not need one, so every step runs and the failures are returned together.
+        let before = self.ensure_all_hnsw(store).await;
+        let vectors = self.catch_up_vectors(store).await;
+        let rows = self.repair_claim_rows(store).await;
+        let after = self.ensure_all_hnsw(store).await;
+        let ((vectors_written, vectors_deleted), (rows_written, rows_deleted)) =
+            first_failure([before.err(), after.err()], vectors, rows)?;
         Ok((
             written + vectors_written + rows_written,
             deleted + vectors_deleted + rows_deleted,
         ))
+    }
+
+    /// `ensure_hnsw` on every vector table; each table that had none is logged with the time the
+    /// define took. The first failure is returned after every table was tried.
+    async fn ensure_all_hnsw(&self, store: &Store) -> Result<()> {
+        let mut tables = vec!["chunk".to_owned(), "claim".to_owned()];
+        tables.extend(self.project_tables().await?);
+        let mut result = Ok(());
+        for table in &tables {
+            match self.ensure_hnsw(table, store.dim).await {
+                Ok(Some(took)) => eprintln!(
+                    "[vector] {table}: HNSW 인덱스가 없어 새로 정의함 ({:.1}s)",
+                    took.as_secs_f64()
+                ),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[vector] {table}: HNSW 인덱스 없음 — 정의하지 못함: {e:#}");
+                    result = result.and(Err(e));
+                }
+            }
+        }
+        result
     }
 
     /// The same key level for the vector `chunk` and `claim` tables, through the write path a
