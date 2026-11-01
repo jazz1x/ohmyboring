@@ -1421,21 +1421,15 @@ async fn reread_worker(s: AppState) {
             _ => Ok(Vec::new()),
         };
         let outcomes = crate::split_reread::decide(&merges, &reread, recount);
-        for ((merge, reply), outcome) in batch.into_iter().zip(outcomes) {
-            if let (Outcome::Done { remaining_variants }, Some(store)) =
-                (&outcome, s.store.as_ref())
-            {
-                let ts = chrono::Utc::now().to_rfc3339();
-                if let Some(event) =
-                    crate::split_reread::merged_event(&merge, *remaining_variants, &ts)
-                    && let Err(e) = store.log_event(&event).await
-                {
-                    eprintln!(
-                        "[reread] subject_merged event not delivered for {:?}: {e:#}",
-                        merge.subject
-                    );
+        if let Some(store) = s.store.as_ref() {
+            let ts = chrono::Utc::now().to_rfc3339();
+            for event in crate::split_reread::events_to_log(&merges, &outcomes, &ts) {
+                if let Err(e) = store.log_event(&event).await {
+                    eprintln!("[reread] subject_merged event not delivered: {e:#}");
                 }
             }
+        }
+        for ((merge, reply), outcome) in batch.into_iter().zip(outcomes) {
             if let Outcome::Failed { error } = &outcome {
                 eprintln!("[reread] after merging {:?} failed: {error}", merge.subject);
             }

@@ -89,6 +89,19 @@ pub fn merged_event(merge: &Merge, remaining_variants: usize, ts: &str) -> Optio
     }))
 }
 
+/// The `subject_merged` events to write for `batch` once `outcomes` are decided: only a merge that
+/// ended `Done` leaves one, so a failed reread or recount records nothing.
+pub fn events_to_log(batch: &[Merge], outcomes: &[Outcome], ts: &str) -> Vec<Value> {
+    batch
+        .iter()
+        .zip(outcomes)
+        .filter_map(|(merge, outcome)| match outcome {
+            Outcome::Done { remaining_variants } => merged_event(merge, *remaining_variants, ts),
+            Outcome::Pending | Outcome::Failed { .. } => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -136,6 +149,19 @@ mod tests {
             Err(error.clone()),
         );
         assert_eq!(out, vec![Outcome::Failed { error }]);
+    }
+
+    /// Reread succeeded, the recount query failed: the Python door's `_reread_outcomes` answered
+    /// `reread_failed_outcome` for every row and wrote no event; the door maps this kind to the same.
+    #[test]
+    fn a_recount_failure_after_a_good_reread_fails_the_rows_and_logs_no_merge() {
+        let batch = [merge("foo-bar", Some((2, 2)))];
+        let outcomes = decide(&batch, &Ok(()), Err(json!("db error: connection closed")));
+        assert_eq!(
+            serde_json::to_value(&outcomes[0]).unwrap()["outcome"],
+            "failed"
+        );
+        assert_eq!(events_to_log(&batch, &outcomes, "t").len(), 0);
     }
 
     #[test]
