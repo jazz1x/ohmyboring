@@ -133,7 +133,7 @@ readiness: ## Strict briefing/readiness gate (fails on any doctor finding)
 heal: ## Auto-fix common doctor findings (env perms, hooks, engine, Ollama, containers)
 	./scripts/doctor.sh --fix
 
-maintenance: ## Run unattended housekeeping now (data-steward + retention)
+maintenance: ## Run unattended housekeeping now (data-steward + retention; follows BORING_DATA_STEWARD_IMPL)
 	./scripts/schedule-maintenance.sh run
 
 maintenance-install: ## Register daily housekeeping (macOS launchd / Linux cron)
@@ -148,8 +148,12 @@ maintenance-status: ## Show daily housekeeping registration state
 steward: ## Inspect vault data hygiene (project variants, placeholder tags, missing sources)
 	@uv run --locked python scripts/data-steward.py
 
-steward-fix: ## Apply safe data-steward repairs through the backup-first cleanup gate
-	@uv run --locked python scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
+steward-fix: ## Apply safe data-steward repairs (engine by default; BORING_DATA_STEWARD_IMPL=python for the Python gate)
+	@if [ "$${BORING_DATA_STEWARD_IMPL:-}" = "python" ]; then \
+		uv run --locked python scripts/vault-cleanup-gate.py --fix --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"; \
+	else \
+		./drudge/target/release/drudge steward --fix --yes || { rc=$$?; echo "✗ data-steward failed (rc=$$rc) — old drudge binary without the subcommand, a broken boring.json, or a note that cannot be rewritten?"; exit 1; }; \
+	fi
 
 vault-cleanup-check: ## Verify vault cleanup contract without rewriting notes
 	@uv run --locked python scripts/vault-cleanup-gate.py --check --vault "$${BORING_VAULT_DIR:-$(PWD)/vault}"
