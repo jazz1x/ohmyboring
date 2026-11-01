@@ -288,6 +288,34 @@ fn next_generation(index: &str) -> String {
     format!("{base}_g{}", generation + 1)
 }
 
+/// Full-text analyzer for `chunk.content`. pg indexes `to_tsvector('simple', content)`
+/// (baseline.sql:127): it splits on blanks and punctuation, lowercases, and does no stemming and
+/// no Hangul segmentation. This does the same and nothing more — `segment korean` would add a
+/// morphological split pg does not do, and whether our image has the `cjk` feature is unverified
+/// (wiki-00000012804). The built-in tokenizers cannot reproduce pg's compound tokens (url, email,
+/// host, file path, version, float, hyphenated word); `retrieve` never queries them (see
+/// `text_terms`), and the token comparison counts what differs.
+const TEXT_ANALYZER_DDL: &str =
+    "DEFINE ANALYZER OVERWRITE omb_simple TOKENIZERS blank, punct FILTERS lowercase;";
+/// BM25 index on the global chunk table. Defined AFTER the bulk load in `fill_from` and by
+/// `ensure_text_index` for a copy filled before this index existed. Unlike HNSW it is an exact
+/// inverted index kept in step on every write, so it has no swap generation and `swap_table`
+/// never touches it (`hnsw_indexes` filters on ` HNSW `).
+const TEXT_INDEX_DDL: &str =
+    "DEFINE INDEX chunk_content_ft ON chunk FIELDS content FULLTEXT ANALYZER omb_simple BM25";
+
+/// The words a Surreal full-text query is made of: the alphanumeric runs of `query`, blank
+/// separated. pg's `plainto_tsquery('simple', …)` drops punctuation, while Surreal's `punct`
+/// tokenizer keeps each punctuation mark as a token that a document must contain to match, so a
+/// query like `hello, world` would need a comma. Empty means pg's empty query: no rows.
+fn text_terms(query: &str) -> String {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// DDL of one chunk table (global or per project): same fields, same HNSW definition.
 fn chunk_ddl(table: &str, dim: usize) -> String {
     let t = quote_ident(table);
@@ -584,6 +612,7 @@ impl SurrealView<'_> {
         near: Vec<NearChunk>,
         project: Option<&str>,
         since_hours: Option<i32>,
+        dist_kind: DistKind,
     ) -> Result<Vec<Hit>> {
         let ids: Vec<String> = near.iter().map(|n| n.cid.clone()).collect();
         let rows = self
@@ -617,7 +646,7 @@ impl SurrealView<'_> {
                     source_path,
                     #[allow(clippy::cast_possible_truncation)]
                     dist: n.d as f32,
-                    dist_kind: DistKind::VectorCosine,
+                    dist_kind,
                 }),
                 Some((.., false)) => dropped += 1,
                 None => missing.push(n.cid),
@@ -643,7 +672,47 @@ impl SurrealView<'_> {
             .next()
             .unwrap_or_default();
         near.truncate(k);
-        self.hydrate_hits(near, project, since_hours).await
+        self.hydrate_hits(near, project, since_hours, DistKind::VectorCosine)
+            .await
+    }
+
+    /// The text stage of `retrieve` on `backend=surreal`: BM25 over `chunk.content`, same filters
+    /// as pg's `text_search_filtered`, hydrated from pg like the vector hits. `dist` is the BM25
+    /// score (higher is better), `DistKind::TextRank` like pg's `ts_rank`.
+    pub(super) async fn text_search_filtered(
+        &self,
+        query: &str,
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<Hit>> {
+        let terms = text_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conds = vec![format!("content @0@ {}", text(&terms))];
+        if let Some(p) = project {
+            conds.push(format!("project = {}", text(p)));
+        }
+        if let Some(hours) = since_hours {
+            conds.push(format!(
+                "doc_updated_us >= {}",
+                now_micros()? - i64::from(hours) * 3_600_000_000
+            ));
+        }
+        let sql = format!(
+            "SELECT cid, search::score(0) AS d FROM chunk WHERE {} ORDER BY d DESC, cid LIMIT {k};",
+            conds.join(" AND ")
+        );
+        let near: Vec<NearChunk> = self
+            .client
+            .rows(&sql)
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        self.hydrate_hits(near, project, since_hours, DistKind::TextRank)
+            .await
     }
 }
 
@@ -960,6 +1029,20 @@ impl FillTable {
 
 #[cfg(test)]
 mod claim_row_tests;
+
+#[cfg(test)]
+mod text_terms_tests {
+    use super::text_terms;
+
+    #[test]
+    fn punctuation_is_not_a_term_and_a_query_of_only_punctuation_is_empty() {
+        assert_eq!(
+            text_terms("hello, world! 한글123 a_b"),
+            "hello world 한글123 a b"
+        );
+        assert_eq!(text_terms("!!! ... ?"), "");
+    }
+}
 
 /// Rows per page when reading `claim_row` back whole (a row carries the claim's `value`, not 11 KB
 /// of floats, but 20,000 of them at once is the answer size `KEY_PAGE` already ruled out).
@@ -1724,7 +1807,13 @@ impl SurrealClient {
     pub async fn swap_if_changed(&self) -> Result<Vec<Swap>> {
         let mut tables = vec!["chunk".to_owned(), "claim".to_owned()];
         tables.extend(self.project_tables().await?);
-        let mut out = Vec::with_capacity(tables.len());
+        let mut out = Vec::with_capacity(tables.len() + 1);
+        if let Err(e) = self.ensure_text_index().await {
+            out.push(Swap::Failed {
+                table: "chunk(text)".to_owned(),
+                error: format!("{e:#}"),
+            });
+        }
         for table in tables {
             out.push(match self.swap_table(&table).await {
                 Ok(swap) => swap,
@@ -1791,6 +1880,35 @@ impl SurrealClient {
     }
 
     async fn hnsw_indexes(&self, table: &str) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .index_defs(table)
+            .await?
+            .into_iter()
+            .filter(|(_, def)| def.contains(" HNSW "))
+            .collect())
+    }
+
+    /// Define the BM25 index on `chunk` when the table has none, and wait until it is `ready`.
+    /// Returns whether it was defined by this call.
+    async fn ensure_text_index(&self) -> Result<bool> {
+        let have = self
+            .index_defs("chunk")
+            .await?
+            .iter()
+            .any(|(_, def)| def.contains(" FULLTEXT "));
+        if have {
+            return Ok(false);
+        }
+        self.run(TEXT_ANALYZER_DDL).await?;
+        self.run(&format!("{TEXT_INDEX_DDL} CONCURRENTLY;"))
+            .await
+            .context("전문검색 인덱스 정의 실패")?;
+        self.await_ready(&quote_ident("chunk_content_ft"), &quote_ident("chunk"))
+            .await?;
+        Ok(true)
+    }
+
+    async fn index_defs(&self, table: &str) -> Result<Vec<(String, String)>> {
         let info = format!("INFO FOR TABLE {};", quote_ident(table));
         let first = self
             .run(&info)
@@ -1805,7 +1923,6 @@ impl SurrealClient {
         Ok(indexes
             .iter()
             .filter_map(|(name, def)| def.as_str().map(|d| (name.clone(), d.to_owned())))
-            .filter(|(_, def)| def.contains(" HNSW "))
             .collect())
     }
 
@@ -2956,6 +3073,8 @@ impl SurrealClient {
                 self.upsert_rows(table.name(), &literals).await?;
             }
         }
+
+        self.ensure_text_index().await?;
 
         let mut claim_keys = Vec::new();
         let mut offset = 0_i64;

@@ -195,7 +195,11 @@ def text_search(
     project: str | None,
     since_hours: int | None,
 ) -> Either[list[rank.Hit], PgError]:
-    """store.rs:2295 text_search_filtered — ts_rank(simple), @@ plainto_tsquery."""
+    """store.rs pg_text_search_filtered — ts_rank(simple), @@ plainto_tsquery.
+
+    Stays on pg when the engine runs backend=surreal (Rust's text stage follows the backend,
+    this Python read does not): a "reads that stay on pg" line for Z (C-SURALL2 A6 step 5).
+    """
     return _attempt(
         lambda: [
             _row_to_hit(row, "text_rank")
