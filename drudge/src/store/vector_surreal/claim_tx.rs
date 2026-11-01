@@ -244,12 +244,81 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
     )
 }
 
-/// `planned` is the `(subject, predicate)` pairs of `older`'s rows as read before the transaction;
-/// the guards are made from them, and the transaction throws if the rows hold other pairs now.
-fn note_sql(newer: &str, older: &str, planned: &[(String, String)]) -> String {
+/// One canon slot as the spellings of it that exist in `claim_row`: the canon-spelled ones
+/// (subject and predicate equal their own canon) and every other spelling. pg's unseal ranks a
+/// canon-spelled row above any other whatever its `valid_from` (`is_canon_sql`).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SlotGroup {
+    canon: Vec<(String, String)>,
+    other: Vec<(String, String)>,
+}
+
+/// The canon slots `touched` names, each with every spelling `every` holds for it. `canon` is
+/// `guard_key`'s, so a slot's group is the group its guard covers.
+fn slot_groups(touched: &[(String, String)], every: &[(String, String)]) -> Vec<SlotGroup> {
+    let keys: std::collections::BTreeSet<String> =
+        touched.iter().map(|(s, p)| guard_key(s, p)).collect();
+    let mut groups: std::collections::BTreeMap<String, SlotGroup> = keys
+        .into_iter()
+        .map(|k| (k, SlotGroup::default()))
+        .collect();
+    for (s, p) in every {
+        if let Some(g) = groups.get_mut(&guard_key(s, p)) {
+            if *s == canon(s) && *p == canon(p) {
+                g.canon.push((s.clone(), p.clone()));
+            } else {
+                g.other.push((s.clone(), p.clone()));
+            }
+        }
+    }
+    groups.into_values().collect()
+}
+
+/// `[{c: [[s, p], ..], o: [[s, p], ..]}, ..]` as a SurrealQL literal.
+fn groups_literal(groups: &[SlotGroup]) -> String {
+    let each: Vec<String> = groups
+        .iter()
+        .map(|g| {
+            format!(
+                "{{c: {}, o: {}}}",
+                pairs_literal(&g.canon),
+                pairs_literal(&g.other)
+            )
+        })
+        .collect();
+    format!("[{}]", each.join(","))
+}
+
+/// Everything `note_sql` plans from rows read before the transaction.
+struct NotePlan {
+    /// `(subject, predicate)` of every row of `older`.
+    planned: Vec<(String, String)>,
+    /// The same for `older`'s fact rows.
+    facts: Vec<(String, String)>,
+    /// Every distinct `(subject, predicate)` in `claim_row`.
+    every: Vec<(String, String)>,
+}
+
+/// `plan.planned` is the `(subject, predicate)` pairs of `older`'s rows as read before the
+/// transaction; the guards are made from them, and the transaction throws if the rows hold other
+/// pairs now (or if `claim_row` holds a different set of spellings than `plan.every`, which is
+/// what the unseal's groups were made from: a swapped spelling keeps the count and not the set).
+fn note_sql(newer: &str, older: &str, plan: &NotePlan) -> String {
     let (n, o) = (text(newer), text(older));
-    let guards = guards_let(planned.iter().map(|(s, p)| (s.as_str(), p.as_str())));
-    let planned = pairs_literal(planned);
+    let guards = guards_let(plan.planned.iter().map(|(s, p)| (s.as_str(), p.as_str())));
+    let groups = slot_groups(&plan.facts, &plan.every);
+    let members: Vec<(String, String)> = groups
+        .iter()
+        .flat_map(|g| g.canon.iter().chain(g.other.iter()).cloned())
+        .chain(plan.planned.iter().cloned())
+        .collect();
+    let (planned, facts, members_lit, groups_lit) = (
+        pairs_literal(&plan.planned),
+        pairs_literal(&plan.facts),
+        pairs_literal(&members),
+        groups_literal(&groups),
+    );
+    let every = pairs_literal(&plan.every);
     format!(
         "{guards}
          LET $planned = {planned};
@@ -257,18 +326,27 @@ fn note_sql(newer: &str, older: &str, planned: &[(String, String)]) -> String {
          {SLOTS_UNCHANGED}
          {BUMP_GUARDS}
          LET $fslots = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row WHERE source_path = {o} AND kind = 'fact');
+         LET $seen = {every};
+         LET $spelled = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row);
+         IF array::len(array::complement($fslots, {facts})) > 0 OR array::len(array::complement({facts}, $fslots)) > 0 OR array::len(array::complement($spelled, $seen)) > 0 OR array::len(array::complement($seen, $spelled)) > 0 {{ THROW {stale}; }};
+         LET $slots = {members_lit};
+         LET $groups = {groups_lit};
          {RETIRED_LETS}
          LET $newest = (SELECT VALUE valid_from_us FROM claim_row WHERE source_path = {n} ORDER BY valid_from_us DESC LIMIT 1)[0];
          LET $stamp = $newest ?? time::micros(time::now());
          LET $sealed = UPDATE claim_row SET superseded_us = $stamp, via = 'surreal' WHERE source_path = {o} AND superseded_us = NONE AND {o} INSIDE $retired RETURN VALUE cid;
          DELETE claim WHERE source_path = {o} AND cid INSIDE $sealed;
-         FOR $sl IN $fslots {{
-             LET $live = SELECT VALUE valid_from_us FROM claim_row WHERE subject = $sl[0] AND predicate = $sl[1] AND !(source_path INSIDE $retired) ORDER BY valid_from_us DESC LIMIT 1;
-             IF array::len($live) > 0 {{
-                 UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE subject = $sl[0] AND predicate = $sl[1] AND kind = 'fact' AND superseded_us != NONE AND valid_from_us = $live[0];
+         FOR $g IN $groups {{
+             LET $lc = SELECT VALUE valid_from_us FROM claim_row WHERE [subject, predicate] INSIDE $g.c AND !(source_path INSIDE $retired) ORDER BY valid_from_us DESC LIMIT 1;
+             LET $lo = SELECT VALUE valid_from_us FROM claim_row WHERE [subject, predicate] INSIDE $g.o AND !(source_path INSIDE $retired) ORDER BY valid_from_us DESC LIMIT 1;
+             IF array::len($lc) > 0 {{
+                 UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE [subject, predicate] INSIDE $g.c AND kind = 'fact' AND superseded_us != NONE AND valid_from_us = $lc[0];
+             }} ELSE IF array::len($lo) > 0 {{
+                 UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE [subject, predicate] INSIDE $g.o AND kind = 'fact' AND superseded_us != NONE AND valid_from_us = $lo[0];
              }};
          }};
-         RETURN array::len($sealed);"
+         RETURN array::len($sealed);",
+        stale = text(SPLIT_STALE),
     )
 }
 
@@ -323,6 +401,13 @@ fn backoff(attempt: u32) -> Duration {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::from(d.subsec_nanos()));
     Duration::from_millis(u64::from(attempt) * (3 + nanos % 7))
+}
+
+#[derive(Deserialize)]
+struct KindRow {
+    subject: String,
+    predicate: String,
+    kind: String,
 }
 
 #[derive(Deserialize)]
@@ -473,16 +558,36 @@ impl SurrealClient {
         self.ensure_via_field().await?;
         self.retrying(TxPlace::Note, || async {
             let query = format!(
-                "SELECT subject, predicate FROM claim_row WHERE source_path = {};",
+                "SELECT subject, predicate, kind FROM claim_row WHERE source_path = {};",
                 text(older)
             );
-            let planned: Vec<PairRow> =
-                super::first_statement(&query, self.rows::<PairRow>(&query).await?)?;
-            let planned: Vec<(String, String)> = planned
+            let held: Vec<KindRow> =
+                super::first_statement(&query, self.rows::<KindRow>(&query).await?)?;
+            let planned: Vec<(String, String)> = held
+                .iter()
+                .map(|r| (r.subject.clone(), r.predicate.clone()))
+                .collect();
+            let facts: Vec<(String, String)> = held
+                .into_iter()
+                .filter(|r| r.kind == "fact")
+                .map(|r| (r.subject, r.predicate))
+                .collect();
+            let query = "SELECT subject, predicate FROM claim_row GROUP BY subject, predicate;";
+            let every: Vec<PairRow> =
+                super::first_statement(query, self.rows::<PairRow>(query).await?)?;
+            let every: Vec<(String, String)> = every
                 .into_iter()
                 .map(|r| (r.subject, r.predicate))
                 .collect();
-            let sql = note_sql(newer, older, &planned);
+            let sql = note_sql(
+                newer,
+                older,
+                &NotePlan {
+                    planned,
+                    facts,
+                    every,
+                },
+            );
             Ok(match self.tx_once(&sql).await? {
                 Attempt::Done(answers) => {
                     let n = answers
