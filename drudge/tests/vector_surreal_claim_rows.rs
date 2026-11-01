@@ -8,7 +8,13 @@
 //!   BORING_TEST_DATABASE_URL=postgresql://boring:boring@127.0.0.1:<pg-port>/boring \
 //!   BORING_TEST_SURREAL_URL=http://127.0.0.1:<surreal-port> BORING_SURREAL_PASSWORD=root \
 //!   cargo test --test vector_surreal_claim_rows -- --ignored --nocapture --test-threads=1
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap
+)]
 
 use std::time::{Duration, SystemTime};
 
@@ -479,5 +485,138 @@ async fn compare_sees_a_stale_at_that_differs_under_the_same_key() {
     assert!(
         tables.iter().any(|t| !t.same()),
         "vector-check reports every table the same while 100 stale_at differ under the same key: {lines:?}"
+    );
+}
+
+fn embedding_of(seed: f32) -> Vec<f32> {
+    (0..DIM).map(|i| ((i as f32) * 0.37 + seed).sin()).collect()
+}
+
+/// Z2② backfill: `catch_up` fills `claim_row.embedding` from pg's `claim.embedding`, sealed rows
+/// included, and a row a Surreal write made (`via = 'surreal'`) is neither filled nor deleted,
+/// even when pg holds the same key with other floats. A second run changes nothing.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn the_embedding_backfill_fills_from_pg_and_leaves_surreal_written_rows() {
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
+    let config: SurrealConfig = serde_json::from_value(
+        json!({"url": url, "namespace": "claim_rows", "database": "z2b_backfill"}),
+    )
+    .unwrap();
+    let client = SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap();
+    let store = Store::open(&dsn, DIM).await.expect("open store");
+    let (db, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    db.batch_execute("DELETE FROM claim; DELETE FROM document;")
+        .await
+        .unwrap();
+    client.fill_from(&store).await.expect("fill of an empty pg");
+
+    let path = "/vault/wiki/z2b-backfill.md";
+    store
+        .upsert_document(&front(path), "sha", SystemTime::now())
+        .await
+        .expect("document");
+    let at = |us: u64| SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_000 + us);
+    for (i, predicate) in ["goal", "scope", "owner", "mine"].iter().enumerate() {
+        store
+            .upsert_claim(
+                "z2b-backfill",
+                predicate,
+                "a long enough value to count as a statement",
+                path,
+                at(i as u64),
+                &embedding_of(i as f32),
+                "decision",
+                "certain",
+            )
+            .await
+            .expect("claim");
+    }
+    db.batch_execute(
+        "UPDATE claim SET superseded_at = now() WHERE predicate IN ('scope', 'owner')",
+    )
+    .await
+    .unwrap();
+    client
+        .mirror(&store, &Scope::notes([path.to_owned()]))
+        .await
+        .expect("mirror");
+    // A Surreal write on the 'mine' key, whose floats pg does not share; then its embedding is
+    // blanked, so only the `via` mark keeps the backfill off it.
+    let key = format!("z2b-backfill\u{1f}mine\u{1f}{}", 1_700_000_000_000_003_i64);
+    client
+        .run(&format!(
+            "UPDATE type::record('claim_row', {}) SET via = 'surreal', embedding = NONE;",
+            json!(key)
+        ))
+        .await
+        .unwrap();
+    // Rows copied before the column existed: no embedding on the others either.
+    client
+        .run("UPDATE claim_row SET embedding = NONE WHERE via != 'surreal';")
+        .await
+        .unwrap();
+    // A row only Surreal holds.
+    client
+        .run(
+            "UPSERT type::record('claim_row', 'z2b-only') CONTENT {cid: 'z2b-only', subject: 'z2b-only', \
+             predicate: 'p', value: 'v', source_path: '/vault/wiki/z2b-backfill.md', valid_from_us: 1, \
+             kind: 'fact', confidence: 'certain', era: 'unanchored', via: 'surreal', embedding: [1.0, 2.0]};",
+        )
+        .await
+        .unwrap();
+
+    let snapshot = || async {
+        let rows = client
+            .run("SELECT cid, superseded_us, via, embedding FROM claim_row ORDER BY cid;")
+            .await
+            .unwrap();
+        rows[0].to_string()
+    };
+    client.catch_up(&store).await.expect("catch_up 1");
+    let first = snapshot().await;
+    client.catch_up(&store).await.expect("catch_up 2");
+    let second = snapshot().await;
+    assert_eq!(first, second, "a second backfill changed rows");
+
+    let pg_sealed: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE superseded_at IS NOT NULL AND embedding IS NOT NULL",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let rows = client
+        .run("SELECT cid, superseded_us, via, embedding FROM claim_row ORDER BY cid;")
+        .await
+        .unwrap();
+    let rows = rows[0].as_array().unwrap();
+    let filled = rows
+        .iter()
+        .filter(|r| r["via"].is_null() && !r["embedding"].is_null())
+        .count();
+    let sealed_filled = rows
+        .iter()
+        .filter(|r| {
+            r["via"].is_null() && !r["superseded_us"].is_null() && !r["embedding"].is_null()
+        })
+        .count();
+    println!("Z2b backfill filled={filled}/3 sealed_filled={sealed_filled}/{pg_sealed}");
+    assert_eq!((filled, sealed_filled as i64), (3, pg_sealed), "{rows:?}");
+    let mine = rows
+        .iter()
+        .find(|r| r["cid"] == key)
+        .expect("the Surreal-written key survives");
+    assert!(
+        mine["embedding"].is_null(),
+        "backfill overwrote a Surreal-written row: {mine}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r["cid"] == "z2b-only" && r["embedding"].as_array().map(Vec::len) == Some(2)),
+        "a row only Surreal holds was deleted or changed: {rows:?}"
     );
 }
