@@ -510,6 +510,7 @@ async fn search_hits_inner(
         said_by_owner: 0,
         claims: Vec::new(),
         claims_total: None,
+        over_ceiling: false,
     })
     .collect();
     // Graph-backed enrichments beside every hit — one grouped query each (consumption counts,
@@ -596,7 +597,12 @@ async fn run_search(s: &AppState, store: &Store, req: &crate::serve::SearchReq) 
     )
     .await;
     match outcome {
-        Ok(hits) => search_route::search_ok_response(hits),
+        Ok(mut hits) => {
+            if let Some(max_dist) = req.max_dist {
+                search_route::mark_over_ceiling(&mut hits, max_dist);
+            }
+            search_route::search_ok_response(hits)
+        }
         Err(failure) => search_route::error_response(StatusCode::BAD_GATEWAY, &failure.message()),
     }
 }
@@ -1023,6 +1029,47 @@ pub(crate) async fn handle_rules(State(s): State<AppState>) -> axum::response::R
     };
     match store.rule_rows().await {
         Ok(rows) => Json(crate::rules::group_rules(rows)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /rules/match` `{prompt}` — the rules whose triggers fire on the prompt, as
+/// `{rules: [{subject, rule, trigger, source_path}]}` in `GET /rules` order. The hook sends the
+/// prompt and gets only the firings back (matching is `crate::rules::fired`). 400 for a body
+/// that is no JSON object with a string `prompt`; store errors as `GET /rules`.
+pub(crate) async fn handle_rules_match(
+    State(s): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let prompt = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Object(m)) => m.get("prompt").and_then(Value::as_str).map(str::to_owned),
+        _ => None,
+    };
+    let Some(prompt) = prompt else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "body must be a JSON object with a string prompt"})),
+        )
+            .into_response();
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.rule_rows().await {
+        Ok(rows) => {
+            let all = crate::rules::group_rules(rows).rules;
+            Json(json!({"rules": crate::rules::fired(all, &prompt)})).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(StoreUnreachable::of(store, &e)),
@@ -1533,6 +1580,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         };
         super::attach_claims(store, std::slice::from_mut(&mut hit), req.claims())
             .await

@@ -468,6 +468,35 @@ fn i32_field(entries: &[Entry], field: &'static str) -> Result<Option<i32>, Prob
     }
 }
 
+/// `max_dist`: an optional JSON number (int or float). The door's `_SearchBody` has no such
+/// field and ignores it, so this is new engine-side contract, not a mirrored rejection.
+fn float_field(entries: &[Entry], field: &'static str) -> Result<Option<f64>, Problem> {
+    match lookup(entries, field) {
+        None => Ok(None),
+        Some(raw) => match raw.as_bytes().first() {
+            Some(b'-' | b'0'..=b'9') => Ok(raw.parse::<f64>().ok()),
+            _ => Err(Problem::on_raw(
+                field,
+                "Input should be a valid number",
+                "float_type",
+                raw,
+            )),
+        },
+    }
+}
+
+/// Mark the hits over the ceiling. Same rule as `recall_core.exceeds_relevance_ceiling`: only
+/// a `vector_cosine` dist is comparable (`text_rank` and no-dist hits are never judged), and
+/// the comparison is made on the number the wire carries (the shortest decimal of the f32,
+/// read as f64), which is what the Python hook compared. Nothing is dropped.
+pub(crate) fn mark_over_ceiling(hits: &mut [SearchHit], max_dist: f64) {
+    for hit in hits {
+        let wire = hit.dist.and_then(|d| d.to_string().parse::<f64>().ok());
+        hit.over_ceiling = hit.dist_kind == Some(crate::store::DistKind::VectorCosine)
+            && wire.is_some_and(|d| d > max_dist);
+    }
+}
+
 /// StrictStr (nullable 이면 null 은 `Ok(None)`).
 fn str_field(
     entries: &[Entry],
@@ -563,6 +592,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
     let since_hours = i32_field(&entries, "since_hours");
     let project = str_field(&entries, "project", true);
     let session_id = str_field(&entries, "session_id", true);
+    let max_dist = float_field(&entries, "max_dist");
     match (
         query,
         max_results,
@@ -573,6 +603,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
         since_hours,
         project,
         session_id,
+        max_dist,
     ) {
         (
             Ok(query),
@@ -584,6 +615,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
             Ok(since_hours),
             Ok(project),
             Ok(session_id),
+            Ok(max_dist),
         ) => Ok(SearchReq {
             query,
             max_results: max_results.map_or(5, |v| v.usize()),
@@ -594,6 +626,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
             related_heads: related_heads.map_or(2, |v| v.usize()),
             claims: claims.map(|v| v.u32()),
             session_id,
+            max_dist,
         }),
         (
             query,
@@ -605,6 +638,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
             since_hours,
             project,
             session_id,
+            max_dist,
         ) => {
             let problems: Vec<Problem> = [
                 query.err(),
@@ -616,6 +650,7 @@ pub(crate) fn parse_search_body(body: &[u8]) -> Result<SearchReq, String> {
                 since_hours.err(),
                 project.err(),
                 session_id.err(),
+                max_dist.err(),
             ]
             .into_iter()
             .flatten()
@@ -1030,6 +1065,45 @@ mod tests {
         assert_eq!(claims.claims(), crate::serve::SEARCH_MAX_CLAIMS);
     }
 
+    // Expected values: Python `recall_core.exceeds_relevance_ceiling` on the same hits (repo .venv,
+    // 2026-11-01): only vector_cosine strictly above the ceiling; text_rank and no-dist never.
+    #[test]
+    fn over_ceiling_matches_python_rule() {
+        use crate::store::DistKind::{TextRank, VectorCosine};
+        let mk = |dist: Option<f32>, kind| {
+            let mut h = hit("a");
+            h.dist = dist;
+            h.dist_kind = kind;
+            h
+        };
+        let mut hits = vec![
+            mk(Some(0.5), Some(VectorCosine)),
+            mk(Some(0.514), Some(VectorCosine)),
+            mk(Some(0.515), Some(VectorCosine)),
+            mk(Some(0.9), Some(TextRank)),
+            mk(None, None),
+        ];
+        mark_over_ceiling(&mut hits, 0.514);
+        let marks: Vec<bool> = hits.iter().map(|h| h.over_ceiling).collect();
+        assert_eq!(marks, [false, false, true, false, false]);
+        let plain = serde_json::to_value(&hits[0]).expect("json");
+        assert!(plain.get("over_ceiling").is_none());
+        let flagged = serde_json::to_value(&hits[2]).expect("json");
+        assert_eq!(flagged["over_ceiling"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn max_dist_is_an_optional_number() {
+        let absent = parse_search_body(br#"{"query":"q"}"#).expect("absent");
+        assert_eq!(absent.max_dist, None);
+        let float = parse_search_body(br#"{"query":"q","max_dist":0.514}"#).expect("float");
+        assert_eq!(float.max_dist, Some(0.514));
+        let int = parse_search_body(br#"{"query":"q","max_dist":1}"#).expect("int");
+        assert_eq!(int.max_dist, Some(1.0));
+        assert!(parse_search_body(br#"{"query":"q","max_dist":"x"}"#).is_err());
+        assert!(parse_search_body(br#"{"query":"q","max_dist":null}"#).is_err());
+    }
+
     fn hit(path: &str) -> SearchHit {
         SearchHit {
             id: "1".into(),
@@ -1046,6 +1120,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         }
     }
 

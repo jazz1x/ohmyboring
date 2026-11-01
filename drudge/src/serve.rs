@@ -801,6 +801,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         };
         let json = serde_json::to_string(&hit).unwrap();
         assert!(
@@ -845,6 +846,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         };
         let json = serde_json::to_string(&hit).unwrap();
         assert!(
@@ -876,6 +878,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         };
         let json = serde_json::to_string(&hit).unwrap();
         assert!(
@@ -907,6 +910,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         };
         let json = serde_json::to_value(&hit).unwrap();
         assert_eq!(json["used_count"], serde_json::json!(3));
@@ -1018,6 +1022,7 @@ mod tests {
             related_heads: 0,
             claims: None,
             session_id: Some("  ".to_owned()),
+            max_dist: None,
         };
         assert_eq!(req.session_id(), None);
         req.session_id = Some(" slack:C1:1.0 ".to_owned());
@@ -1248,6 +1253,11 @@ pub(crate) struct SearchReq {
     /// to it (a `handed` edge per hit). Absent — today's request, byte for byte.
     #[serde(default)]
     pub(crate) session_id: Option<String>,
+    /// Opt-in relevance ceiling (recall hook, C-RUSTB1 row 11): hits whose `vector_cosine` dist is
+    /// above it carry `over_ceiling: true`. Nothing is dropped — the ceiling is an instrument.
+    /// Absent: today's response, byte for byte.
+    #[serde(default)]
+    pub(crate) max_dist: Option<f64>,
 }
 
 impl SearchReq {
@@ -1315,6 +1325,9 @@ pub(crate) struct SearchHit {
     pub(crate) claims: Vec<crate::store::RegisterRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) claims_total: Option<i64>,
+    /// Only set when the request named `max_dist` (see `SearchReq::max_dist`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) over_ceiling: bool,
 }
 
 #[derive(Serialize)]
@@ -1932,6 +1945,7 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         )
         .route("/projects", get(http::handle_projects))
         .route("/rules", get(http::handle_rules))
+        .route("/rules/match", post(http::handle_rules_match))
         .route("/claim-source", get(http::handle_claim_source))
         .route("/claim-sources", get(http::handle_claim_sources))
         .route("/claim-priors", get(http::handle_claim_priors))

@@ -57,7 +57,21 @@ run_maintenance() {
             ;;
     esac
     echo "--- retention ---"
-    uv run --locked python scripts/retention.py --apply --yes
+    # The engine does it (drudge retention). BORING_RETENTION_IMPL=python runs scripts/retention.py
+    # instead — the rollback if the engine's archive/delete ever misbehaves.
+    # No `set -e` here, so a failed step is only a status nobody reads: an old binary without the
+    # subcommand ("unrecognized subcommand") or a broken boring.json would let retention silently
+    # stop. Keep its status, print a ✗ line, and make the run's final exit code non-zero.
+    retention_rc=0
+    if [ "${BORING_RETENTION_IMPL:-}" = "python" ]; then
+        uv run --locked python scripts/retention.py --apply --yes || retention_rc=$?
+    else
+        ./drudge/target/release/drudge retention --apply --yes || retention_rc=$?
+    fi
+    if [ "$retention_rc" -ne 0 ]; then
+        echo "✗ retention failed (rc=${retention_rc}) — old drudge binary without the subcommand, or a broken boring.json?"
+        notify_slack "새벽 점검: retention 실패(rc=${retention_rc})"
+    fi
     # Injection precision is the product's first-class metric and it cannot be computed from
     # distances — only from labels on real injections. Collecting them by hand never happened,
     # so the daily run takes a bounded sample. Bounded on purpose: the local model judges 24
@@ -99,6 +113,7 @@ run_maintenance() {
     fi
     echo "=== maintenance finished at $(date) ==="
     [ "$swap_rc" -eq 0 ] || exit 1
+    [ "$retention_rc" -eq 0 ] || exit 1
 }
 
 escaped_boring_home() {

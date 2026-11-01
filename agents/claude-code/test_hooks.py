@@ -53,6 +53,7 @@ for _var in (
     "RECALL_TIMEOUT",
     "RECALL_RETRIES",
     "RECALL_RELEVANCE_MAX_DIST",
+    "BORING_RECALL_CEILING",
     "BORING_DOOR_URL",
 ):
     os.environ.pop(_var, None)
@@ -866,7 +867,35 @@ class RecallFormattingTests(unittest.TestCase):
         self.assertIn("self-augmenting RAG recall", ctx)  # the injection fence is present
 
     _NEAR = {"source_path": "x/near.md", "snippet": "close", "dist": 0.3, "dist_kind": "vector_cosine"}
-    _FAR = {"source_path": "x/far.md", "snippet": "irrelevant", "dist": 0.9, "dist_kind": "vector_cosine"}
+    # `over_ceiling` is what the engine adds when the hook sends max_dist.
+    _FAR = {
+        "source_path": "x/far.md",
+        "snippet": "irrelevant",
+        "dist": 0.9,
+        "dist_kind": "vector_cosine",
+        "over_ceiling": True,
+    }
+
+    def test_the_engine_judges_the_ceiling_and_the_hook_only_asks_and_reports(self):
+        # dist 0.3 flagged by the engine is reported; dist 0.9 without a flag is not: the hook
+        # does not compare distances itself in engine mode. And it sent max_dist with /search.
+        flagged = {**self._NEAR, "over_ceiling": True}
+        search = mock.MagicMock(return_value=Ok([flagged, {**self._FAR, "over_ceiling": False}]))
+        _out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=search)
+        self.assertIn("would drop 1/2", err)
+        self.assertIn("near.md@0.3000", err)
+        self.assertNotIn("far.md@", err)
+        knobs = search.call_args.args[1]
+        self.assertEqual(knobs.max_dist, recall_core.RELEVANCE_MAX_DIST)
+
+    def test_python_ceiling_switch_is_the_rollback(self):
+        # Rollback: no max_dist is asked, the hook compares distances itself (flag ignored).
+        search = mock.MagicMock(return_value=Ok([{**self._FAR, "over_ceiling": False}]))
+        with mock.patch.object(recall_core, "CEILING_IN_PYTHON", True):
+            _out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=search)
+        self.assertIn("far.md@0.9000", err)
+        self.assertIsNone(search.call_args.args[1].max_dist)
+
     # The fixtures sit far either side of the constant so retuning it cannot make these vacuous.
 
     def test_hit_over_the_ceiling_is_kept_and_only_reported(self):
@@ -981,10 +1010,20 @@ class RulesStubHandler(BaseHTTPRequestHandler):
 
     hits = 0
     payload: dict = {"rules": [], "incomplete": 0}
+    match_payload: dict = {"rules": []}  # what the engine's POST /rules/match answers
+    posted: list = []  # (path, body) of every POST
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("content-length") or 0)
+        type(self).posted.append((self.path, json.loads(self.rfile.read(length))))
+        self._reply(type(self).match_payload)
 
     def do_GET(self):  # noqa: N802 — http.server's spelling
+        self._reply(type(self).payload)
+
+    def _reply(self, payload):
         type(self).hits += 1
-        body = json.dumps(type(self).payload).encode()
+        body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
@@ -1018,7 +1057,9 @@ class RulesHookTests(unittest.TestCase):
         self.stub_thread = threading.Thread(target=self.stub.serve_forever, daemon=True)
         self.stub_thread.start()
         RulesStubHandler.hits = 0
+        RulesStubHandler.posted = []
         RulesStubHandler.payload = {"rules": [dict(self.RULE)], "incomplete": 0}
+        RulesStubHandler.match_payload = {"rules": [dict(self.RULE)]}
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.env = mock.patch.dict(
@@ -1064,7 +1105,30 @@ class RulesHookTests(unittest.TestCase):
         self.assertEqual(fired[0]["subject"], "rule-hermes-not-removed")
         self.assertEqual(fired[0]["session_id"], "s-1")
 
+    def test_engine_matches_the_hook_sends_the_prompt_in_one_post(self):
+        # GET /rules holds nothing that would fire: only the engine's answer can inject.
+        RulesStubHandler.payload = {"rules": [], "incomplete": 0}
+        out, err = self._run({"prompt": "Hermes 좀 remove 해줘", "session_id": "s-e"})
+        self.assertEqual(err, "")
+        self.assertEqual(RulesStubHandler.posted, [("/rules/match", {"prompt": "Hermes 좀 remove 해줘"})])
+        self.assertEqual(RulesStubHandler.hits, 1)
+        self.assertIn(
+            "- hermes 를 빼지 마세요 (출처 wiki-1955)",
+            json.loads(out)["hookSpecificOutput"]["additionalContext"],
+        )
+
+    def test_python_matcher_switch_is_the_rollback(self):
+        # Rollback: GET /rules, match in Python (the POST answer here would fire everything).
+        os.environ["BORING_RULES_MATCHER"] = "python"
+        self.addCleanup(os.environ.pop, "BORING_RULES_MATCHER", None)
+        out, err = self._run({"prompt": "그냥 평범한 질문이에요", "session_id": "s-p"})
+        self.assertEqual((out, err), ("", ""))
+        self.assertEqual(RulesStubHandler.posted, [])
+        out, _ = self._run({"prompt": "hermes remove", "session_id": "s-p"})
+        self.assertIn("hermes 를 빼지 마세요", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+
     def test_no_trigger_match_is_silent_but_the_door_was_asked(self):
+        RulesStubHandler.match_payload = {"rules": []}
         out, err = self._run({"prompt": "그냥 평범한 질문이에요", "session_id": "s-2"})
         self.assertEqual(out, "")
         self.assertEqual(err, "")
