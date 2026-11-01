@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use drudge::{
-    ask, audit, code_index, config, frontmatter, graph, ingest, llm, retrieve, serve, store, vault,
-    vector::VectorIndex,
+    ask, audit, code_index, config, frontmatter, graph, ingest, llm, retention, retrieve, serve,
+    store, vault, vector::VectorIndex,
 };
 use std::path::PathBuf;
 
@@ -83,6 +83,16 @@ enum Cmd {
     /// swap (define a new-named index, confirm it built, remove the old one); fails when any table
     /// failed, the old index staying. On pgvector it does not apply
     VectorSwap,
+    /// Raw session retention: archive old transcripts, delete ancient archives and stale markers
+    /// (dry-run unless --apply; the ~/.cache/boring-distill markers say what was distilled)
+    Retention {
+        /// actually archive/delete instead of printing the plan
+        #[arg(long)]
+        apply: bool,
+        /// with --apply: skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
     /// Show loaded boring.json config (for debugging / migration verification)
@@ -257,6 +267,12 @@ async fn main() -> Result<()> {
                 );
             }
             return Ok(());
+        }
+        Cmd::Retention { apply, yes } => {
+            let home = std::env::var("HOME").context("HOME is unset; cannot locate ~/.cache")?;
+            let places = retention::Places::resolve(&cfg.session_end_source_dirs(), &home);
+            let policy = retention::Policy::from_env(&|name| std::env::var(name).ok());
+            return retention::run(&places, &policy, retention::Mode { apply, yes });
         }
         Cmd::Version => {
             // Empty means the build could not resolve a commit (no .git, no BUILD_SHA), which is
@@ -523,7 +539,11 @@ async fn main() -> Result<()> {
                 println!("backend=pgvector — 해당 없음 (swap 은 backend=surreal 일 때만)");
             }
         },
-        Cmd::CodeSync { .. } | Cmd::CodeCheck | Cmd::CodeStatus { .. } | Cmd::Version => {}
+        Cmd::CodeSync { .. }
+        | Cmd::CodeCheck
+        | Cmd::CodeStatus { .. }
+        | Cmd::Retention { .. }
+        | Cmd::Version => {}
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault

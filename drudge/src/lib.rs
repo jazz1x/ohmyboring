@@ -23,6 +23,7 @@ pub mod pg_detail;
 pub mod pii;
 pub mod projects;
 pub mod redact;
+pub mod retention;
 pub mod retrieve;
 pub mod rules;
 pub mod serve;

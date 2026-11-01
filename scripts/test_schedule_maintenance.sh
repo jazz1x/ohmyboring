@@ -40,6 +40,8 @@ done
 cat > "$home/drudge/target/release/drudge" <<'EOF'
 #!/bin/sh
 echo "drudge-stub-ran $*"
+[ "$1" = "${STUB_DRUDGE_FAIL:-}" ] && exit 2
+exit 0
 EOF
 chmod +x "$home/drudge/target/release/drudge"
 
@@ -149,6 +151,23 @@ if [ -z "$bad" ]; then
     pass "a missing token means one stderr line and the run still finishes"
 else
     fail "a missing token — $bad"
+fi
+
+# (e) the retention step fails (an old drudge binary without the subcommand, a broken boring.json):
+# the run shows one ✗ line for it, goes on to the later steps, and still exits non-zero.
+run_case STUB_DRUDGE_FAIL=retention
+bad=""
+if [ "$rc" = "0" ]; then bad="rc 0 (want non-zero)"; fi
+if ! printf '%s' "$out" | grep -q '^✗ retention'; then
+    bad="${bad:+$bad, }no ✗ retention line in the output"
+fi
+if ! printf '%s' "$out" | grep -qF '=== maintenance finished'; then
+    bad="${bad:+$bad, }the later steps did not run"
+fi
+if [ -z "$bad" ]; then
+    pass "a failing retention step prints a ✗ line, the run finishes, the exit code is non-zero"
+else
+    fail "a failing retention step — $bad"
 fi
 
 # Scratch mutants run from a directory with the real scripts/lib beside them: the script
