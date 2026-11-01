@@ -510,6 +510,7 @@ async fn search_hits_inner(
         said_by_owner: 0,
         claims: Vec::new(),
         claims_total: None,
+        over_ceiling: false,
     })
     .collect();
     // Graph-backed enrichments beside every hit — one grouped query each (consumption counts,
@@ -596,7 +597,12 @@ async fn run_search(s: &AppState, store: &Store, req: &crate::serve::SearchReq) 
     )
     .await;
     match outcome {
-        Ok(hits) => search_route::search_ok_response(hits),
+        Ok(mut hits) => {
+            if let Some(max_dist) = req.max_dist {
+                search_route::mark_over_ceiling(&mut hits, max_dist);
+            }
+            search_route::search_ok_response(hits)
+        }
         Err(failure) => search_route::error_response(StatusCode::BAD_GATEWAY, &failure.message()),
     }
 }
@@ -1533,6 +1539,7 @@ mod tests {
             said_by_owner: 0,
             claims: vec![],
             claims_total: None,
+            over_ceiling: false,
         };
         super::attach_claims(store, std::slice::from_mut(&mut hit), req.claims())
             .await
