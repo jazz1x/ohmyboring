@@ -91,7 +91,7 @@ _RECENT_REGISTER_ROWS_SQL = (
     " AND d.source_path !~ %(not_user_memory)s"
     " ORDER BY (CASE WHEN length(c.value) < %(informative)s THEN 1 ELSE 0 END)"
     " + (CASE WHEN c.predicate ~* %(tautological)s THEN 1 ELSE 0 END),"
-    " c.valid_from DESC"
+    ' c.valid_from DESC, c.subject COLLATE "C", c.predicate COLLATE "C"'
     " LIMIT %(limit)s"
 )
 
@@ -153,7 +153,7 @@ _RECENT_CLAIMS_SQL = (
     " AND d.source_path !~ %(not_user_memory)s"
     " ORDER BY (CASE WHEN length(c.value) < %(informative)s THEN 1 ELSE 0 END)"
     " + (CASE WHEN c.predicate ~* %(tautological)s THEN 1 ELSE 0 END),"
-    " c.valid_from DESC"
+    ' c.valid_from DESC, c.subject COLLATE "C", c.predicate COLLATE "C"'
     " LIMIT %(limit)s"
 )
 

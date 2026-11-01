@@ -77,7 +77,7 @@ run_maintenance() {
     echo "--- vector-swap ---"
     swap_rc=0
     ./drudge/target/release/drudge vector-swap || swap_rc=$?
-    [ "$swap_rc" -eq 0 ] || notify_slack "새벽 점검: vector-swap 실패(rc=${swap_rc}) — 옛 인덱스는 그대로"
+    [ "$swap_rc" -eq 0 ] || notify_slack "새벽 점검: vector-swap 실패(rc=${swap_rc})"
     # Close the loop this job used to leave open: twice (2026-09-21 hermes Slack socket failed
     # 267,201 times over ten days; 2026-09-26→27 ~20 h of reconnect loop) doctor could have
     # caught it — but nothing ran doctor at 03:00, so nobody was told. Strict and read-only:

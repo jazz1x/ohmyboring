@@ -36,7 +36,7 @@ ORACLE_RECENT_REGISTER_ROWS = (
     " AND d.source_path !~ %s"
     " ORDER BY (CASE WHEN length(c.value) < %s THEN 1 ELSE 0 END)"
     " + (CASE WHEN c.predicate ~* %s THEN 1 ELSE 0 END),"
-    " c.valid_from DESC"
+    ' c.valid_from DESC, c.subject COLLATE "C", c.predicate COLLATE "C"'
     " LIMIT %s"
 )
 
@@ -98,7 +98,7 @@ ORACLE_RECENT_CLAIMS = (
     " AND d.source_path !~ %s"
     " ORDER BY (CASE WHEN length(c.value) < %s THEN 1 ELSE 0 END)"
     " + (CASE WHEN c.predicate ~* %s THEN 1 ELSE 0 END),"
-    " c.valid_from DESC"
+    ' c.valid_from DESC, c.subject COLLATE "C", c.predicate COLLATE "C"'
     " LIMIT %s"
 )
 
@@ -590,6 +590,33 @@ class RegisterParityTests(unittest.TestCase):
         rows = self._python_register(exclude_origins=("company",))
         self.assertEqual(rows.total_matching, oracle_total)
         self.assertNotIn("subj-co", {r.subject for r in rows.rows})
+
+    def test_equal_valid_from_ties_break_by_subject_then_predicate_in_c_collation(self):
+        # 같은 valid_from 동률은 (subject, predicate) COLLATE "C" 로 끊는다 — Rust pg 질의와 같은 바이트 순서.
+        # 로케일 정렬이면 a < B < Z, "C" 면 B < Z < a 라 두 구현이 다른 답을 낸다.
+        path = "wiki/tie-0001.md"
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO document (source_path, project, origin) VALUES (%s, 'tie', 'personal')",
+                (path,),
+            )
+            for subject, predicate in [("a-tie", "p"), ("Z-tie", "p"), ("B-tie", "q"), ("B-tie", "P")]:
+                cur.execute(
+                    "INSERT INTO claim (source_path, subject, predicate, value, kind, confidence, valid_from)"
+                    " VALUES (%s, %s, %s, %s, 'decision', 'certain', timestamptz '2026-10-01 00:00:00+00')",
+                    (path, subject, predicate, "a long enough value to stay informative"),
+                )
+        self.addCleanup(self._drop_tie_rows, path)
+        oracle_rows, _ = self._oracle_register(50, "tie", ["decision"], ())
+        rows = self._python_register(project="tie")
+        order = [(r.subject, r.predicate) for r in rows.rows]
+        self.assertEqual(order, [("B-tie", "P"), ("B-tie", "q"), ("Z-tie", "p"), ("a-tie", "p")])
+        self.assertEqual(_row_tuples(rows), oracle_rows)
+
+    def _drop_tie_rows(self, path):
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM claim WHERE source_path = %s", (path,))
+            cur.execute("DELETE FROM document WHERE source_path = %s", (path,))
 
     def test_decisions_excludes_memory_paths_and_superseded(self):
         _, total = self._oracle_register(50, "omb", ["decision"], ())
