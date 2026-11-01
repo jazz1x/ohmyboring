@@ -545,8 +545,10 @@ async fn an_invalid_file_id_index_is_dropped_and_recreated_valid() {
 }
 
 /// Seeds `background` unrelated relation rows plus one file whose `symbols` symbols are each the
-/// source and target of one relation, deletes that file, and returns microseconds per symbol.
-async fn delete_file_micros_per_symbol(db: &Client, background: i64, symbols: i64) -> f64 {
+/// source and target of one relation, deletes that file, and returns how many `relation` rows the
+/// delete read (sequential reads + index fetches, the cascades included), counted inside its own
+/// transaction so no other session's reads are in the number.
+async fn delete_file_relation_rows_read(db: &Client, background: i64, symbols: i64) -> i64 {
     let repo = unique_id("code-symdel");
     let bg_file = format!("{repo}-bg");
     let victim_file = format!("{repo}-victim");
@@ -603,16 +605,26 @@ async fn delete_file_micros_per_symbol(db: &Client, background: i64, symbols: i6
         .await
         .unwrap();
 
-    let started = std::time::Instant::now();
+    db.batch_execute("BEGIN").await.unwrap();
     db.execute("DELETE FROM code_index.file WHERE id = $1", &[&victim_file])
         .await
         .unwrap();
-    let micros = started.elapsed().as_secs_f64() * 1e6 / f64::from(u32::try_from(symbols).unwrap());
+    let rows_read: i64 = db
+        .query_one(
+            "SELECT seq_tup_read + COALESCE(idx_tup_fetch, 0)
+               FROM pg_stat_xact_user_tables
+              WHERE relid = 'code_index.relation'::regclass",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    db.batch_execute("COMMIT").await.unwrap();
 
     db.execute("DELETE FROM code_index.repository WHERE id = $1", &[&repo])
         .await
         .unwrap();
-    micros
+    rows_read
 }
 
 #[tokio::test]
@@ -623,14 +635,11 @@ async fn deleting_a_file_costs_the_same_per_symbol_whatever_the_relation_table_s
     };
     let db = connect(&dsn).await;
     let _store = initialized_store(&dsn).await;
-    let small = delete_file_micros_per_symbol(&db, 20_000, 200).await;
-    let large = delete_file_micros_per_symbol(&db, 400_000, 200).await;
-    eprintln!(
-        "per-symbol delete: small={small:.1}us large={large:.1}us ratio={:.1}",
-        large / small
-    );
-    assert!(
-        large < small * 3.0,
-        "per-symbol delete grew with relation size: {small:.1}us -> {large:.1}us"
+    let small = delete_file_relation_rows_read(&db, 20_000, 200).await;
+    let large = delete_file_relation_rows_read(&db, 400_000, 200).await;
+    eprintln!("relation rows read by the delete: small={small} large={large}");
+    assert_eq!(
+        small, large,
+        "deleting a file read relation rows in proportion to the table: {small} -> {large}"
     );
 }
