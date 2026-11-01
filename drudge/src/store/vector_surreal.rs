@@ -1563,7 +1563,8 @@ const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD sha ON document TYPE string;
          DEFINE FIELD extracted_sha ON document TYPE string;
          DEFINE FIELD updated_us ON document TYPE int;
-         DEFINE FIELD author ON document TYPE string;";
+         DEFINE FIELD author ON document TYPE string;
+         DEFINE FIELD via ON document TYPE option<string>;";
 
 /// pg's `(document, node, edge)` keys, in the shapes Surreal keys them by.
 async fn pg_graph_keys(
@@ -2231,7 +2232,17 @@ impl SurrealClient {
             .query(&document_select("WHERE d.source_path = ANY($1)"), &[&paths])
             .await
             .context("read the written notes' documents from pgvector")?;
-        let wanted: Vec<(String, String)> = rows.iter().map(document_literal).collect();
+        let held_query = format!(
+            "SELECT VALUE cid FROM document WHERE via = 'surreal' AND source_path INSIDE {};",
+            texts(paths)
+        );
+        let held: Vec<String> =
+            first_statement(&held_query, self.rows::<String>(&held_query).await?)?;
+        let wanted: Vec<(String, String)> = rows
+            .iter()
+            .map(document_literal)
+            .filter(|(key, _)| !held.contains(key))
+            .collect();
         let existing_query = format!(
             "SELECT VALUE cid FROM document WHERE source_path INSIDE {};",
             texts(paths)
@@ -2242,7 +2253,7 @@ impl SurrealClient {
             wanted.iter().map(|(k, _)| k.as_str()).collect();
         let stale: Vec<String> = existing
             .into_iter()
-            .filter(|k| !keep.contains(k.as_str()))
+            .filter(|k| !keep.contains(k.as_str()) && !held.contains(k))
             .collect();
         let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
         self.upsert_rows("document", &literals).await?;
@@ -2452,10 +2463,11 @@ impl SurrealClient {
             .await
             .context("read the written notes' open claims from pgvector")?;
         let written = self.surreal_written().await?;
+        let gone = self.surreal_gone().await?;
         let wanted: Vec<(String, String)> = rows
             .iter()
             .map(claim_literal)
-            .filter(|(cid, _)| !written.contains(cid))
+            .filter(|(cid, _)| !written.contains(cid) && !gone.contains(cid))
             .collect();
         // One membership test, not an `OR` chain: Surreal's parser refuses a chain of ~120 terms
         // ("nests or chains operators too deeply"), and a 1,280-note scope has more slots than that.
@@ -2504,13 +2516,14 @@ impl SurrealClient {
             .await
             .context("read the written notes' claim rows from pgvector")?;
         let written = self.surreal_written().await?;
+        let gone = self.surreal_gone().await?;
         let wanted: Vec<(String, String)> = rows
             .iter()
             .map(|r| {
                 let (key, row) = claim_row_json(r);
                 (key, row.to_string())
             })
-            .filter(|(key, _)| !written.contains(key))
+            .filter(|(key, _)| !written.contains(key) && !gone.contains(key))
             .collect();
         let slot_pairs: Vec<String> = slots
             .iter()
@@ -2545,6 +2558,7 @@ impl SurrealClient {
     /// Surreal's keys a page at a time, each looked up in pg (extra).
     pub async fn claim_row_diff(&self, store: &Store) -> Result<ClaimRowDiff> {
         let db = store.db().await?;
+        let gone = self.surreal_gone().await?;
         let mut diff = ClaimRowDiff::default();
         let mut offset = 0_i64;
         loop {
@@ -2561,7 +2575,11 @@ impl SurrealClient {
                 break;
             }
             offset += i64::try_from(rows.len())?;
-            let pg: HashMap<String, Value> = rows.iter().map(claim_row_json).collect();
+            let pg: HashMap<String, Value> = rows
+                .iter()
+                .map(claim_row_json)
+                .filter(|(key, _)| !gone.contains(key))
+                .collect();
             let keys: Vec<String> = pg.keys().cloned().collect();
             let query = format!("SELECT * FROM claim_row WHERE cid INSIDE {};", texts(&keys));
             let found: Vec<Value> = first_statement(&query, self.rows::<Value>(&query).await?)?;
@@ -2614,7 +2632,33 @@ impl SurrealClient {
         let diff = self.claim_row_diff(store).await?;
         self.upsert_rows("claim_row", &diff.redo).await?;
         self.delete_rows("claim_row", &diff.extra).await?;
+        self.drop_moot_tombstones(store).await?;
         Ok((diff.redo.len(), diff.extra.len()))
+    }
+
+    /// A tombstone holds a key back only while pg still holds the row; once pg lacks it the
+    /// tombstone has nothing left to stop and goes, so a key pg writes again later is copied.
+    async fn drop_moot_tombstones(&self, store: &Store) -> Result<()> {
+        let gone: Vec<String> = self.surreal_gone().await?.into_iter().collect();
+        let held: std::collections::HashSet<String> = store
+            .db()
+            .await?
+            .query(
+                &format!(
+                    "SELECT c.subject || chr(31) || c.predicate || chr(31) || {valid} \
+                     FROM claim c WHERE c.subject || chr(31) || c.predicate || chr(31) || \
+                     {valid} = ANY($1);",
+                    valid = epoch_us("c.valid_from")
+                ),
+                &[&gone],
+            )
+            .await
+            .context("look up the tombstoned claim keys in pgvector")?
+            .iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect();
+        let moot: Vec<String> = gone.into_iter().filter(|k| !held.contains(k)).collect();
+        self.delete_rows("claim_gone", &moot).await
     }
 
     /// Every `cid` of one table, a page at a time in the table's own key order: one answer
@@ -2679,6 +2723,17 @@ impl SurrealClient {
     /// written on Surreal is never deleted or put back by a pass that reads pg.
     pub(super) async fn surreal_written(&self) -> Result<std::collections::HashSet<String>> {
         let query = "SELECT VALUE cid FROM claim_row WHERE via = 'surreal';";
+        Ok(first_statement(query, self.rows::<String>(query).await?)?
+            .into_iter()
+            .collect())
+    }
+
+    /// The keys of the claim rows a Surreal write deleted (`claim_gone`, written by the split
+    /// merge) while pg still holds them. The copies from pg skip these keys, so a deleted row is
+    /// not put back by the next `catch_up` or mirror. A table nobody wrote reads as empty.
+    pub(super) async fn surreal_gone(&self) -> Result<std::collections::HashSet<String>> {
+        self.ensure_via_field().await?;
+        let query = "SELECT VALUE cid FROM claim_gone;";
         Ok(first_statement(query, self.rows::<String>(query).await?)?
             .into_iter()
             .collect())
@@ -2844,13 +2899,14 @@ impl SurrealClient {
             self.table_keys("claim").await?.into_iter().collect();
         let want: std::collections::HashSet<&str> = pg_claims.iter().map(String::as_str).collect();
         let on_surreal = self.surreal_written().await?;
+        let gone = self.surreal_gone().await?;
         let stale: Vec<&String> = have
             .iter()
             .filter(|k| !want.contains(k.as_str()) && !on_surreal.contains(*k))
             .collect();
         let missing: Vec<&String> = pg_claims
             .iter()
-            .filter(|k| !have.contains(*k) && !on_surreal.contains(*k))
+            .filter(|k| !have.contains(*k) && !on_surreal.contains(*k) && !gone.contains(*k))
             .collect();
         let stale_claims = stale.len();
         let surreal_stales = self.surreal_claim_stales().await?;
@@ -3009,6 +3065,8 @@ impl SurrealClient {
              {project_ddl}
              REMOVE TABLE IF EXISTS claim_row;
              {CLAIM_ROW_DDL}
+             REMOVE TABLE IF EXISTS claim_gone;
+             DEFINE TABLE claim_gone SCHEMALESS;
              REMOVE TABLE IF EXISTS claim;
              DEFINE TABLE claim SCHEMAFULL;
              DEFINE FIELD cid ON claim TYPE string;

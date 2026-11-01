@@ -549,6 +549,115 @@ async fn two_spellings_of_one_slot_meet_on_one_guard() {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
+/// A split merge on Surreal deletes rows pg still holds. A tombstone keeps `catch_up` (which copies
+/// pg's rows over Surreal's) from putting them back, and the blanked `document.sha` from being
+/// copied over again. Rows come from pg first, so they are the ones the merge must keep deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_split_merge_is_not_undone_by_catch_up() {
+    let c = client("z1_tomb").await;
+    let pg = Store::open(&env("BORING_TEST_DATABASE_URL"), DIM)
+        .await
+        .expect("open store");
+    let n = runs().min(20);
+    let e = emb();
+    for i in 0..n {
+        let spellings = [
+            format!("Z1 Gone {i}"),
+            format!("z1-gone-{i}"),
+            format!("z1_gone_{i}"),
+        ];
+        for (k, spelling) in spellings.iter().enumerate() {
+            let path = format!("/v/gone-{i}-{k}.md");
+            pg.upsert_document(&front(&path), "sha", micros(1))
+                .await
+                .expect("document");
+            pg.upsert_claim(
+                spelling,
+                &format!("p{k}"),
+                "a long enough value to count as a statement",
+                &path,
+                micros(1_700_000_000_000_000 + k as u64),
+                &e,
+                "fact",
+                "certain",
+            )
+            .await
+            .expect("pg claim");
+        }
+    }
+    c.catch_up(&pg).await.expect("first copy from pg");
+    let rows = "SELECT VALUE count() FROM claim_row WHERE string::starts_with(string::lowercase(subject), 'z1') AND string::contains(string::lowercase(subject), 'gone') GROUP ALL;";
+    let vectors = "SELECT VALUE count() FROM claim WHERE string::contains(string::lowercase(subject), 'gone') GROUP ALL;";
+    let shas = "SELECT VALUE count() FROM document WHERE string::starts_with(source_path, '/v/gone-') AND sha != '' GROUP ALL;";
+    let copied = count(&c, rows).await;
+    let mut merged = 0;
+    for i in 0..n {
+        let m = c
+            .merge_split_subject(&format!("z1-gone-{i}"), SplitStanding::Owner)
+            .await
+            .expect("merge");
+        merged += i64::try_from(m.map_or(0, |m| m.deleted_rows)).unwrap();
+    }
+    let after_merge = count(&c, rows).await;
+    for lap in 0..2 {
+        c.catch_up(&pg).await.expect("catch_up");
+        println!(
+            "Z1 tombstone lap={lap} copied={copied} merged={merged} rows_after_merge={after_merge} resurrected_rows={}/{merged} resurrected_vectors={} resurrected_sha={}/{}",
+            count(&c, rows).await,
+            count(&c, vectors).await,
+            count(&c, shas).await,
+            3 * n
+        );
+    }
+    // The mirror of a pg write to these notes reads pg's rows and documents too.
+    let paths: Vec<String> = (0..n)
+        .flat_map(|i| (0..3).map(move |k| format!("/v/gone-{i}-{k}.md")))
+        .collect();
+    c.mirror(&pg, &drudge::store::Scope::notes(paths))
+        .await
+        .expect("mirror");
+    println!(
+        "Z1 tombstone after_mirror resurrected_rows={}/{merged} resurrected_vectors={} resurrected_sha={}/{}",
+        count(&c, rows).await,
+        count(&c, vectors).await,
+        count(&c, shas).await,
+        3 * n
+    );
+    let in_pg: i64 = {
+        let (db, conn) =
+            tokio_postgres::connect(&env("BORING_TEST_DATABASE_URL"), tokio_postgres::NoTls)
+                .await
+                .expect("connect");
+        tokio::spawn(conn);
+        db.query_one(
+            "SELECT count(*) FROM claim WHERE subject ILIKE '%gone%'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+    };
+    assert_eq!(copied, 3 * n as i64, "the first copy missed rows");
+    assert_eq!(merged, 3 * n as i64, "the merge deleted {merged}");
+    assert_eq!(in_pg, 3 * n as i64, "the merge wrote to pg");
+    assert_eq!(
+        count(&c, rows).await,
+        0,
+        "catch_up put deleted claim rows back"
+    );
+    assert_eq!(
+        count(&c, vectors).await,
+        0,
+        "catch_up put deleted vector claims back"
+    );
+    assert_eq!(
+        count(&c, shas).await,
+        0,
+        "a blanked document.sha was copied over again"
+    );
+}
+
 fn micros(us: u64) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_micros(us)
 }

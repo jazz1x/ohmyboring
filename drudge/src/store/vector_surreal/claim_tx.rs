@@ -301,9 +301,10 @@ fn split_sql(
          {owner}
          LET $touched = array::complement({notes}, $owner);
          LET $gone = SELECT VALUE cid FROM claim_row WHERE subject INSIDE {v} AND source_path INSIDE $touched AND superseded_us = NONE;
+         FOR $c IN $gone {{ UPSERT type::record('claim_gone', $c) SET cid = $c, via = 'surreal'; }};
          DELETE claim_row WHERE cid INSIDE $gone;
          DELETE claim WHERE cid INSIDE $gone;
-         LET $blanked = UPDATE document SET sha = '' WHERE source_path INSIDE $touched RETURN source_path;
+         LET $blanked = UPDATE document SET sha = '', via = 'surreal' WHERE source_path INSIDE $touched RETURN source_path;
          RETURN {{deleted: array::len($gone), reread: array::len($blanked), owner_held: $owner}};",
         want = texts(expected),
         stale = text(SPLIT_STALE),
@@ -338,9 +339,13 @@ impl SurrealClient {
     pub(super) async fn ensure_via_field(&self) -> Result<()> {
         self.claim_via
             .get_or_try_init(|| async {
-                self.run("DEFINE FIELD IF NOT EXISTS via ON claim_row TYPE option<string>;")
-                    .await
-                    .map(drop)
+                self.run(
+                    "DEFINE FIELD IF NOT EXISTS via ON claim_row TYPE option<string>;
+                     DEFINE FIELD IF NOT EXISTS via ON document TYPE option<string>;
+                     DEFINE TABLE IF NOT EXISTS claim_gone SCHEMALESS;",
+                )
+                .await
+                .map(drop)
             })
             .await?;
         Ok(())
