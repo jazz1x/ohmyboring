@@ -766,15 +766,15 @@ impl VectorIndex for SurrealView<'_> {
         Ok(within.into_iter().map(|(p, _)| p).collect())
     }
 
-    fn recurrences(
+    async fn recurrences(
         &self,
-        _days: i64,
-        _project: Option<&str>,
-        _limit: i64,
-    ) -> impl std::future::Future<Output = Result<Vec<Recurrence>>> {
-        std::future::ready(Err(anyhow!(
-            "recurrences 는 surreal 에 구현되지 않음 — Store 가 pgvector 로 보낸다"
-        )))
+        days: i64,
+        project: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Recurrence>> {
+        let claims = self.recurrence_candidates().await?;
+        recurrences::pair(&claims, SystemTime::now(), days, project, limit)
+            .context("recurrences tautology pattern")
     }
 
     #[allow(clippy::too_many_lines)] // Surreal filter, pg re-check, drift: one linear read path
@@ -1026,6 +1026,8 @@ impl FillTable {
         )
     }
 }
+
+mod recurrences;
 
 #[cfg(test)]
 mod claim_row_tests;
