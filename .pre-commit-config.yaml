@@ -1,6 +1,6 @@
 # ohmyboring pre-commit — 커밋 전 게이트. 린트(fmt·clippy·ruff)와 바뀐 시험 파일만. 전체 묶음은 CI(rust-gate)가 돈다.
 # 설치: pre-commit install   (요건: pre-commit, cargo+clippy+rustfmt)
-default_install_hook_types: [pre-commit]
+default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
 fail_fast: true
 
@@ -63,3 +63,38 @@ repos:
         entry: python3 -m py_compile
         language: system
         files: ^(agents|hooks|scripts|data/eval)/.*\.py$
+
+      # ── pre-push: CI(rust-gate)만 잡던 꼴 셋 + 바뀐 모듈의 시험 (C-CIWASTE1 다). 전체 묶음은 안 돈다.
+      # cargo clippy 는 위 pre-commit 단계(cargo-clippy)가 .rs 변경마다 이미 돌아 여기서 뺐다.
+      # 설치: `pre-commit install` 한 번이 default_install_hook_types 에 따라 pre-commit 과 pre-push 를 함께 깐다.
+      - id: pre-push-changelog
+        name: "CHANGELOG — 동작을 바꾼 가지는 CHANGELOG 도 고쳤나 (scripts/test_changelog.py)"
+        entry: env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE uv run --locked python scripts/test_changelog.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: pre-push-python-deps
+        name: "의존성 선언 — import 한 것은 requirements 에 있나 (scripts/test_python_deps.py)"
+        entry: env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE uv run --locked python scripts/test_python_deps.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      # 바뀐 .py 모듈 이름을 import 하는 test_*.py 만 (rg 로 찾음). 시험 파일 자신이 바뀐 건 pre-commit changed-tests 가 돈다.
+      - id: pre-push-importing-tests
+        name: "바뀐 .py 모듈을 import 하는 시험 파일만"
+        entry: >-
+          env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE sh -c '
+          from="${PRE_COMMIT_FROM_REF:-origin/main}"; to="${PRE_COMMIT_TO_REF:-HEAD}";
+          mods=$(git diff --name-only --diff-filter=AM "$from...$to" -- "*.py" | grep -v "/test_[^/]*$" | sed "s#.*/##; s#[.]py\$##" | sort -u);
+          if [ -z "$mods" ]; then echo "no changed non-test .py"; exit 0; fi;
+          pat=$(printf "%s\n" "$mods" | paste -sd"|" -);
+          tests=$(rg -l --glob "test_*.py" -e "(import|from)[[:space:]]+([A-Za-z0-9_.]*[.])?($pat)([[:space:]]|\$|,)" -e "[^[:alnum:]_]($pat)[.]py" . || true);
+          for t in $tests; do echo "== $t"; uv run --locked python "$t" || exit 1; done' --
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
