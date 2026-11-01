@@ -38,8 +38,8 @@ pub use code_copy_surreal::{CodeCheck, CodeCopy};
 pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
-    ClaimRowDiff, FillTable, KeySet, ProjectTable, ProjectTableError, RegisterAsk, SURREAL_BEHIND,
-    Scope, SurrealClient, Swap,
+    ClaimRowDiff, ClaimWrite, FillTable, KeySet, ProjectTable, ProjectTableError, RegisterAsk,
+    SURREAL_BEHIND, Scope, SplitStanding, SurrealClient, Swap, TX_RETRIES, TxCount, TxPlace,
 };
 
 /// Ingest input (one chunk).

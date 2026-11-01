@@ -342,6 +342,8 @@ pub struct SurrealClient {
     http: reqwest::Client,
     settings: SurrealSettings,
     token: Arc<RwLock<Option<Token>>>,
+    tx_retries: u32,
+    tx_stats: Arc<claim_tx::TxStats>,
 }
 
 /// The `/signin` token, shared by every clone. Hand-written `Debug`: it must never reach a log.
@@ -408,6 +410,8 @@ impl SurrealClient {
             http,
             settings,
             token: Arc::new(RwLock::new(None)),
+            tx_retries: claim_tx::TX_RETRIES,
+            tx_stats: Arc::default(),
         })
     }
 
@@ -1027,6 +1031,8 @@ impl FillTable {
     }
 }
 
+mod claim_tx;
+pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
 mod recurrences;
 
 #[cfg(test)]
