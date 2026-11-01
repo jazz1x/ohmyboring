@@ -288,33 +288,12 @@ fn next_generation(index: &str) -> String {
     format!("{base}_g{}", generation + 1)
 }
 
-/// Full-text analyzer for `chunk.content`. pg indexes `to_tsvector('simple', content)`
-/// (baseline.sql:127): it splits on blanks and punctuation, lowercases, and does no stemming and
-/// no Hangul segmentation. This does the same and nothing more — `segment korean` would add a
-/// morphological split pg does not do, and whether our image has the `cjk` feature is unverified
-/// (wiki-00000012804). The built-in tokenizers cannot reproduce pg's compound tokens (url, email,
-/// host, file path, version, float, hyphenated word); `retrieve` never queries them (see
-/// `text_terms`), and the token comparison counts what differs.
-const TEXT_ANALYZER_DDL: &str =
-    "DEFINE ANALYZER OVERWRITE omb_simple TOKENIZERS blank, punct FILTERS lowercase;";
-/// BM25 index on the global chunk table. Defined AFTER the bulk load in `fill_from` and by
-/// `ensure_text_index` for a copy filled before this index existed. Unlike HNSW it is an exact
-/// inverted index kept in step on every write, so it has no swap generation and `swap_table`
-/// never touches it (`hnsw_indexes` filters on ` HNSW `).
+/// Trial (lexemes mirror): pg tokenizes. `chunk.lexemes` holds pg's own `tsvector_to_array(tsv)`
+/// joined by blanks, and the query's words are pg's `to_tsvector('simple', q)` lexemes, so the
+/// only job left for Surreal is to split on blanks.
+const TEXT_ANALYZER_DDL: &str = "DEFINE ANALYZER OVERWRITE omb_lexeme TOKENIZERS blank;";
 const TEXT_INDEX_DDL: &str =
-    "DEFINE INDEX chunk_content_ft ON chunk FIELDS content FULLTEXT ANALYZER omb_simple BM25";
-
-/// The words a Surreal full-text query is made of: the alphanumeric runs of `query`, blank
-/// separated. pg's `plainto_tsquery('simple', …)` drops punctuation, while Surreal's `punct`
-/// tokenizer keeps each punctuation mark as a token that a document must contain to match, so a
-/// query like `hello, world` would need a comma. Empty means pg's empty query: no rows.
-fn text_terms(query: &str) -> String {
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+    "DEFINE INDEX chunk_content_ft ON chunk FIELDS lexemes FULLTEXT ANALYZER omb_lexeme BM25";
 
 /// DDL of one chunk table (global or per project): same fields, same HNSW definition.
 fn chunk_ddl(table: &str, dim: usize) -> String {
@@ -329,6 +308,7 @@ fn chunk_ddl(table: &str, dim: usize) -> String {
          DEFINE FIELD doc_updated_us ON {t} TYPE int;
          DEFINE FIELD content ON {t} TYPE string;
          DEFINE FIELD origin ON {t} TYPE string;
+         DEFINE FIELD lexemes ON {t} TYPE string;
          DEFINE FIELD embedding ON {t} TYPE array<float>;
          DEFINE INDEX {src_idx} ON {t} FIELDS source_path;
          DEFINE INDEX {emb_idx} ON {t} FIELDS embedding
@@ -686,11 +666,21 @@ impl SurrealView<'_> {
         project: Option<&str>,
         since_hours: Option<i32>,
     ) -> Result<Vec<Hit>> {
-        let terms = text_terms(query);
+        let terms: String = self
+            .pg
+            .db()
+            .await?
+            .query_one(
+                "SELECT array_to_string(tsvector_to_array(to_tsvector('simple', $1)), ' ')",
+                &[&query],
+            )
+            .await
+            .context("pg lexemes of the query")?
+            .get(0);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let mut conds = vec![format!("content @0@ {}", text(&terms))];
+        let mut conds = vec![format!("lexemes @0@ {}", text(&terms))];
         if let Some(p) = project {
             conds.push(format!("project = {}", text(p)));
         }
@@ -1030,20 +1020,6 @@ impl FillTable {
 #[cfg(test)]
 mod claim_row_tests;
 
-#[cfg(test)]
-mod text_terms_tests {
-    use super::text_terms;
-
-    #[test]
-    fn punctuation_is_not_a_term_and_a_query_of_only_punctuation_is_empty() {
-        assert_eq!(
-            text_terms("hello, world! 한글123 a_b"),
-            "hello world 한글123 a b"
-        );
-        assert_eq!(text_terms("!!! ... ?"), "");
-    }
-}
-
 /// Rows per page when reading `claim_row` back whole (a row carries the claim's `value`, not 11 KB
 /// of floats, but 20,000 of them at once is the answer size `KEY_PAGE` already ruled out).
 const CLAIM_ROW_PAGE: usize = 2_000;
@@ -1220,8 +1196,8 @@ pub(super) fn first_statement<T>(query: &str, statements: Vec<Vec<T>>) -> Result
 
 fn chunk_select(tail: &str) -> String {
     format!(
-        "SELECT c.id, c.source_path, c.project, {updated}, c.embedding, c.content, c.origin \
-         {CHUNK_FROM} {tail}",
+        "SELECT c.id, c.source_path, c.project, {updated}, c.embedding, c.content, c.origin, \
+         array_to_string(tsvector_to_array(c.tsv), ' ') {CHUNK_FROM} {tail}",
         updated = epoch_us("d.updated_at")
     )
 }
@@ -1241,13 +1217,14 @@ fn chunk_literal(r: &Row) -> (String, String) {
     let embedding: Vector = r.get(4);
     let literal = format!(
         "{{cid: {}, source_path: {}, project: {}, doc_updated_us: {}, content: {}, origin: {}, \
-         embedding: {}}}",
+         lexemes: {}, embedding: {}}}",
         text(&cid),
         text(&r.get::<_, String>(1)),
         text(&r.get::<_, String>(2)),
         r.get::<_, i64>(3),
         text(&r.get::<_, String>(5)),
         text(&r.get::<_, String>(6)),
+        text(&r.get::<_, String>(7)),
         floats(embedding.as_slice())
     );
     (cid, literal)
