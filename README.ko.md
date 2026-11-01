@@ -649,7 +649,7 @@ curl -s -X POST http://localhost:7710/mcp \
 - SSOT 문서: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
 - `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test` + Python py-compile·단위 테스트 + 셸 가드 테스트 + vault data-steward dry-run
 - `make quality` = MCP tool, vector 모드 문서, 제거된 위험 surface의 릴리즈 수용성 drift 게이트
-- CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
+- CI: `rust-gate` (includes `quality_gate`) · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
 
 ---
