@@ -53,6 +53,7 @@ for _var in (
     "RECALL_TIMEOUT",
     "RECALL_RETRIES",
     "RECALL_RELEVANCE_MAX_DIST",
+    "BORING_RECALL_CEILING",
     "BORING_DOOR_URL",
 ):
     os.environ.pop(_var, None)
@@ -866,7 +867,35 @@ class RecallFormattingTests(unittest.TestCase):
         self.assertIn("self-augmenting RAG recall", ctx)  # the injection fence is present
 
     _NEAR = {"source_path": "x/near.md", "snippet": "close", "dist": 0.3, "dist_kind": "vector_cosine"}
-    _FAR = {"source_path": "x/far.md", "snippet": "irrelevant", "dist": 0.9, "dist_kind": "vector_cosine"}
+    # `over_ceiling` is what the engine adds when the hook sends max_dist.
+    _FAR = {
+        "source_path": "x/far.md",
+        "snippet": "irrelevant",
+        "dist": 0.9,
+        "dist_kind": "vector_cosine",
+        "over_ceiling": True,
+    }
+
+    def test_the_engine_judges_the_ceiling_and_the_hook_only_asks_and_reports(self):
+        # dist 0.3 flagged by the engine is reported; dist 0.9 without a flag is not: the hook
+        # does not compare distances itself in engine mode. And it sent max_dist with /search.
+        flagged = {**self._NEAR, "over_ceiling": True}
+        search = mock.MagicMock(return_value=Ok([flagged, {**self._FAR, "over_ceiling": False}]))
+        _out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=search)
+        self.assertIn("would drop 1/2", err)
+        self.assertIn("near.md@0.3000", err)
+        self.assertNotIn("far.md@", err)
+        knobs = search.call_args.args[1]
+        self.assertEqual(knobs.max_dist, recall_core.RELEVANCE_MAX_DIST)
+
+    def test_python_ceiling_switch_is_the_rollback(self):
+        # Rollback: no max_dist is asked, the hook compares distances itself (flag ignored).
+        search = mock.MagicMock(return_value=Ok([{**self._FAR, "over_ceiling": False}]))
+        with mock.patch.object(recall_core, "CEILING_IN_PYTHON", True):
+            _out, err = self._run_main("a sufficiently long prompt", [], search_side_effect=search)
+        self.assertIn("far.md@0.9000", err)
+        self.assertIsNone(search.call_args.args[1].max_dist)
+
     # The fixtures sit far either side of the constant so retuning it cannot make these vacuous.
 
     def test_hit_over_the_ceiling_is_kept_and_only_reported(self):

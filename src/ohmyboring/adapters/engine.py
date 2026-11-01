@@ -39,6 +39,8 @@ class SearchKnobs:
     related: int = 0
     related_heads: int = 2
     claims: int = 0
+    #: Ask the engine to flag hits over this cosine distance (`over_ceiling: true`); None = no ask.
+    max_dist: float | None = None
 
 
 @dataclass(frozen=True)
@@ -231,6 +233,8 @@ class DrudgeClient:
             payload.update(related=knobs.related, related_heads=knobs.related_heads)
         if knobs.claims:
             payload["claims"] = knobs.claims
+        if knobs.max_dist is not None:
+            payload["max_dist"] = knobs.max_dist
         return map_ok(self.request("POST", "/search", payload), _hits_or_empty)
 
     def handover(
