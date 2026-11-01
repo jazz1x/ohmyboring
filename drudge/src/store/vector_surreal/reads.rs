@@ -4,8 +4,8 @@
 //! pass runs once per sync tick; the code tables' once per `code-sync`).
 //!
 //! Each reader is the SurrealQL of one pg query in `store.rs` / `code_index/store.rs`, condition
-//! for condition. Ordering that pg leaves to the column collation (`qualified_name`, paths) is
-//! byte order here.
+//! for condition. Where pg orders by the column collation (`qualified_name`, paths) Surreal
+//! orders with `COLLATE`; rows tied on every sort key have no defined order on either side.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -118,6 +118,8 @@ struct SymbolRow {
     end_line: i64,
     #[serde(default)]
     relative_path: Option<String>,
+    #[serde(default)]
+    rank: i32,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +139,30 @@ fn json_text(what: &str, raw: &str) -> Result<Value> {
 
 fn line(value: i64, what: &str) -> Result<usize> {
     usize::try_from(value).with_context(|| format!("code index {what} {value} is negative"))
+}
+
+/// The order pg's `ORDER BY text` gives identifiers and paths under the database's `en_US.utf8`
+/// collation (glibc): letters and digits first, case ignored and punctuation skipped; a tie goes
+/// to the lowercase spelling, then to the punctuation. Measured on the pgvector image
+/// (`parseGamma < Parse_Other < parse_token`, `a::b < a_b < ab < aB`); a non-ASCII text is only
+/// as good as `char::is_alphanumeric` and `to_lowercase`.
+fn en_us_order(a: &str, b: &str) -> Ordering {
+    let letters = |s: &str| -> Vec<char> {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let upper_flags = |s: &str| -> Vec<bool> {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .map(char::is_uppercase)
+            .collect()
+    };
+    letters(a)
+        .cmp(&letters(b))
+        .then_with(|| upper_flags(a).cmp(&upper_flags(b)))
+        .then_with(|| a.cmp(b))
 }
 
 /// pg's ascending sort puts NULL last.
@@ -411,37 +437,35 @@ impl SurrealClient {
             repository_id.map_or_else(String::new, |r| format!(" AND repository_id = {}", text(r)));
         let sql = format!(
             "SELECT cid, repository_id, kind, name, qualified_name, start_line, end_line,
-                    {path} AS relative_path
+                    {path} AS relative_path,
+                    (IF string::lowercase(name) = {needle} {{ 0 }}
+                     ELSE IF string::starts_with(string::lowercase(name), {needle}) {{ 1 }}
+                     ELSE IF string::starts_with(string::lowercase(qualified_name), {needle}) {{ 2 }}
+                     ELSE {{ 3 }}) AS rank
                FROM code_symbol
               WHERE {path} != NONE{repo}
                 AND (string::contains(string::lowercase(name), {needle})
                      OR string::contains(string::lowercase(qualified_name), {needle})
-                     OR string::contains(string::lowercase({path}), {needle}));"
+                     OR string::contains(string::lowercase({path}), {needle}))
+              ORDER BY rank ASC;"
         );
-        let rows: Vec<SymbolRow> = first_statement(&sql, self.rows(&sql).await?)?;
-        let lower = query.to_lowercase();
-        let rank = |r: &SymbolRow| {
-            let name = r.name.to_lowercase();
-            if name == lower {
-                0
-            } else if name.starts_with(&lower) {
-                1
-            } else if r.qualified_name.to_lowercase().starts_with(&lower) {
-                2
-            } else {
-                3
-            }
-        };
-        let mut ranked: Vec<(i32, SymbolRow)> = rows.into_iter().map(|r| (rank(&r), r)).collect();
-        ranked.sort_by(|(ra, a), (rb, b)| {
-            ra.cmp(rb)
-                .then_with(|| a.qualified_name.cmp(&b.qualified_name))
-                .then_with(|| a.relative_path.cmp(&b.relative_path))
+        let mut rows: Vec<SymbolRow> = first_statement(&sql, self.rows(&sql).await?)?;
+        rows.sort_by(|a, b| {
+            a.rank
+                .cmp(&b.rank)
+                .then_with(|| en_us_order(&a.qualified_name, &b.qualified_name))
+                .then_with(|| {
+                    en_us_order(
+                        a.relative_path.as_deref().unwrap_or(""),
+                        b.relative_path.as_deref().unwrap_or(""),
+                    )
+                })
+                .then_with(|| a.repository_id.cmp(&b.repository_id))
+                .then_with(|| a.cid.cmp(&b.cid))
         });
-        ranked
-            .into_iter()
+        rows.into_iter()
             .take(CODE_SEARCH_LIMIT)
-            .map(|(_, r)| symbol_hit(r))
+            .map(symbol_hit)
             .collect()
     }
 
