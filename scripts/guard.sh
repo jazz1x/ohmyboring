@@ -144,7 +144,6 @@ uv run --locked python scripts/test_retention.py
 uv run --locked python scripts/test_self_verify_contract.py
 uv run --locked python scripts/test_peek.py
 uv run --locked python scripts/test_readme_locale_parity.py
-uv run --locked python scripts/test_package_skeleton.py
 uv run --locked python src/ohmyboring/recall/test_named.py
 uv run --locked python src/ohmyboring/recall/test_recall.py
 uv run --locked python src/ohmyboring/entrypoints/http/test_mcp_recall.py

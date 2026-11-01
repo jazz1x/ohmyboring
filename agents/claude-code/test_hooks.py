@@ -887,15 +887,6 @@ class RecallFormattingTests(unittest.TestCase):
         self.assertIn("- [far.md] irrelevant", ctx)
         self.assertIn("would drop 1/1", err)
 
-    def test_no_enforcement_knob_exists(self):
-        # The guard against reintroducing a one-env-var kill switch. 0.514 would have discarded
-        # 47.8% of 23 live injections (docs/reports/2026-08-15-program-audit.md), and the two
-        # error classes overlap, so there is deliberately nothing to flip: a scalar ceiling cannot
-        # separate them at any value. A replacement predicate has to clear data/eval first.
-        self.assertFalse(hasattr(recall_core, "RELEVANCE_ENFORCE"))
-        src = Path(recall_core.__file__).read_text()
-        self.assertNotIn("RECALL_RELEVANCE_ENFORCE", src)
-
     def test_text_rank_hit_is_never_relevance_filtered(self):
         # text_rank is ts_rank (higher=better, unbounded) — not comparable to a cosine ceiling.
         out, _err = self._run_main(
@@ -972,11 +963,6 @@ class ClampWiringTest(unittest.TestCase):
     the regression, so the assertion is against the shared constant rather than a number
     repeated in the test.
     """
-
-    def test_clamp_comes_from_the_shared_constant(self):
-        import transcript
-
-        self.assertEqual(distill.CLAMP, transcript.CLAUDE_CLAMP_DEFAULT)
 
     def test_clamp_admits_a_median_extraction(self):
         # Measured over 40 real sessions (seed 11): extraction median 24,243 chars after

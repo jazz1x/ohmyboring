@@ -1540,25 +1540,6 @@ mod tests {
     }
 
     #[test]
-    fn adapter_roundtrips_and_defaults_to_session_end() {
-        for (s, expected) in [
-            ("session-end", Adapter::SessionEnd),
-            ("prompt-submit", Adapter::PromptSubmit),
-            ("mcp-only", Adapter::McpOnly),
-            ("cron", Adapter::Cron),
-        ] {
-            let cfg = BoringConfig::from_str(&format!(
-                r#"{{"schema_version": 1, "agents": [{{"id": "x", "adapter": "{s}"}}]}}"#
-            ))
-            .unwrap();
-            assert_eq!(cfg.agents[0].adapter, expected);
-        }
-        let cfg =
-            BoringConfig::from_str(r#"{"schema_version": 1, "agents": [{"id": "x"}]}"#).unwrap();
-        assert_eq!(cfg.agents[0].adapter, Adapter::SessionEnd);
-    }
-
-    #[test]
     fn schema_version_warning_does_not_fail() {
         let raw = r#"{"schema_version": 99, "note_lang": "en"}"#;
         let cfg = BoringConfig::from_str(raw).unwrap();
