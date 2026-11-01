@@ -303,3 +303,80 @@ async fn a_mass_delete_catch_up_rebuilds_the_claim_index_instead_of_deleting_thr
         .expect("knn");
     assert_eq!(near[0].as_array().expect("rows").len(), 3);
 }
+
+/// `total` claims in pg (bulk SQL, one scan each), mirrored into Surreal, then all but `kept`
+/// deleted in pg only and levelled by `catch_up`: the step "mass delete -> define the next HNSW
+/// generation right away". The claim table must hold an HNSW index when `catch_up` returns, and
+/// `claim_row` must equal pg's.
+async fn mass_delete_leaves_an_index(namespace: &str, total: i64, kept: i64) {
+    // A small dimension keeps 150k indexed rows inside the throwaway server (1024 dims ran it out of memory in the fill).
+    let dim = 16;
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
+    let config: SurrealConfig =
+        serde_json::from_value(json!({"url": url, "namespace": namespace, "database": namespace}))
+            .unwrap();
+    let client = SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap();
+    let store = Store::open(&dsn, dim).await.expect("open store");
+    let (db, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    db.batch_execute("DELETE FROM chunk; DELETE FROM claim; DELETE FROM document;")
+        .await
+        .unwrap();
+    client.fill_from(&store).await.expect("fill of an empty pg");
+
+    let path = "/vault/wiki/claim-mass.md";
+    store
+        .upsert_document(&front(path), "sha", SystemTime::now())
+        .await
+        .expect("document");
+    db.execute(
+        "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
+         SELECT 'claim-mass-' || lpad(i::text, 7, '0'), 'goal',
+                'a long enough value to count as a statement', $1, now() - make_interval(secs => i),
+                ('[' || (i / 1000000.0)::text || repeat(',0.01', $3::int - 2) || ',1]')::vector,
+                'decision', 'certain'
+         FROM generate_series(1, $2::bigint) AS i",
+        &[&path, &total, &i32::try_from(dim).unwrap()],
+    )
+    .await
+    .expect("bulk claims");
+    client.fill_from(&store).await.expect("fill");
+    db.execute(
+        "DELETE FROM claim WHERE subject > $1",
+        &[&format!("claim-mass-{kept:07}")],
+    )
+    .await
+    .unwrap();
+
+    let caught = client.catch_up(&store).await;
+    let info = client.run("INFO FOR TABLE claim;").await.expect("info");
+    let indexes: Vec<String> = info[0]["indexes"]
+        .as_object()
+        .expect("indexes")
+        .keys()
+        .cloned()
+        .collect();
+    assert!(caught.is_ok(), "catch_up: {caught:#?}; indexes {indexes:?}");
+    assert!(
+        indexes.iter().any(|n| n.starts_with("claim_embedding")),
+        "no HNSW index on claim after catch_up: {indexes:?}"
+    );
+    for t in client.compare(&store).await.expect("compare") {
+        assert!(t.same(), "after the mass delete: {}", t.line());
+    }
+    let diff = client.claim_row_diff(&store).await.expect("diff");
+    assert!(diff.same(), "{}", diff.line());
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_mass_delete_then_define_leaves_an_index_after_deleting_all_40k() {
+    mass_delete_leaves_an_index("claim_mass_40k", 40_000, 0).await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_mass_delete_then_define_leaves_an_index_after_deleting_all_150k() {
+    mass_delete_leaves_an_index("claim_mass_150k", 150_000, 0).await;
+}
