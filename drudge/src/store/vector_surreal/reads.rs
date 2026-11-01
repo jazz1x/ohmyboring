@@ -146,7 +146,7 @@ fn line(value: i64, what: &str) -> Result<usize> {
 /// to the lowercase spelling, then to the punctuation. Measured on the pgvector image
 /// (`parseGamma < Parse_Other < parse_token`, `a::b < a_b < ab < aB`); a non-ASCII text is only
 /// as good as `char::is_alphanumeric` and `to_lowercase`.
-fn en_us_order(a: &str, b: &str) -> Ordering {
+pub(super) fn en_us_order(a: &str, b: &str) -> Ordering {
     let letters = |s: &str| -> Vec<char> {
         s.chars()
             .filter(|c| c.is_alphanumeric())

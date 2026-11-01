@@ -666,3 +666,609 @@ async fn a_claim_written_only_into_surreal_is_read_back_without_pg() {
         .expect("vector search");
     assert_eq!(hits.len(), 1);
 }
+
+// ── claim reads (Z2③b) ───────────────────────────────────────────────────────────────────────
+
+/// The register-side claim reads — what `brief` and `next_actions` stand on — answer from Surreal:
+/// a claim that exists only there (pg holds none: Z1) shows up in `stalled_claims`,
+/// `stalled_register_rows` and `north_star_claims`.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn stalled_and_north_star_reads_see_a_claim_only_surreal_holds() {
+    let dsn = env("BORING_TEST_DATABASE_URL");
+    let pg = Store::open(&dsn, DIM).await.expect("open store");
+    let db = pg_client().await;
+    db.batch_execute("DELETE FROM claim; DELETE FROM document;")
+        .await
+        .unwrap();
+    let client = client_at(&format!("z2rb_only_{}", nanos()));
+    client.fill_from(&pg).await.expect("fill of an empty pg");
+    let routed = Store::open(&dsn, DIM)
+        .await
+        .unwrap()
+        .with_vector_route(VectorRoute::Surreal(client));
+
+    let n = nanos();
+    let project = format!("z2rb-only-{n}");
+    let emb = tilted(1, 0.95, 7);
+    // two notes: the stalled list keeps one claim per note
+    for (i, (subject, predicate, kind)) in [
+        (format!("stalled-{n}"), "next", "next"),
+        (Store::north_star_subject(&project), "goal", "decision"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("/vault/wiki/z2rb-only-{n}-{i}.md");
+        routed
+            .upsert_document(
+                &front(&path, &project, "personal"),
+                "sha",
+                SystemTime::now(),
+            )
+            .await
+            .unwrap();
+        routed
+            .upsert_claim_with_anchor(
+                &subject,
+                predicate,
+                &format!("a long enough value to count as a statement {i}"),
+                &path,
+                SystemTime::now() - Duration::from_hours(24 * 20 + i as u64),
+                &emb,
+                kind,
+                "certain",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let in_pg: i64 = db
+        .query_one("SELECT count(*) FROM claim", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(in_pg, 0, "Z1: the claims were written to Surreal only");
+
+    let stalled = routed
+        .stalled_claims(10, Some(&project), None, &[], 14)
+        .await
+        .expect("stalled_claims");
+    println!(
+        "Z2R stalled_claims, claim only in Surreal: {}/2",
+        stalled.len()
+    );
+    assert_eq!(
+        stalled.len(),
+        2,
+        "stalled_claims must read Surreal's claims"
+    );
+    let register = routed
+        .stalled_register_rows(10, Some(&project), None, &[], 14)
+        .await
+        .expect("stalled_register_rows");
+    println!(
+        "Z2R stalled_register_rows, claim only in Surreal: {}/2 total {}",
+        register.rows.len(),
+        register.total_matching
+    );
+    assert_eq!((register.rows.len(), register.total_matching), (2, 2));
+    let star = routed
+        .north_star_claims(&project, &[])
+        .await
+        .expect("north_star_claims");
+    println!(
+        "Z2R north_star_claims, claim only in Surreal: {}/1",
+        star.len()
+    );
+    assert_eq!(star.len(), 1);
+}
+
+/// One claim to seed: (note, subject, predicate, kind, age in hours, anchor+hash+symbol, said_by).
+type Seed<'a> = (
+    usize,
+    String,
+    &'a str,
+    &'a str,
+    u64,
+    Option<(&'a str, &'a str, Option<&'a str>)>,
+    bool,
+);
+
+/// (name, project, kinds, exclude_origins, older_than_days) of one stalled-list ask.
+type StalledAsk<'a> = (
+    &'a str,
+    Option<&'a str>,
+    Option<&'a [String]>,
+    &'a [String],
+    i64,
+);
+
+/// Every moved claim read answers the same from Surreal as from pg over the same rows (a tie
+/// group of three subjects at one `valid_from` — mixed case and punctuation — included; Korean
+/// values are in the rows, but a Korean tie-break subject is not: see `en_us_order`).
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn claim_reads_equal_pg_over_the_same_rows() {
+    use drudge::frontmatter::{Claim, SaidBy};
+    let dsn = env("BORING_TEST_DATABASE_URL");
+    let pg = Store::open(&dsn, DIM).await.expect("open store");
+    let db = pg_client().await;
+    db.batch_execute(
+        "DELETE FROM claim; DELETE FROM edge; DELETE FROM node; DELETE FROM document;",
+    )
+    .await
+    .unwrap();
+    let n = nanos();
+    let project = format!("z2rb-{n}");
+    let other = format!("z2rb-other-{n}");
+    let paths: Vec<String> = (0..7)
+        .map(|i| {
+            if i == 5 {
+                format!("/vault/wiki/eval-z2rb-{n}.md")
+            } else {
+                format!("/vault/wiki/z2rb-{n}-{i}.md")
+            }
+        })
+        .collect();
+    let now = SystemTime::now();
+    for (i, path) in paths.iter().enumerate() {
+        let (proj, origin) = match i {
+            4 => (&project, "company"),
+            6 => (&other, "personal"),
+            _ => (&project, "personal"),
+        };
+        pg.upsert_document(&front(path, proj, origin), "sha", now)
+            .await
+            .unwrap();
+    }
+    let days = |d: u64, h: u64| 24 * d + h;
+    let long = |s: &str| format!("a long enough value for the claim {s}, 한글 \"인용\" \\");
+    let star = Store::north_star_subject(&project);
+    let seeds: Vec<Seed> = vec![
+        (
+            0,
+            format!("s0a-{n}"),
+            "next",
+            "next",
+            days(20, 5),
+            None,
+            false,
+        ),
+        (
+            0,
+            format!("s0b-{n}"),
+            "decision",
+            "decision",
+            days(25, 0),
+            None,
+            false,
+        ),
+        (
+            0,
+            star.clone(),
+            "goal",
+            "decision",
+            days(28, 0),
+            None,
+            false,
+        ),
+        (
+            1,
+            format!("s1a-{n}"),
+            "blocked",
+            "blocked",
+            days(18, 0),
+            Some(("code:src/z2rb/a.rs:10", "h1", Some("fn_a"))),
+            true,
+        ),
+        (
+            1,
+            format!("s1b-{n}"),
+            "risk",
+            "risk",
+            days(2, 0),
+            None,
+            false,
+        ),
+        (
+            1,
+            format!("alpha-{n}"),
+            "observed",
+            "risk",
+            days(2, 7),
+            None,
+            false,
+        ),
+        (
+            1,
+            format!("Beta-{n}"),
+            "observed",
+            "risk",
+            days(2, 7),
+            None,
+            false,
+        ),
+        (
+            1,
+            format!("gamma_x-{n}"),
+            "observed",
+            "risk",
+            days(2, 7),
+            None,
+            false,
+        ),
+        (
+            1,
+            star.clone(),
+            "check",
+            "decision",
+            days(10, 0),
+            None,
+            false,
+        ),
+        (
+            2,
+            format!("s2a-{n}"),
+            "next",
+            "next",
+            days(22, 0),
+            Some(("code:src/z2rb/b.rs:20", "h2", None)),
+            true,
+        ),
+        (
+            2,
+            format!("s2b-{n}"),
+            "fact",
+            "fact",
+            days(40, 0),
+            None,
+            false,
+        ),
+        // the same note rewrites its slot: the 21-day row is sealed by the 19-day one
+        (
+            3,
+            format!("shared-{n}"),
+            "plan",
+            "next",
+            days(21, 0),
+            None,
+            false,
+        ),
+        (
+            3,
+            format!("shared-{n}"),
+            "plan",
+            "next",
+            days(19, 0),
+            None,
+            false,
+        ),
+        (
+            3,
+            format!("s3b-{n}"),
+            "next",
+            "next",
+            days(12, 0),
+            Some(("code:src/z2rb/c.rs:30", "h3", None)),
+            false,
+        ),
+        (
+            4,
+            format!("s4a-{n}"),
+            "next",
+            "next",
+            days(23, 0),
+            Some(("code:src/z2rb/d.rs:40", "h4", Some("fn_d"))),
+            false,
+        ),
+        (
+            5,
+            format!("s5a-{n}"),
+            "next",
+            "next",
+            days(24, 0),
+            None,
+            false,
+        ),
+        (
+            0,
+            format!("rule-b-{n}"),
+            "when",
+            "rule",
+            days(5, 0),
+            None,
+            false,
+        ),
+        (
+            1,
+            format!("Rule-a-{n}"),
+            "when",
+            "rule",
+            days(6, 0),
+            None,
+            false,
+        ),
+        (
+            2,
+            format!("rule-b-{n}"),
+            "then",
+            "rule",
+            days(7, 0),
+            None,
+            false,
+        ),
+        (
+            6,
+            format!("s6a-{n}"),
+            "next",
+            "next",
+            days(21, 0),
+            None,
+            false,
+        ),
+    ];
+    let emb = tilted(1, 0.9, 3);
+    for (note, subject, predicate, kind, age_h, anchor, owner) in &seeds {
+        let path = &paths[*note];
+        let proj = if *note == 6 { &other } else { &project };
+        let value = if subject.starts_with("s0b") {
+            "short".to_owned()
+        } else if *predicate == "plan" {
+            long(&format!("{subject} at {age_h}h"))
+        } else {
+            long(subject)
+        };
+        pg.upsert_claim_with_anchor(
+            subject,
+            predicate,
+            &value,
+            path,
+            now - Duration::from_hours(*age_h),
+            &emb,
+            kind,
+            "certain",
+            anchor.map(|a| a.0),
+            anchor.map(|a| a.1),
+            anchor.and_then(|a| a.2),
+        )
+        .await
+        .unwrap();
+        pg.upsert_claim_node(
+            path,
+            proj,
+            subject,
+            predicate,
+            &Claim {
+                subject: subject.clone(),
+                predicate: (*predicate).to_owned(),
+                value,
+                kind: (*kind).to_owned(),
+                confidence: "certain".to_owned(),
+                said_by: owner.then_some(SaidBy::Owner),
+            },
+        )
+        .await
+        .unwrap();
+        if *owner {
+            pg.mirror_claim_said_by(subject, predicate, path, Some(SaidBy::Owner))
+                .await
+                .unwrap();
+        }
+    }
+    db.execute(
+        "UPDATE claim SET stale_at = now(), stale_reason = 'gone' WHERE subject = $1",
+        &[&format!("s3b-{n}")],
+    )
+    .await
+    .unwrap();
+
+    let client = client_at(&format!("z2rb_eq_{n}"));
+    let tables = client.fill_from(&pg).await.expect("fill");
+    assert!(tables.iter().all(drudge::store::FillTable::same), "fill");
+    let routed = Store::open(&dsn, DIM)
+        .await
+        .unwrap()
+        .with_vector_route(VectorRoute::Surreal(client));
+
+    let company = vec!["company".to_string()];
+    let next = vec!["next".to_string()];
+    let none: Vec<String> = Vec::new();
+
+    // north star
+    for (name, exclude) in [
+        ("north_star_claims", &none),
+        ("north_star_claims exclude", &company),
+    ] {
+        let a = pg.north_star_claims(&project, exclude).await.unwrap();
+        let b = routed.north_star_claims(&project, exclude).await.unwrap();
+        assert!(!a.is_empty(), "{name}: oracle empty");
+        same(name, &a, &b);
+    }
+
+    // stalled lists
+    let stalled_asks: Vec<StalledAsk> = vec![
+        ("project", Some(&project), None, &none, 14),
+        ("project, kinds", Some(&project), Some(&next), &none, 14),
+        (
+            "project, exclude origin",
+            Some(&project),
+            None,
+            &company,
+            14,
+        ),
+        ("no project", None, None, &none, 14),
+        ("older than 21d", Some(&project), None, &none, 21),
+        ("k=2", Some(&project), None, &none, 14),
+    ];
+    for (name, proj, kinds, exclude, older) in stalled_asks {
+        let k = if name == "k=2" { 2 } else { 50 };
+        let a = pg
+            .stalled_claims(k, proj, kinds, exclude, older)
+            .await
+            .unwrap();
+        let b = routed
+            .stalled_claims(k, proj, kinds, exclude, older)
+            .await
+            .unwrap();
+        assert!(!a.is_empty(), "stalled_claims {name}: oracle empty");
+        same(&format!("stalled_claims {name}"), &a, &b);
+        let a = pg
+            .stalled_register_rows(k, proj, kinds, exclude, older)
+            .await
+            .unwrap();
+        let b = routed
+            .stalled_register_rows(k, proj, kinds, exclude, older)
+            .await
+            .unwrap();
+        assert!(
+            !a.rows.is_empty(),
+            "stalled_register_rows {name}: oracle empty"
+        );
+        assert_eq!(a.total_matching, b.total_matching, "{name}: total_matching");
+        same(&format!("stalled_register_rows {name}"), &a.rows, &b.rows);
+    }
+
+    // declared claims, per note
+    let flat = |m: std::collections::HashMap<String, drudge::store::RegisterRows>| {
+        let mut v: Vec<(String, i64, String)> = m
+            .into_iter()
+            .map(|(p, r)| (p, r.total_matching, format!("{:?}", r.rows)))
+            .collect();
+        v.sort();
+        v
+    };
+    for per_doc in [10_i64, 2] {
+        let a = flat(pg.declared_claims(&paths, per_doc).await.unwrap());
+        let b = flat(routed.declared_claims(&paths, per_doc).await.unwrap());
+        assert!(a.len() >= 5, "declared_claims: oracle {} notes", a.len());
+        same(&format!("declared_claims per_doc={per_doc}"), &a, &b);
+    }
+
+    // /claim-source, /claim-sources, /claim-priors
+    for subject in [
+        format!("shared-{n}"),
+        format!("s1a-{n}"),
+        star.clone(),
+        "absent".to_owned(),
+    ] {
+        let a = pg.claim_source_rows(&subject).await.unwrap();
+        let b = routed.claim_source_rows(&subject).await.unwrap();
+        assert!(
+            subject == "absent" || !a.is_empty(),
+            "{subject}: oracle empty"
+        );
+        same(&format!("claim_source_rows {subject}"), &a, &b);
+    }
+    for predicate in ["next", "plan", "blocked"] {
+        let a = pg.claim_source_list_rows(predicate).await.unwrap();
+        let b = routed.claim_source_list_rows(predicate).await.unwrap();
+        assert!(!a.is_empty(), "{predicate}: oracle empty");
+        same(&format!("claim_source_list_rows {predicate}"), &a, &b);
+    }
+    let mut sealed_priors = 0;
+    for path in &paths {
+        let a = pg.claim_priors(path).await.unwrap();
+        let b = routed.claim_priors(path).await.unwrap();
+        sealed_priors += a
+            .iter()
+            .filter(|p| format!("{p:?}").contains("Prior("))
+            .count();
+        same(&format!("claim_priors {path}"), &a, &b);
+    }
+    assert!(
+        sealed_priors > 0,
+        "claim_priors: no sealed prior in the oracle"
+    );
+
+    // /rules, /repairs/split-subjects{,/samples}
+    let a: Vec<String> = pg
+        .rule_rows()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| format!("{r:?}"))
+        .collect();
+    let b: Vec<String> = routed
+        .rule_rows()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| format!("{r:?}"))
+        .collect();
+    assert_eq!(a.len(), 3, "rule_rows: oracle");
+    same("rule_rows", &a, &b);
+    let sorted_pairs = |mut v: Vec<(String, String)>| {
+        v.sort();
+        v
+    };
+    let a = sorted_pairs(pg.split_subject_rows().await.unwrap());
+    let b = sorted_pairs(routed.split_subject_rows().await.unwrap());
+    assert!(a.len() > 10, "split_subject_rows: oracle");
+    same("split_subject_rows", &a, &b);
+    let variants = vec![
+        format!("shared-{n}"),
+        format!("s1a-{n}"),
+        star.clone(),
+        format!("rule-b-{n}"),
+    ];
+    let a = pg.split_samples(&variants).await.unwrap();
+    let b = routed.split_samples(&variants).await.unwrap();
+    assert!(a.len() >= 4, "split_samples: oracle");
+    same("split_samples", &a, &b);
+
+    // owner-said counts, audit counts
+    let sorted = |m: std::collections::HashMap<String, i64>| {
+        let mut v: Vec<(String, i64)> = m.into_iter().collect();
+        v.sort();
+        v
+    };
+    let a = sorted(pg.said_by_owner_counts(&paths).await.unwrap());
+    let b = sorted(routed.said_by_owner_counts(&paths).await.unwrap());
+    assert!(!a.is_empty(), "said_by_owner_counts: oracle empty");
+    same("said_by_owner_counts", &a, &b);
+    let a = pg.claim_era_counts().await.unwrap();
+    let b = routed.claim_era_counts().await.unwrap();
+    assert!(a.anchored + a.unanchored + a.pre_anchor > 0 && a.label_only > 0);
+    same("claim_era_counts", &[a], &[b]);
+    let a = pg.claim_stale_count().await.unwrap();
+    let b = routed.claim_stale_count().await.unwrap();
+    assert_eq!(a, 1, "claim_stale_count: oracle");
+    same("claim_stale_count", &[a], &[b]);
+
+    // anchor check work list: from the start, after a watermark, up to it
+    let all = pg.claims_due_for_anchor_check(None, 50).await.unwrap();
+    assert!(all.len() >= 3, "anchor check: oracle {} rows", all.len());
+    let b_all = routed.claims_due_for_anchor_check(None, 50).await.unwrap();
+    same("claims_due_for_anchor_check start", &all, &b_all);
+    let a = pg.claims_due_for_anchor_check(None, 2).await.unwrap();
+    let b = routed.claims_due_for_anchor_check(None, 2).await.unwrap();
+    same("claims_due_for_anchor_check limit 2", &a, &b);
+    let mark = AnchorCheckWatermark {
+        valid_from: all[1].valid_from,
+        subject: all[1].subject.clone(),
+        predicate: all[1].predicate.clone(),
+    };
+    let a = pg
+        .claims_due_for_anchor_check(Some(&mark), 50)
+        .await
+        .unwrap();
+    let b = routed
+        .claims_due_for_anchor_check(Some(&mark), 50)
+        .await
+        .unwrap();
+    assert!(!a.is_empty());
+    same("claims_due_for_anchor_check after watermark", &a, &b);
+    let a = pg
+        .claims_due_for_anchor_check_head(&mark, 50)
+        .await
+        .unwrap();
+    let b = routed
+        .claims_due_for_anchor_check_head(&mark, 50)
+        .await
+        .unwrap();
+    assert_eq!(a.len(), 2);
+    same("claims_due_for_anchor_check_head", &a, &b);
+}

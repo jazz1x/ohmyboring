@@ -644,6 +644,18 @@ impl RegisterRow {
             project,
         }
     }
+
+    /// The plain claim this row carries (no `said_by`: a register row never held one).
+    pub fn into_claim(self) -> Claim {
+        Claim {
+            subject: self.subject,
+            predicate: self.predicate,
+            value: self.value,
+            kind: self.kind,
+            confidence: self.confidence,
+            said_by: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2047,14 +2059,7 @@ impl Store {
                 Ok(answer
                     .rows
                     .into_iter()
-                    .map(|r| Claim {
-                        subject: r.subject,
-                        predicate: r.predicate,
-                        value: r.value,
-                        kind: r.kind,
-                        confidence: r.confidence,
-                        said_by: None,
-                    })
+                    .map(RegisterRow::into_claim)
                     .collect())
             }
         }
@@ -2116,7 +2121,7 @@ impl Store {
     /// Current `decision` claims stored as a repository's north star: subject
     /// `north-star:<project>`, predicate `goal` / `check`, newest `valid_from` per predicate.
     /// Fetch only — the card puts them first (`ask::with_north_star`).
-    pub async fn north_star_claims(
+    async fn north_star_claims_pg(
         &self,
         project: &str,
         exclude_origins: &[String],
@@ -2159,7 +2164,7 @@ impl Store {
 
     /// Stalled claims: current claims whose valid_from is older than `older_than_days`.
     /// Ordered oldest-first so the longest-frozen items surface first.
-    pub async fn stalled_claims(
+    async fn stalled_claims_pg(
         &self,
         k: i64,
         project: Option<&str>,
@@ -2311,7 +2316,7 @@ impl Store {
     /// their own fact-free SQL). Most solving kind first (`decision`, then `next`/`blocked`, then `risk`, then the rest),
     /// newest `valid_from` first within a kind, at most `per_doc` rows per document, with the
     /// full qualifying count in `total_matching` so a cut is stated, not silent.
-    pub async fn declared_claims(
+    async fn declared_claims_pg(
         &self,
         paths: &[String],
         per_doc: i64,
@@ -2387,7 +2392,7 @@ impl Store {
 
     /// Stalled claims for a register answer: same window as `stalled_claims`, newest-first,
     /// plus the full match count so the cut is stated, not silent.
-    pub async fn stalled_register_rows(
+    async fn stalled_register_rows_pg(
         &self,
         k: i64,
         project: Option<&str>,
@@ -2824,7 +2829,7 @@ impl Store {
     }
 
     /// Current `rule` claims for `GET /rules` (SQL copied from the Python door).
-    pub async fn rule_rows(&self) -> Result<Vec<crate::rules::RuleRow>> {
+    async fn rule_rows_pg(&self) -> Result<Vec<crate::rules::RuleRow>> {
         let rows = self
             .db()
             .await?
@@ -2845,7 +2850,7 @@ impl Store {
     /// Current claims of one subject for `GET /claim-source` (SQL copied from the Python door).
     /// `valid_from` is rendered in UTC; the Python door renders in the psycopg connection's
     /// TimeZone, which is unverified.
-    pub async fn claim_source_rows(
+    async fn claim_source_rows_pg(
         &self,
         subject: &str,
     ) -> Result<Vec<crate::claim_source::ClaimRow>> {
@@ -2869,7 +2874,7 @@ impl Store {
 
     /// Current claims of one predicate for `GET /claim-sources` (SQL copied from the Python door).
     /// Same UTC-vs-connection-TimeZone caveat as `claim_source_rows`.
-    pub async fn claim_source_list_rows(
+    async fn claim_source_list_rows_pg(
         &self,
         predicate: &str,
     ) -> Result<Vec<crate::claim_source::ListRow>> {
@@ -2895,7 +2900,7 @@ impl Store {
     }
 
     /// Current claims of one note with the sealed value each replaced, for `GET /claim-priors`.
-    pub async fn claim_priors(&self, source: &str) -> Result<Vec<crate::claim_priors::ClaimPrior>> {
+    async fn claim_priors_pg(&self, source: &str) -> Result<Vec<crate::claim_priors::ClaimPrior>> {
         let rows = self
             .db()
             .await?
@@ -2920,7 +2925,7 @@ impl Store {
 
     /// Every live claim's `(subject, source_path)` for `GET /repairs/split-subjects`. No ORDER BY:
     /// the grouping sorts, so row order changes nothing.
-    pub async fn split_subject_rows(&self) -> Result<Vec<(String, String)>> {
+    async fn split_subject_rows_pg(&self) -> Result<Vec<(String, String)>> {
         let rows = self
             .db()
             .await?
@@ -2932,7 +2937,7 @@ impl Store {
 
     /// Per-predicate row counts and the longest value of the given spellings, for
     /// `GET /repairs/split-subjects/samples`.
-    pub async fn split_samples(
+    async fn split_samples_pg(
         &self,
         variants: &[String],
     ) -> Result<Vec<crate::split_subjects::Sample>> {
@@ -3987,7 +3992,7 @@ impl Store {
 
     /// Current claims the owner said, per note, from the note's own claim rows — a claim node is
     /// a slot shared by every note that states it, so the edges cannot say whose row it was.
-    pub async fn said_by_owner_counts(&self, paths: &[String]) -> Result<HashMap<String, i64>> {
+    async fn said_by_owner_counts_pg(&self, paths: &[String]) -> Result<HashMap<String, i64>> {
         let rows = self
             .db()
             .await?
@@ -4392,7 +4397,7 @@ impl Store {
         })
     }
 
-    pub async fn claim_era_counts(&self) -> Result<ClaimEraCounts> {
+    async fn claim_era_counts_pg(&self) -> Result<ClaimEraCounts> {
         let row = self
             .db()
             .await?
@@ -4419,7 +4424,7 @@ impl Store {
         })
     }
 
-    pub async fn claim_stale_count(&self) -> Result<usize> {
+    async fn claim_stale_count_pg(&self) -> Result<usize> {
         let db = self.db().await?;
         pg_count(
             &db,
@@ -4467,7 +4472,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn claims_due_for_anchor_check(
+    async fn claims_due_for_anchor_check_pg(
         &self,
         after: Option<&AnchorCheckWatermark>,
         limit: usize,
@@ -4495,7 +4500,7 @@ impl Store {
         Ok(rows.iter().map(anchor_check_row_from).collect())
     }
 
-    pub async fn claims_due_for_anchor_check_head(
+    async fn claims_due_for_anchor_check_head_pg(
         &self,
         watermark: &AnchorCheckWatermark,
         limit: usize,
