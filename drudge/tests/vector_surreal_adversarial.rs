@@ -1,7 +1,9 @@
 //! Two attacks on the Surreal route.
 //!
-//! A. The Surreal copy is frozen at fill time. A row whose origin, project or window membership
-//!    changes in pgvector afterwards must not come back through the stale copy.
+//! A. A ranking row (`claim`, `chunk`) can be older than the base rows (`claim_row`, `document`)
+//!    Surreal answers from. A row whose origin, project, kind, anchor, stale mark or window
+//!    membership changed in the base rows must not come back through its stale ranking row. The
+//!    same change is made in pg too, and the pg-backed answer is the oracle.
 //! B. Text that is hostile to SurrealQL (quotes, backslash, a record-id shape, an injection
 //!    attempt) used as a filter value must match exactly what it says, return no extra rows,
 //!    and leave the tables intact.
@@ -148,7 +150,7 @@ fn query_vec() -> Vec<f32> {
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn a_row_changed_in_pg_after_the_fill_does_not_come_back() {
+async fn a_row_changed_in_the_base_rows_after_ranking_does_not_come_back() {
     let f = fixture("adv_a", false).await;
     let q = query_vec();
     let company = vec!["company".to_string()];
@@ -161,25 +163,26 @@ async fn a_row_changed_in_pg_after_the_fill_does_not_come_back() {
         .unwrap();
     assert_eq!(claims.len(), 4, "baseline claims");
 
-    // after the fill: doc 0 turns company, chunk 1 moves project, doc 2 ages out of the window
-    f.db.execute(
-        "UPDATE document SET origin = 'company' WHERE source_path = $1",
-        &[&f.paths[0]],
+    // after ranking: doc 0 turns company, chunk 1 moves project, doc 2 ages out of the window.
+    // Only the base rows move; `claim.origin` and `chunk.doc_updated_us` keep their old values.
+    let aged_us = i64::try_from(
+        (SystemTime::now() - Duration::from_hours(100))
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
     )
-    .await
     .unwrap();
-    f.db.execute(
-        "UPDATE chunk SET project = 'moved-away' WHERE id = $1",
-        &[&format!("{}#0", f.paths[1])],
-    )
-    .await
-    .unwrap();
-    f.db.execute(
-        "UPDATE document SET updated_at = now() - interval '100 hours' WHERE source_path = $1",
-        &[&f.paths[2]],
-    )
-    .await
-    .unwrap();
+    f.client
+        .run(&format!(
+            "UPDATE type::record('document', '{p0}') SET origin = 'company';
+             UPDATE chunk SET project = 'moved-away' WHERE cid = '{p1}#0';
+             UPDATE type::record('document', '{p2}') SET updated_us = {aged_us};",
+            p0 = f.paths[0],
+            p1 = f.paths[1],
+            p2 = f.paths[2],
+        ))
+        .await
+        .unwrap();
 
     let subjects: Vec<String> = f
         .store
@@ -342,9 +345,11 @@ async fn subjects_of(
 
 /// One claim of a filled fixture stops matching a predicate other than origin/project/window after
 /// the fill. The Surreal-backed answer must drop it exactly as the pgvector-backed one does.
+/// `change` returns the pg statement (the oracle's data) and the Surreal statement on the base
+/// row (`claim_row`), which leaves the ranking row in `claim` stale.
 async fn claim_stops_matching(
     case: &str,
-    change: impl FnOnce(&Fixture) -> String,
+    change: impl FnOnce(&Fixture) -> (String, String),
     kinds: Option<Vec<String>>,
     anchor_path: Option<&str>,
     include_stale: bool,
@@ -356,7 +361,9 @@ async fn claim_stops_matching(
     let baseline = subjects_of(&f.store, &f.project, kinds, anchor_path, include_stale).await;
     assert_eq!(baseline.len(), 4, "{case}: baseline");
 
-    f.db.batch_execute(&change(&f)).await.unwrap();
+    let (pg_sql, surreal_sql) = change(&f);
+    f.db.batch_execute(&pg_sql).await.unwrap();
+    f.client.run(&surreal_sql).await.unwrap();
 
     let gone = format!("subject-{}-0", f.nanos);
     let mut from_pg = subjects_of(&oracle, &f.project, kinds, anchor_path, include_stale).await;
@@ -378,13 +385,14 @@ async fn claim_stops_matching(
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn a_claim_whose_kind_changed_in_pg_after_the_fill_does_not_come_back() {
+async fn a_claim_whose_kind_changed_in_the_base_row_after_ranking_does_not_come_back() {
     claim_stops_matching(
         "kind",
         |f| {
-            format!(
-                "UPDATE claim SET kind = 'decision' WHERE subject = 'subject-{}-0'",
-                f.nanos
+            let s = format!("subject = 'subject-{}-0'", f.nanos);
+            (
+                format!("UPDATE claim SET kind = 'decision' WHERE {s}"),
+                format!("UPDATE claim_row SET kind = 'decision' WHERE {s};"),
             )
         },
         Some(vec!["risk".to_string()]),
@@ -396,13 +404,14 @@ async fn a_claim_whose_kind_changed_in_pg_after_the_fill_does_not_come_back() {
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn a_claim_marked_stale_in_pg_after_the_fill_does_not_come_back() {
+async fn a_claim_marked_stale_in_the_base_row_after_ranking_does_not_come_back() {
     let f = claim_stops_matching(
         "stale",
         |f| {
-            format!(
-                "UPDATE claim SET stale_at = now(), stale_reason = 'gone' WHERE subject = 'subject-{}-0'",
-                f.nanos
+            let s = format!("subject = 'subject-{}-0'", f.nanos);
+            (
+                format!("UPDATE claim SET stale_at = now(), stale_reason = 'gone' WHERE {s}"),
+                format!("UPDATE claim_row SET stale_us = 1, stale_reason = 'gone' WHERE {s};"),
             )
         },
         None,
@@ -429,13 +438,14 @@ async fn a_claim_marked_stale_in_pg_after_the_fill_does_not_come_back() {
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn a_claim_re_anchored_in_pg_after_the_fill_does_not_come_back() {
+async fn a_claim_re_anchored_in_the_base_row_after_ranking_does_not_come_back() {
     claim_stops_matching(
         "anchor",
         |f| {
-            format!(
-                "UPDATE claim SET anchor = 'code:elsewhere/0.rs:10' WHERE subject = 'subject-{}-0'",
-                f.nanos
+            let s = format!("subject = 'subject-{}-0'", f.nanos);
+            (
+                format!("UPDATE claim SET anchor = 'code:elsewhere/0.rs:10' WHERE {s}"),
+                format!("UPDATE claim_row SET anchor = 'code:elsewhere/0.rs:10' WHERE {s};"),
             )
         },
         None,
@@ -447,7 +457,7 @@ async fn a_claim_re_anchored_in_pg_after_the_fill_does_not_come_back() {
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn a_note_that_became_a_brief_in_pg_after_the_fill_does_not_come_back() {
+async fn a_note_that_became_a_brief_in_the_base_row_after_ranking_does_not_come_back() {
     // NOT_USER_MEMORY_RE: eval-/daily-brief-/weekly-brief- notes are never user memory. The
     // document's primary key moves, so its chunk (FK, no ON UPDATE CASCADE) is removed first.
     claim_stops_matching(
@@ -455,10 +465,21 @@ async fn a_note_that_became_a_brief_in_pg_after_the_fill_does_not_come_back() {
         |f| {
             let old = &f.paths[0];
             let new = format!("/vault/wiki/daily-brief-{}.md", f.nanos);
-            format!(
-                "DELETE FROM chunk WHERE source_path = '{old}';
-                 UPDATE document SET source_path = '{new}' WHERE source_path = '{old}';
-                 UPDATE claim SET source_path = '{new}' WHERE source_path = '{old}';"
+            // Surreal: the claim row moves to the brief path, whose document exists, so only the
+            // generated-note predicate can drop it.
+            let project = &f.project;
+            (
+                format!(
+                    "DELETE FROM chunk WHERE source_path = '{old}';
+                     UPDATE document SET source_path = '{new}' WHERE source_path = '{old}';
+                     UPDATE claim SET source_path = '{new}' WHERE source_path = '{old}';"
+                ),
+                format!(
+                    "CREATE type::record('document', '{new}') CONTENT {{cid: '{new}', source_path: '{new}',
+                         origin: 'personal', project: '{project}', kind: 'note', tags: [], sha: 's',
+                         extracted_sha: 's', updated_us: 1, author: 'a'}};
+                     UPDATE claim_row SET source_path = '{new}' WHERE source_path = '{old}';"
+                ),
             )
         },
         None,
@@ -470,38 +491,36 @@ async fn a_note_that_became_a_brief_in_pg_after_the_fill_does_not_come_back() {
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn a_key_surreal_returns_that_pg_deleted_after_the_fill_is_an_error_not_a_silent_drop() {
+async fn a_ranking_key_whose_base_row_is_gone_is_an_error_not_a_silent_drop() {
     let f = fixture("adv_gone", false).await;
     let q = query_vec();
-    f.db.execute(
-        "DELETE FROM claim WHERE subject = $1",
-        &[&format!("subject-{}-0", f.nanos)],
-    )
-    .await
-    .unwrap();
-    f.db.execute(
-        "DELETE FROM chunk WHERE id = $1",
-        &[&format!("{}#0", f.paths[0])],
-    )
-    .await
-    .unwrap();
+    // Only the base rows go: the ranking row in `claim` and the project's chunk table stay.
+    f.client
+        .run(&format!(
+            "DELETE claim_row WHERE subject = 'subject-{n}-0';
+             DELETE chunk WHERE cid = '{p}#0';",
+            n = f.nanos,
+            p = f.paths[0]
+        ))
+        .await
+        .unwrap();
 
     let claims = f
         .store
         .current_claims(&q, 50, &[], Some(&f.project), None, None, false)
         .await
-        .expect_err("a claim Surreal still has and pg lost must not be dropped silently");
+        .expect_err("a claim the ranking names and claim_row lost must not be dropped silently");
     assert!(
-        claims.to_string().contains("pg 에 없음"),
+        claims.to_string().contains("claim_row 표에 없음"),
         "claim drift error, got: {claims:#}"
     );
     let chunks = f
         .store
-        .vector_search(&q, 50)
+        .vector_search_filtered(&q, 50, Some(&f.project), None)
         .await
-        .expect_err("a chunk Surreal still has and pg lost must not be dropped silently");
+        .expect_err("a chunk the project table names and chunk lost must not be dropped silently");
     assert!(
-        chunks.to_string().contains("pg 에 없음"),
+        chunks.to_string().contains("chunk 표에 없음"),
         "chunk drift error, got: {chunks:#}"
     );
 }

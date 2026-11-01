@@ -7,7 +7,10 @@ use anyhow::{Result, anyhow};
 use super::LogCopy;
 use super::vector_pg::Pg;
 use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView, Swap};
-use super::{AnchoredClaim, Hit, Recurrence, Store};
+use super::{
+    AnchorCheckWatermark, AnchoredClaim, EventLogFilter, EventLogRow, Hit, QueryLogRow,
+    RecallLabelRow, RecallLabelStats, Recurrence, Store,
+};
 use crate::vector::VectorIndex;
 
 /// Which backend ranks the vectors for this `Store`.
@@ -22,7 +25,7 @@ impl VectorRoute {
     fn view<'a>(&'a self, store: &'a Store) -> RoutedView<'a> {
         match self {
             Self::Pgvector => RoutedView::Pg(Pg(store)),
-            Self::Surreal(client) => RoutedView::Surreal(SurrealView { client, pg: store }),
+            Self::Surreal(client) => RoutedView::Surreal(SurrealView { client }),
         }
     }
 }
@@ -61,10 +64,80 @@ impl Store {
                     .await
             }
             VectorRoute::Surreal(client) => {
-                SurrealView { client, pg: self }
+                SurrealView { client }
                     .text_search_filtered(query, k, project, since_hours)
                     .await
             }
+        }
+    }
+}
+
+impl Store {
+    /// The Surreal client when this process runs `backend=surreal`; the code-index reader shares it.
+    #[must_use]
+    pub fn surreal_client(&self) -> Option<&SurrealClient> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => None,
+            VectorRoute::Surreal(client) => Some(client),
+        }
+    }
+}
+
+/// C-SURALL2 Z2: the four log tables are read from Surreal's copy on `backend=surreal` (the copy
+/// pass in `log_copy_surreal` fills it) and from pg otherwise. Their writes stay on pg.
+impl Store {
+    /// Events newest first, filtered; on Surreal the `event_log` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn recent_events(&self, filter: EventLogFilter<'_>) -> Result<Vec<EventLogRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.recent_events_pg(filter).await,
+            VectorRoute::Surreal(client) => client.recent_events(&filter).await,
+        }
+    }
+
+    /// Logged queries newest first; on Surreal the `query_log` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn recent_queries(&self, limit: i64) -> Result<Vec<QueryLogRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.recent_queries_pg(limit).await,
+            VectorRoute::Surreal(client) => client.recent_queries(limit).await,
+        }
+    }
+
+    /// Recall labels newest first; on Surreal the `recall_label` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn recent_recall_labels(&self, limit: i64) -> Result<Vec<RecallLabelRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.recent_recall_labels_pg(limit).await,
+            VectorRoute::Surreal(client) => client.recent_recall_labels(limit).await,
+        }
+    }
+
+    /// Per-judge verdict counts plus the llm/human agreement; on Surreal the `recall_label` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn recall_label_stats(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.recall_label_stats_pg().await,
+            VectorRoute::Surreal(client) => client.recall_label_stats().await,
+        }
+    }
+
+    /// The anchor-check watermark; on Surreal the `sync_state` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn anchor_check_watermark(&self) -> Result<Option<AnchorCheckWatermark>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.anchor_check_watermark_pg().await,
+            VectorRoute::Surreal(client) => client.anchor_check_watermark().await,
         }
     }
 }

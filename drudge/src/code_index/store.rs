@@ -9,11 +9,15 @@ use super::{
     SyncReport, usize_to_i64,
 };
 use crate::config::CodeIndexSource;
+use crate::store::SurrealClient;
 
 /// PostgreSQL adapter dedicated to the `code_index` schema. It never reads or writes the memory
 /// corpus (`document`, `chunk`, `node`, `edge`, `claim`).
 pub struct CodeIndexStore {
     pool: Pool,
+    /// On `backend=surreal` the read paths (`status`, `search`, `symbol`) answer from the Surreal
+    /// copy; the sync path (`existing_hashes`, `replace_repository`) is the writer and stays on pg.
+    surreal: Option<SurrealClient>,
 }
 
 /// Hand-written: `pool` holds the parsed DSN (user and password), which must never reach a log.
@@ -53,7 +57,17 @@ impl CodeIndexStore {
             .timeouts(POOL_TIMEOUTS)
             .build()
             .map_err(|e| CodeIndexError::Pool(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            surreal: None,
+        })
+    }
+
+    /// Route the read paths to Surreal (`None` keeps pg).
+    #[must_use]
+    pub fn with_surreal(mut self, client: Option<SurrealClient>) -> Self {
+        self.surreal = client;
+        self
     }
     /// Acquire a connection from the pool.
     pub(crate) async fn db(&self) -> Result<deadpool_postgres::Object, CodeIndexError> {
@@ -167,6 +181,19 @@ impl CodeIndexStore {
         &self,
         repository_id: Option<&str>,
     ) -> Result<Vec<RepositoryStatus>, CodeIndexError> {
+        match &self.surreal {
+            None => self.status_pg(repository_id).await,
+            Some(client) => client
+                .code_status(repository_id)
+                .await
+                .map_err(|e| CodeIndexError::Surreal(format!("{e:#}"))),
+        }
+    }
+
+    async fn status_pg(
+        &self,
+        repository_id: Option<&str>,
+    ) -> Result<Vec<RepositoryStatus>, CodeIndexError> {
         let rows = self.db().await?
                         .query(
                 "SELECT r.id, r.name, r.root_path, r.language, r.last_synced_at,
@@ -204,6 +231,20 @@ impl CodeIndexStore {
         query: &str,
         repository_id: Option<&str>,
     ) -> Result<Vec<CodeSearchHit>, CodeIndexError> {
+        match &self.surreal {
+            None => self.search_pg(query, repository_id).await,
+            Some(client) => client
+                .code_search(query, repository_id)
+                .await
+                .map_err(|e| CodeIndexError::Surreal(format!("{e:#}"))),
+        }
+    }
+
+    async fn search_pg(
+        &self,
+        query: &str,
+        repository_id: Option<&str>,
+    ) -> Result<Vec<CodeSearchHit>, CodeIndexError> {
         let rows = self
             .db()
             .await?
@@ -232,6 +273,16 @@ impl CodeIndexStore {
     }
 
     pub async fn symbol(&self, id: &str) -> Result<Option<CodeSymbolDetail>, CodeIndexError> {
+        match &self.surreal {
+            None => self.symbol_pg(id).await,
+            Some(client) => client
+                .code_symbol(id)
+                .await
+                .map_err(|e| CodeIndexError::Surreal(format!("{e:#}"))),
+        }
+    }
+
+    async fn symbol_pg(&self, id: &str) -> Result<Option<CodeSymbolDetail>, CodeIndexError> {
         let Some(row) = self
             .db()
             .await?

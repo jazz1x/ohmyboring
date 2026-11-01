@@ -208,14 +208,16 @@ async fn a_slug_with_a_hyphen_gets_its_own_table_and_is_read() {
         .run("DELETE chunk WHERE cid = \"/v/h1.md#0\";")
         .await
         .expect("delete from global only");
-    let hits = f
+    // The answer is read back from the global table, which no longer has the row: the error
+    // naming it proves the ranking read the hyphen slug's own table.
+    let err = f
         .store
         .vector_search_filtered(&vec_at(1), 5, Some("oh-my-boring"), None)
         .await
-        .expect("filtered search");
+        .expect_err("the project table names a key the global table lost");
     assert!(
-        hits.iter().any(|h| h.id == "/v/h1.md#0"),
-        "the hyphen slug's query must read its own table"
+        err.to_string().contains("/v/h1.md#0"),
+        "the hyphen slug's query must read its own table: {err:#}"
     );
 }
 
@@ -232,15 +234,17 @@ async fn project_filtered_query_reads_the_project_table() {
         .run("DELETE chunk WHERE cid = \"/v/a1.md#0\";")
         .await
         .expect("delete from global only");
+    // The answer is read back from the global table, which no longer has the row: the error
+    // naming it proves the filtered query ranked from chunk_p_alpha.
     let filtered = f
         .store
         .vector_search_filtered(&vec_at(1), 5, Some("alpha"), None)
         .await
-        .expect("filtered search");
+        .expect_err("chunk_p_alpha names a key the global table lost");
     let unfiltered = f.store.vector_search(&vec_at(1), 5).await.expect("search");
     assert!(
-        filtered.iter().any(|h| h.id == "/v/a1.md#0"),
-        "project query must read chunk_p_alpha"
+        filtered.to_string().contains("/v/a1.md#0"),
+        "project query must read chunk_p_alpha: {filtered:#}"
     );
     assert!(
         unfiltered.iter().all(|h| h.id != "/v/a1.md#0"),

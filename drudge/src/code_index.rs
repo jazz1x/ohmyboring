@@ -45,6 +45,8 @@ pub enum CodeIndexError {
     Database(#[from] tokio_postgres::Error),
     #[error("code index connection pool failed: {0}")]
     Pool(String),
+    #[error("surreal code index read failed: {0}")]
+    Surreal(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

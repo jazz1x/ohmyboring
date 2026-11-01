@@ -1852,7 +1852,9 @@ pub async fn run(store: Option<Store>, llm: Llm, cfg: config::BoringConfig) -> R
         .any(config::CodeIndexSource::enabled)
     {
         let dsn = config::pg_dsn();
-        Some(Arc::new(CodeIndexStore::connect(&dsn)?))
+        Some(Arc::new(CodeIndexStore::connect(&dsn)?.with_surreal(
+            store.as_ref().and_then(Store::surreal_client).cloned(),
+        )))
     } else {
         None
     };
