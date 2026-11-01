@@ -1945,6 +1945,7 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
         )
         .route("/projects", get(http::handle_projects))
         .route("/rules", get(http::handle_rules))
+        .route("/rules/match", post(http::handle_rules_match))
         .route("/claim-source", get(http::handle_claim_source))
         .route("/claim-sources", get(http::handle_claim_sources))
         .route("/claim-priors", get(http::handle_claim_priors))

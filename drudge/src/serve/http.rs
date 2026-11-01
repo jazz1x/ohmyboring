@@ -1037,6 +1037,47 @@ pub(crate) async fn handle_rules(State(s): State<AppState>) -> axum::response::R
     }
 }
 
+/// `POST /rules/match` `{prompt}` — the rules whose triggers fire on the prompt, as
+/// `{rules: [{subject, rule, trigger, source_path}]}` in `GET /rules` order. The hook sends the
+/// prompt and gets only the firings back (matching is `crate::rules::fired`). 400 for a body
+/// that is no JSON object with a string `prompt`; store errors as `GET /rules`.
+pub(crate) async fn handle_rules_match(
+    State(s): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let prompt = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Object(m)) => m.get("prompt").and_then(Value::as_str).map(str::to_owned),
+        _ => None,
+    };
+    let Some(prompt) = prompt else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "body must be a JSON object with a string prompt"})),
+        )
+            .into_response();
+    };
+    let Some(store) = s.store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "store not configured"})),
+        )
+            .into_response();
+    };
+    match store.rule_rows().await {
+        Ok(rows) => {
+            let all = crate::rules::group_rules(rows).rules;
+            Json(json!({"rules": crate::rules::fired(all, &prompt)})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(StoreUnreachable::of(store, &e)),
+        )
+            .into_response(),
+    }
+}
+
 /// A subject's current claim — same wire as the Python door's `GET /claim-source`: 400 for a
 /// blank or NUL-bearing subject (checked before the store), 503 without a store, 502
 /// `{error, detail}` when it can't be reached, 404 when no claim is current.
