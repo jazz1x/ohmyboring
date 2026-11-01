@@ -2,15 +2,23 @@
 //! to the backend the process was started on. `recurrences` too: on Surreal it pairs the claims in
 //! the engine (`vector_surreal::recurrences`), since Surreal has no radius join.
 
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow};
 
 use super::LogCopy;
 use super::vector_pg::Pg;
 use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView, Swap};
 use super::{
-    AnchorCheckWatermark, AnchoredClaim, EventLogFilter, EventLogRow, Hit, QueryLogRow,
-    RecallLabelRow, RecallLabelStats, Recurrence, Store,
+    AnchorCheckRow, AnchorCheckWatermark, AnchoredClaim, ClaimEraCounts, EventLogFilter,
+    EventLogRow, Hit, QueryLogRow, RecallLabelRow, RecallLabelStats, Recurrence, RegisterAsk,
+    RegisterRow, RegisterRows, Store,
 };
+use crate::claim_priors::ClaimPrior;
+use crate::claim_source::{ClaimRow, ListRow};
+use crate::frontmatter::Claim;
+use crate::rules::RuleRow;
+use crate::split_subjects::Sample;
 use crate::vector::VectorIndex;
 
 /// Which backend ranks the vectors for this `Store`.
@@ -138,6 +146,273 @@ impl Store {
         match &self.vector_route {
             VectorRoute::Pgvector => self.anchor_check_watermark_pg().await,
             VectorRoute::Surreal(client) => client.anchor_check_watermark().await,
+        }
+    }
+}
+
+/// C-SURALL2 Z2③b: the claim reads that fed the cards, the registers, the `/claim-*` doors and the
+/// audit are read from Surreal's `claim_row` copy (with `edge` and `document` where pg joined
+/// them) on `backend=surreal`, and from pg otherwise.
+impl Store {
+    /// The project's north-star `goal` / `check` claims; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn north_star_claims(
+        &self,
+        project: &str,
+        exclude_origins: &[String],
+    ) -> Result<Vec<Claim>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.north_star_claims_pg(project, exclude_origins).await,
+            VectorRoute::Surreal(client) => {
+                let predicates: Vec<String> = Self::NORTH_STAR_PREDICATES
+                    .iter()
+                    .map(|p| (*p).to_owned())
+                    .collect();
+                client
+                    .north_star_claims(
+                        &Self::north_star_subject(project),
+                        &predicates,
+                        exclude_origins,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Stalled claims, oldest first, one per note; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn stalled_claims(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+        older_than_days: i64,
+    ) -> Result<Vec<Claim>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.stalled_claims_pg(k, project, kinds, exclude_origins, older_than_days)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                let answer = client
+                    .stalled_register_rows(
+                        &RegisterAsk {
+                            k,
+                            project,
+                            kinds,
+                            exclude_origins,
+                        },
+                        older_than_days,
+                    )
+                    .await?;
+                Ok(answer
+                    .rows
+                    .into_iter()
+                    .map(RegisterRow::into_claim)
+                    .collect())
+            }
+        }
+    }
+
+    /// Stalled claims for a register answer with the full match count; on Surreal the
+    /// `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn stalled_register_rows(
+        &self,
+        k: i64,
+        project: Option<&str>,
+        kinds: Option<&[String]>,
+        exclude_origins: &[String],
+        older_than_days: i64,
+    ) -> Result<RegisterRows> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.stalled_register_rows_pg(k, project, kinds, exclude_origins, older_than_days)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .stalled_register_rows(
+                        &RegisterAsk {
+                            k,
+                            project,
+                            kinds,
+                            exclude_origins,
+                        },
+                        older_than_days,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// The claims each note currently declares through its `claims` edges; on Surreal the `edge`
+    /// and `claim_row` copies.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn declared_claims(
+        &self,
+        paths: &[String],
+        per_doc: i64,
+    ) -> Result<HashMap<String, RegisterRows>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.declared_claims_pg(paths, per_doc).await,
+            VectorRoute::Surreal(client) => {
+                let asked: Vec<(String, String)> = paths
+                    .iter()
+                    .map(|p| (super::doc_node_id(p), p.clone()))
+                    .collect();
+                client.declared_claims(&asked, per_doc).await
+            }
+        }
+    }
+
+    /// Current claims of one subject for `GET /claim-source`; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claim_source_rows(&self, subject: &str) -> Result<Vec<ClaimRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claim_source_rows_pg(subject).await,
+            VectorRoute::Surreal(client) => client.claim_source_rows(subject).await,
+        }
+    }
+
+    /// Current claims of one predicate for `GET /claim-sources`; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claim_source_list_rows(&self, predicate: &str) -> Result<Vec<ListRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claim_source_list_rows_pg(predicate).await,
+            VectorRoute::Surreal(client) => client.claim_source_list_rows(predicate).await,
+        }
+    }
+
+    /// Current claims of one note with the sealed value each replaced, for `GET /claim-priors`; on
+    /// Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claim_priors(&self, source: &str) -> Result<Vec<ClaimPrior>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claim_priors_pg(source).await,
+            VectorRoute::Surreal(client) => client.claim_priors(source).await,
+        }
+    }
+
+    /// Current `rule` claims for `GET /rules`; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn rule_rows(&self) -> Result<Vec<RuleRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.rule_rows_pg().await,
+            VectorRoute::Surreal(client) => client.rule_rows().await,
+        }
+    }
+
+    /// Every live claim's `(subject, source_path)` for `GET /repairs/split-subjects`; on Surreal
+    /// the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn split_subject_rows(&self) -> Result<Vec<(String, String)>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.split_subject_rows_pg().await,
+            VectorRoute::Surreal(client) => client.split_subject_rows().await,
+        }
+    }
+
+    /// Per-predicate row counts and the longest value of the given spellings, for
+    /// `GET /repairs/split-subjects/samples`; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn split_samples(&self, variants: &[String]) -> Result<Vec<Sample>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.split_samples_pg(variants).await,
+            VectorRoute::Surreal(client) => client.split_samples(variants).await,
+        }
+    }
+
+    /// Current claims the owner said, per note; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn said_by_owner_counts(&self, paths: &[String]) -> Result<HashMap<String, i64>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.said_by_owner_counts_pg(paths).await,
+            VectorRoute::Surreal(client) => client.said_by_owner_counts(paths).await,
+        }
+    }
+
+    /// Current claims per era and the label-only count for the audit; on Surreal the `claim_row`
+    /// copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claim_era_counts(&self) -> Result<ClaimEraCounts> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claim_era_counts_pg().await,
+            VectorRoute::Surreal(client) => client.claim_era_counts().await,
+        }
+    }
+
+    /// Claims marked stale, for the audit; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claim_stale_count(&self) -> Result<usize> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claim_stale_count_pg().await,
+            VectorRoute::Surreal(client) => client.claim_stale_count().await,
+        }
+    }
+
+    /// Pinned, not-stale claims past the watermark, oldest first; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claims_due_for_anchor_check(
+        &self,
+        after: Option<&AnchorCheckWatermark>,
+        limit: usize,
+    ) -> Result<Vec<AnchorCheckRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claims_due_for_anchor_check_pg(after, limit).await,
+            VectorRoute::Surreal(client) => client.claims_due_for_anchor_check(after, limit).await,
+        }
+    }
+
+    /// The same list from the start up to and including the watermark (the wrap-around); on
+    /// Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claims_due_for_anchor_check_head(
+        &self,
+        watermark: &AnchorCheckWatermark,
+        limit: usize,
+    ) -> Result<Vec<AnchorCheckRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.claims_due_for_anchor_check_head_pg(watermark, limit)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .claims_due_for_anchor_check_head(watermark, limit)
+                    .await
+            }
         }
     }
 }

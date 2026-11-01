@@ -1084,6 +1084,7 @@ impl FillTable {
     }
 }
 
+mod claim_reads;
 mod claim_tx;
 pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
 mod reads;
@@ -1478,7 +1479,7 @@ pub struct RegisterAsk<'a> {
 /// `predicate` close a tie in byte order; pg's two register queries say the same with
 /// `COLLATE "C"`, so equal `valid_from` rows come out in one order on both sides. The regexes are the same constants pg takes;
 /// `(?i)` is pg's `~*`.
-fn register_where(ask: &RegisterAsk<'_>) -> String {
+pub(super) fn register_where(ask: &RegisterAsk<'_>) -> String {
     let mut conds = vec![
         "superseded_us = NONE".to_owned(),
         "origin != NONE".to_owned(),
