@@ -2578,8 +2578,9 @@ impl Store {
             .collect())
     }
 
-    /// Full-text search with optional project and recency filters.
-    pub async fn text_search_filtered(
+    /// Full-text search with optional project and recency filters, on pg. Callers go through
+    /// `Store::text_search_filtered` (vector_route.rs), which sends it to the configured backend.
+    async fn pg_text_search_filtered(
         &self,
         query: &str,
         k: usize,

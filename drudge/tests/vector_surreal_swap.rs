@@ -161,7 +161,11 @@ async fn changed_rows_swap_in_a_new_index_and_answers_stay() {
     );
     assert_eq!(
         f.indexes("chunk").await,
-        ["chunk_embedding_g1", "chunk_source_path"]
+        [
+            "chunk_content_ft",
+            "chunk_embedding_g1",
+            "chunk_source_path"
+        ]
     );
     let hits = f
         .store
@@ -208,7 +212,12 @@ async fn a_failing_define_keeps_the_old_index_and_fails_the_run() {
     assert!(swaps.iter().any(Swap::failed));
     assert_eq!(
         f.indexes("chunk").await,
-        ["chunk_embedding", "chunk_embedding_g1", "chunk_source_path"],
+        [
+            "chunk_content_ft",
+            "chunk_embedding",
+            "chunk_embedding_g1",
+            "chunk_source_path"
+        ],
         "the old HNSW index is still there"
     );
     let hits = f

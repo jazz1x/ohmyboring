@@ -44,6 +44,33 @@ impl Store {
 }
 
 impl Store {
+    /// Full-text search with optional project and recency filters: pg's `tsv` on pgvector, the
+    /// BM25 index on `backend=surreal`. The text stage of `retrieve` calls this.
+    ///
+    /// # Errors
+    /// The backend's query or the pg hydrate failed.
+    pub async fn text_search_filtered(
+        &self,
+        query: &str,
+        k: usize,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Result<Vec<Hit>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.pg_text_search_filtered(query, k, project, since_hours)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                SurrealView { client, pg: self }
+                    .text_search_filtered(query, k, project, since_hours)
+                    .await
+            }
+        }
+    }
+}
+
+impl Store {
     /// On `backend=surreal`: one copy pass of the four log tables (see `log_copy_surreal`); on
     /// pgvector there is nothing to copy.
     ///
