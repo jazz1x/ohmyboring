@@ -15,7 +15,52 @@ permissions:
   contents: read
 
 jobs:
+  # 바뀐 파일 종류로 무거운 세 잡(rust-gate·eval-gate·docker-build)을 건너뛴다 (C-CIWASTE1 나).
+  # 각 패턴은 그 잡이 실제로 읽는 파일이다 (rust-gate = scripts/guard.sh 와 drudge `quality_gate` 시험이 읽는 것).
+  # fail-open: 이 잡이 실패하거나, 비교 기준이 없거나, 바뀐 파일이 0 이면 세 잡 모두 돈다.
+  # 잡 쪽 if: 는 출력이 정확히 'false' 일 때만 건너뛴다 — 출력이 비어도 돈다.
+  # gitleaks·cargo-deny·trivy·compose-config 는 40초 이하라 항상 돈다 (cargo-deny 는 파일이 안 바뀌어도 새 RUSTSEC 권고로 걸린다).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
+      eval: ${{ steps.diff.outputs.eval }}
+      docker: ${{ steps.diff.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          emit() { printf 'rust=%s\neval=%s\ndocker=%s\n' "$1" "$2" "$3" | tee -a "$GITHUB_OUTPUT"; }
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = 0000000000000000000000000000000000000000 ]; then
+            echo "no diff base -> everything runs"; emit true true true; exit 0
+          fi
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          n=$(grep -c . "$RUNNER_TEMP/changed.txt" || true)
+          echo "changed files: $n"; cat "$RUNNER_TEMP/changed.txt"
+          if [ "$n" = 0 ]; then
+            echo "0 changed files -> everything runs"; emit true true true; exit 0
+          fi
+          # rust-gate: guard.sh 가 부르는 모든 것 + 문서 시험이 읽는 문서.
+          #   README*·CHANGELOG.md·docs/RUNBOOK.md (guard.sh test_readme_locale_parity·test_changelog·test_runbook)
+          #   docs/PRD.md·GOALS.md·agents/codex/README.md (drudge/src/serve/mcp.rs quality_gate: 4869·4870·4933·4949)
+          #   vault/.rules/ (drudge/src/vault/audit.rs:852)
+          RUST='^(drudge/|scripts/|agents/|src/|hooks/|data/eval/|vault/\.rules/|\.github/workflows/ci\.yml$|docs/(RUNBOOK|PRD)\.md$|GOALS\.md$|CHANGELOG\.md$|README[^/]*$|Makefile$|install\.sh$|ruff\.toml$|pyproject\.toml$|uv\.lock$|requirements[^/]*\.txt$)|\.(py|sh)$'
+          # eval-gate: ci.yml eval-gate 잡이 쓰는 코드·데이터·스택 정의.
+          EVAL='^(drudge/|src/|agents/|data/(eval|schema|contract)/|scripts/(eval-gate\.sh|test_schema_parity\.sh|contract-parity\.py)$|vault/\.rules/|docker-compose[^/]*\.yml$|boring\.[^/]*json$|\.github/workflows/ci\.yml$|pyproject\.toml$|uv\.lock$|requirements[^/]*\.txt$)'
+          # docker-build: make build (Makefile:41) = boring-drudge·boring-door 이미지 + 호스트 cargo build --release.
+          DOCKER='^(drudge/|src/|agents/|data/contract/|Makefile$|docker-compose[^/]*\.yml$|\.dockerignore$|\.github/workflows/ci\.yml$|pyproject\.toml$|uv\.lock$|requirements[^/]*\.txt$)|(^|/)Dockerfile$'
+          flag() { if grep -Eq "$1" "$RUNNER_TEMP/changed.txt"; then echo true; else echo false; fi; }
+          emit "$(flag "$RUST")" "$(flag "$EVAL")" "$(flag "$DOCKER")"
+
   rust-gate:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +137,8 @@ jobs:
   # Ensure the Rust engine image still builds from a clean checkout.
   # Catches Dockerfile / Cargo drift that guard.sh (stack-free) cannot detect.
   docker-build:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docker != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -107,6 +154,8 @@ jobs:
   # host.docker.internal (the engine's configured base_url). This is the eval-gate.sh path that was
   # previously manual-only (`make eval`).
   eval-gate:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.eval != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
