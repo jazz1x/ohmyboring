@@ -1362,6 +1362,119 @@ pub(crate) async fn handle_gap(State(s): State<AppState>, body: axum::body::Byte
     }
 }
 
+use crate::split_reread::{Merge, Outcome};
+
+type Waiting = (Merge, tokio::sync::oneshot::Sender<Outcome>);
+
+struct RereadQueue {
+    waiting: Vec<Waiting>,
+    running: bool,
+}
+
+/// One reread runs at a time: `/sync` is a whole-vault pass, and three overlapping ones timed out
+/// two of themselves (2026-09-30 08:04). A merge that lands while it runs waits here; the worker
+/// then runs once more, which covers every merge queued meanwhile. Process-wide because the
+/// engine is one process and the pass is whole-vault.
+static REREAD_QUEUE: std::sync::Mutex<RereadQueue> = std::sync::Mutex::new(RereadQueue {
+    waiting: Vec::new(),
+    running: false,
+});
+
+fn reread_queue() -> std::sync::MutexGuard<'static, RereadQueue> {
+    REREAD_QUEUE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Clears `running` however the worker ends, so the next merge can start one.
+struct RereadWorkerSlot;
+
+impl Drop for RereadWorkerSlot {
+    fn drop(&mut self) {
+        reread_queue().running = false;
+    }
+}
+
+async fn reread_worker(s: AppState) {
+    let _slot = RereadWorkerSlot;
+    loop {
+        let batch = {
+            let mut queue = reread_queue();
+            if queue.waiting.is_empty() {
+                return;
+            }
+            std::mem::take(&mut queue.waiting)
+        };
+        let merges: Vec<Merge> = batch.iter().map(|(merge, _)| merge.clone()).collect();
+        let reread = {
+            let _guard = s.sync_lock.lock().await;
+            super::scheduler::do_sync(s.store.as_deref(), &s.llm, (*s.vault_dir).as_ref(), &s.cfg)
+                .await
+                .map(|_| ())
+                .map_err(|e| json!({"error": format!("{e:#}")}))
+        };
+        let recount = match (&reread, s.store.as_ref()) {
+            (Ok(()), Some(store)) => store
+                .split_subject_rows()
+                .await
+                .map_err(|e| json!(format!("{e:#}"))),
+            _ => Ok(Vec::new()),
+        };
+        let outcomes = crate::split_reread::decide(&merges, &reread, recount);
+        if let Some(store) = s.store.as_ref() {
+            let ts = chrono::Utc::now().to_rfc3339();
+            for event in crate::split_reread::events_to_log(&merges, &outcomes, &ts) {
+                if let Err(e) = store.log_event(&event).await {
+                    eprintln!("[reread] subject_merged event not delivered: {e:#}");
+                }
+            }
+        }
+        for ((merge, reply), outcome) in batch.into_iter().zip(outcomes) {
+            if let Outcome::Failed { error } = &outcome {
+                eprintln!("[reread] after merging {:?} failed: {error}", merge.subject);
+            }
+            // The caller hung up (door timeout): the merge is reread and counted all the same.
+            let _ = reply.send(outcome);
+        }
+    }
+}
+
+/// `POST /repairs/split-subjects/reread` — body is one committed merge
+/// `{subject, deleted_rows, reread_notes, owner_held}` (counts null when the door never saw the
+/// merge's answer). Answers when the reread that covers it has ended: 200
+/// `{outcome: done, remaining_variants} | {outcome: pending} | {outcome: failed, error}`.
+pub(crate) async fn handle_split_reread(
+    State(s): State<AppState>,
+    body: axum::body::Bytes,
+) -> Response {
+    use axum::response::IntoResponse;
+    let Ok(merge) = serde_json::from_slice::<Merge>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "body must be {subject, deleted_rows, reread_notes, owner_held}"}),
+        );
+    };
+    if s.store.is_none() {
+        return no_store();
+    }
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let start_worker = {
+        let mut queue = reread_queue();
+        queue.waiting.push((merge, reply));
+        !std::mem::replace(&mut queue.running, true)
+    };
+    if start_worker {
+        tokio::spawn(reread_worker(s));
+    }
+    match answer.await {
+        Ok(outcome) => (StatusCode::OK, Json(outcome)).into_response(),
+        Err(_) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "reread worker ended without an answer"}),
+        ),
+    }
+}
+
 fn no_group() -> Response {
     json_response(
         StatusCode::NOT_FOUND,

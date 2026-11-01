@@ -2468,12 +2468,71 @@ def _card_with_pending_rows(n):
     return blocks
 
 
+class RereadByEngineTests(unittest.TestCase):
+    """C-RUSTB1 row 10: with DOOR_REREAD_IMPL unset the door only asks the engine to reread and
+    settles the row with the outcome the engine decided — it runs no /sync and no recount."""
+
+    def _run(self, engine_answer):
+        calls, shown, settled = [], [], threading.Event()
+
+        def fake_fetch(url, body, headers, method):
+            calls.append((url, json.loads(body)))
+            if isinstance(engine_answer, OSError):
+                raise engine_answer
+            return door.JSONResponse(*engine_answer)
+
+        def fake_show(row, outcome, lang):
+            shown.append(outcome)
+            settled.set()
+
+        def no_python_reread(*_):
+            raise AssertionError("the door's own reread ran")
+
+        row = door.card_types.RowRef(channel="C1", card_ts="1.0", idx=0)
+        with (
+            mock.patch.object(door, "_fetch", fake_fetch),
+            mock.patch.object(door, "_show_row", fake_show),
+            mock.patch.object(door, "_call_engine_sync", no_python_reread),
+            mock.patch.object(door, "_fetch_split_subject_rows", no_python_reread),
+            mock.patch.object(door.boring_config, "note_lang", lambda: "ko"),
+        ):
+            door._reread_in_background(door._Merged("foo-bar", 2, 2, ["/o.md"], row))
+            self.assertTrue(settled.wait(10))
+        return calls, shown
+
+    def test_the_engine_decides_and_the_door_only_settles_the_row(self):
+        calls, shown = self._run(({"outcome": "done", "remaining_variants": 1}, 200))
+        self.assertEqual(calls[0][0].rsplit("/repairs", 1)[1], "/split-subjects/reread")
+        self.assertEqual(calls[0][1]["owner_held"], ["/o.md"])
+        self.assertEqual(
+            shown,
+            [
+                door.card_view.merged_outcome(
+                    door.card_types.RepairDone(
+                        subject="foo-bar",
+                        deleted_rows=2,
+                        reread_notes=2,
+                        remaining_variants=1,
+                        owner_held=["/o.md"],
+                    ),
+                    lang="ko",
+                )
+            ],
+        )
+        _, shown = self._run(({"error": "ingest failed"}, 500))
+        self.assertEqual(shown, [door.card_view.reread_failed_outcome({"error": "ingest failed"}, lang="ko")])
+        _, shown = self._run(OSError("down"))
+        self.assertEqual(shown, [door.card_view.reread_failed_outcome("engine unreachable: down", lang="ko")])
+
+
 class RereadSingleFlightTests(unittest.TestCase):
     """Three merges landing while a reread runs must not start three /sync passes (2026-09-30
     08:04: three overlapped, two timed out), and each merge's card row settles only once the
     reread that covered it has ended."""
 
     def setUp(self):
+        os.environ["DOOR_REREAD_IMPL"] = "python"
+        self.addCleanup(os.environ.pop, "DOOR_REREAD_IMPL", None)
         self.syncs = 0
         self.running = 0
         self.peak = 0
