@@ -104,7 +104,9 @@ two ways (e.g. "foodspring front" vs "foodspring-front") — POST is the door's
 first write route: it deletes the split rows (an owner-written note's only with the
 owner token — otherwise that note is skipped and named in `owner_held`), blanks the affected notes' sha
 so the engine's own /sync rereads them under the merged form, and calls that
-/sync itself — one reread at a time, merges landing meanwhile queue for the next; a body
+/sync itself — one reread at a time, merges landing meanwhile queue for the next
+(C-RUSTB1 row 10: that queue, the recount and the outcome are the engine's now,
+POST /repairs/split-subjects/reread; DOOR_REREAD_IMPL=python keeps the door's own queue as the rollback); a body
 `row: {channel, card_ts, idx}` names the card row the door settles when its reread ends. Of the GETs, only /projects without active_days reaches the upstream.
 The card programs no longer run inside the door: hermes cron runs them itself
 (agents/hermes/card_runner.py), so the door has no /run/* routes.
@@ -1789,8 +1791,88 @@ def _reread_worker() -> None:
         raise
 
 
+#: Who rereads after a merge — python keeps the door's own queue (the rollback), anything else
+#: (including unset) is the engine, so a typo never turns the old path on by accident.
+_REREAD_IMPL_ENV = "DOOR_REREAD_IMPL"
+_REREAD_PATH = "/repairs/split-subjects/reread"
+
+
+def _reread_impl() -> str:
+    return _WRITER_PYTHON if os.environ.get(_REREAD_IMPL_ENV) == _WRITER_PYTHON else "engine"
+
+
+def _call_engine_reread(merged: _Merged) -> dict[str, Any]:
+    """The engine's answer for one merge: `{outcome: done|pending|failed, ...}`. A request that
+    never lands, or an answer that is no 200 with an outcome, is a failed reread — worded as the
+    python path worded the same two cases."""
+    payload = {
+        "subject": merged.subject,
+        "deleted_rows": merged.deleted_rows,
+        "reread_notes": merged.reread_notes,
+        "owner_held": merged.owner_held,
+    }
+    try:
+        response = _fetch(
+            f"{_upstream()}{_REREAD_PATH}",
+            json.dumps(payload).encode(),
+            {"content-type": "application/json"},
+            "POST",
+        )
+    except OSError as e:
+        return {"outcome": "failed", "error": f"engine unreachable: {e}"}
+    try:
+        parsed = json.loads(response.body) if response.body else {}
+    except json.JSONDecodeError:
+        parsed = {"raw": response.body.decode("utf-8", "replace")}
+    if response.status_code == 200 and isinstance(parsed, dict) and "outcome" in parsed:
+        return parsed
+    return {"outcome": "failed", "error": parsed}
+
+
+def _engine_outcome(merged: _Merged, answer: dict[str, Any], lang: str) -> card_types.Outcome:
+    match answer["outcome"]:
+        case "done":
+            return card_view.merged_outcome(
+                card_types.RepairDone(
+                    subject=merged.subject,
+                    deleted_rows=merged.deleted_rows,
+                    reread_notes=merged.reread_notes,
+                    remaining_variants=answer["remaining_variants"],
+                    owner_held=merged.owner_held,
+                ),
+                lang=lang,
+            )
+        case "pending":
+            return card_types.Pending()
+        case _:
+            error = answer.get("error")
+            print(
+                f"[door] reread after merging {merged.subject!r} failed: {error}", file=sys.stderr, flush=True
+            )
+            return card_view.reread_failed_outcome(error, lang=lang)
+
+
+def _reread_via_engine(merged: _Merged) -> None:
+    """The thin caller: the engine queues, rereads, recounts, records `subject_merged` and says
+    what the row shows; the door only settles the Slack row with it."""
+    lang = card_advice.resolve_lang(boring_config.note_lang())
+    try:
+        outcome = _engine_outcome(merged, _call_engine_reread(merged), lang)
+    except Exception as e:  # noqa: BLE001 — the row must settle either way
+        _fail_batch([merged], e)
+        return
+    match merged.row:
+        case None:
+            pass
+        case row:
+            _show_row(row, outcome, lang)
+
+
 def _reread_in_background(merged: _Merged) -> None:
     global _REREAD_WORKER
+    if _reread_impl() == "engine":
+        threading.Thread(target=_reread_via_engine, args=(merged,), name="reread", daemon=True).start()
+        return
     with _REREAD_LOCK:
         _REREAD_QUEUE.append(merged)
         if _REREAD_WORKER is not None:

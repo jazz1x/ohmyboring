@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Fixed
+- **split-subjects 병합 뒤 다시 읽기 큐를 엔진으로 (C-RUSTB1 행 10)** — `POST /repairs/split-subjects/reread` 가 한 번에 하나씩 돌리는 큐·`/sync`·남은 표기 재계수·`subject_merged` 기록·카드 행 결과(done·pending·failed)를 맡고, 문은 그 결과로 Slack 행만 고친다. 롤백 스위치 `DOOR_REREAD_IMPL=python`(문 안의 큐·`_reread_batch` 그대로, 기본은 engine).
 - **`recurrences` 를 backend=surreal 에서도 Surreal 사본으로 (C-SURALL2 A6 4단계)** — 지금까지 `vector.backend=surreal` 이어도 pgvector 로 보냈다. 이제 `claim_row`(값·봉인·노트 project)와 `claim`(임베딩)에서 후보를 읽어 엔진이 pg 질의와 같은 조건·순서·f32 거리로 짝을 짓는다(`vector_surreal/recurrences.rs`). 기본 backend(pg)는 그대로.
 - **볼트 노트 위생 `--fix` 를 엔진 서브커맨드로 (C-RUSTB1 행 22)** — `drudge steward [--fix [--yes]]` 가 `scripts/data-steward.py --fix` 와 같은 파일을 쓰고(`project:` 정규화·placeholder 태그 제거, 원본은 `<노트>.md.bak`, `author: owner` 노트는 보고만) `schedule-maintenance.sh` 가 이를 부른다. 롤백 스위치 `BORING_DATA_STEWARD_IMPL=python`(Python 구현은 그대로). 보고 전용 `--json`(folder_slug_splits)은 Python 에 남는다. data-steward 단계가 실패하면 `✗ data-steward failed` 한 줄과 Slack 알림을 남기고 나머지 단계는 돌되 종료 코드는 1.
 - **원본 세션 보존(retention)을 엔진 서브커맨드로 (C-RUSTB1 행 23)** — `drudge retention [--apply [--yes]]` 가 `scripts/retention.py` 와 같은 판정(처리됨 30일·미처리 90일 보관, 아카이브 180일 삭제, 미처리 세션은 `delete_only` 여도 삭제 안 함)을 하고 `schedule-maintenance.sh` 가 이를 부른다. 롤백 스위치 `BORING_RETENTION_IMPL=python`(Python 구현은 그대로). retention 단계가 실패하면(옛 바이너리·깨진 boring.json) 출력에 `✗ retention failed` 한 줄과 Slack 알림을 남기고 나머지 단계는 돌되 스크립트 종료 코드는 1.
