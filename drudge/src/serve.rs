@@ -1956,6 +1956,10 @@ pub(crate) fn build_router(state: AppState) -> axum::Router {
             get(http::handle_split_subjects).post(http::handle_split_merge),
         )
         .route(
+            "/repairs/split-subjects/reread",
+            post(http::handle_split_reread),
+        )
+        .route(
             "/repairs/split-subjects/samples",
             get(http::handle_split_samples),
         )

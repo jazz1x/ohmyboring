@@ -27,6 +27,7 @@ pub mod retention;
 pub mod retrieve;
 pub mod rules;
 pub mod serve;
+pub mod split_reread;
 pub mod split_subjects;
 pub mod steward;
 pub mod store;
