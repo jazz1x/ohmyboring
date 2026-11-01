@@ -3,7 +3,7 @@
 > The machine-parsing SSOT for bots/tools is [`.rules/schema.yaml`](schema.yaml). This file must stay consistent with it.
 >
 > These conventions apply to the **compiled `vault/wiki/wiki-NNNN.md`** pages. The distill notes in `vault/raw/`
-> are free-form markdown without frontmatter; `drudge vault compile` curates raw→wiki and generates the frontmatter.
+> are free-form markdown without frontmatter; the `remember` MCP tool writes the wiki page and generates the frontmatter.
 
 ---
 

@@ -20,28 +20,32 @@ The engine lives in `drudge/`. The mechanical gate is one command:
 make guard
 ```
 
-`make guard` runs `scripts/guard.sh` — the single source of truth shared by the
-pre-commit hook and CI:
+`make guard` runs `scripts/guard.sh` — the single source of truth CI calls
+(`rust-gate` job), then runs a read-only vault hygiene pass (`scripts/data-steward.py`):
 
 1. `cargo fmt --check` — formatting.
 2. `cargo clippy --all-targets -- -D warnings` — lint, with the philosophy
    rules enforced (no `unwrap`/`expect`/`panic`, exhaustive matches, pedantic).
 3. `cargo test` — the guardrail tests (stack-free).
-4. `python3 -m py_compile` over `agents/` and `hooks/` — adapter syntax.
+4. `python3 -m py_compile` over `agents/`, `hooks/`, `scripts/`, and `data/eval/` —
+   syntax; then `ruff` lint + format check (rules in `ruff.toml`).
+5. Network-free Python unit tests, then the shell guardrail tests (restore-db,
+   `doctor --strict`, verify-llm, morning-card, nightly maintenance).
 
 Run it before every commit; the same checks run in CI, so green locally means
 green on the PR.
 
-Install the pre-commit hook to get the fast subset on every commit:
+Install the pre-commit hook to get the fast subset on every commit (fmt, clippy,
+ruff, py-compile, and only the `test_*.py` / `test_*.sh` files the commit changed):
 
 ```bash
 pip install pre-commit && pre-commit install
 ```
 
-Two heavier gates run in CI (and are available locally):
+Heavier gates, available locally (all but `verify-llm` also run in CI; `eval` runs there as `eval-gate`):
 
 - `make verify-llm` — provider reachability, configured model ids, and
-  embedding dimension check. Run this after changing `boring.json` or LLM docs.
+  embedding dimension check (local only). Run this after changing `boring.json` or LLM docs.
 - `make quality` — release acceptance drift gate (MCP tool contract, docs,
   removed dangerous surfaces).
 - `make deny` — supply-chain gate (`cargo-deny`: vulnerabilities, licenses,
@@ -62,7 +66,8 @@ root cause rather than papering over the symptom.
 - Fill in the PR template (background / changes / result / review points).
 - A PR must be green on CI before it can merge: the structural gate, release
   quality gate, secret scan (gitleaks), supply-chain gate (cargo-deny), and
-  security scan (trivy).
+  security scan (trivy), compose-config, docker-build, and the behavioral
+  eval-gate.
 
 ## Design philosophy
 
