@@ -380,3 +380,84 @@ async fn a_mass_delete_then_define_leaves_an_index_after_deleting_all_40k() {
 async fn a_mass_delete_then_define_leaves_an_index_after_deleting_all_150k() {
     mass_delete_leaves_an_index("claim_mass_150k", 150_000, 0).await;
 }
+
+/// 300 open claims, the same in pg and in Surreal.
+async fn three_hundred_open_claims(
+    namespace: &str,
+) -> (SurrealClient, Store, tokio_postgres::Client) {
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
+    let config: SurrealConfig =
+        serde_json::from_value(json!({"url": url, "namespace": namespace, "database": namespace}))
+            .unwrap();
+    let client = SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap();
+    let dim = 16;
+    let store = Store::open(&dsn, dim).await.expect("open store");
+    let (db, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    db.batch_execute("DELETE FROM chunk; DELETE FROM claim; DELETE FROM document;")
+        .await
+        .unwrap();
+    client.fill_from(&store).await.expect("fill of an empty pg");
+    let path = "/vault/wiki/claim-stale.md";
+    store
+        .upsert_document(&front(path), "sha", SystemTime::now())
+        .await
+        .expect("document");
+    db.execute(
+        "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
+         SELECT 'claim-stale-' || lpad(i::text, 4, '0'), 'goal',
+                'a long enough value to count as a statement', $1, now() - make_interval(secs => i),
+                ('[' || (i / 1000.0)::text || repeat(',0.01', 14) || ',1]')::vector,
+                'decision', 'certain'
+         FROM generate_series(1, 300) AS i",
+        &[&path],
+    )
+    .await
+    .expect("claims");
+    client.fill_from(&store).await.expect("fill");
+    (client, store, db)
+}
+
+/// End condition 1: one catch-up carries 100 same-key `stale_at` changes into Surreal.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn catch_up_carries_a_same_key_stale_at_change_into_the_vector_claim_table() {
+    let (client, store, db) = three_hundred_open_claims("claim_stale_a").await;
+    // A write outside `mark_claim_stale`'s mirror: same key, new value, pg only.
+    let changed = db
+        .execute(
+            "UPDATE claim SET stale_at = now() WHERE subject <= 'claim-stale-0100'",
+            &[],
+        )
+        .await
+        .expect("stale");
+    assert_eq!(changed, 100);
+    client.catch_up(&store).await.expect("catch_up");
+    let stale = client
+        .run("SELECT VALUE count() FROM claim WHERE stale_us != NONE GROUP ALL;")
+        .await
+        .expect("count");
+    assert_eq!(
+        stale[0][0], 100,
+        "claims whose stale_us was carried over (want 100 of 100): {stale:?}"
+    );
+}
+
+/// End condition 2: `compare` (what `vector-check` prints) sees the same-key `stale_at` change.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn compare_sees_a_stale_at_that_differs_under_the_same_key() {
+    let (client, store, _db) = three_hundred_open_claims("claim_stale_b").await;
+    // Surreal's stale_us moved under 100 keys, pg's did not; claim_row stays equal to pg.
+    client
+        .run("UPDATE claim SET stale_us = 1 WHERE subject <= 'claim-stale-0100';")
+        .await
+        .expect("drift");
+    let tables = client.compare(&store).await.expect("compare");
+    let lines: Vec<String> = tables.iter().map(drudge::store::FillTable::line).collect();
+    assert!(
+        tables.iter().any(|t| !t.same()),
+        "vector-check reports every table the same while 100 stale_at differ under the same key: {lines:?}"
+    );
+}
