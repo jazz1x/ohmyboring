@@ -170,6 +170,22 @@ else
     fail "a failing retention step — $bad"
 fi
 
+# (f) the data-steward step fails (same causes): the same ✗ line, the run finishes, exit non-zero.
+run_case STUB_DRUDGE_FAIL=steward
+bad=""
+if [ "$rc" = "0" ]; then bad="rc 0 (want non-zero)"; fi
+if ! printf '%s' "$out" | grep -q '^✗ data-steward'; then
+    bad="${bad:+$bad, }no ✗ data-steward line in the output"
+fi
+if ! printf '%s' "$out" | grep -qF '=== maintenance finished'; then
+    bad="${bad:+$bad, }the later steps did not run"
+fi
+if [ -z "$bad" ]; then
+    pass "a failing data-steward step prints a ✗ line, the run finishes, the exit code is non-zero"
+else
+    fail "a failing data-steward step — $bad"
+fi
+
 # Scratch mutants run from a directory with the real scripts/lib beside them: the script
 # resolves lib relative to its own path, and a symlink keeps the mutant on the shared files.
 mutant_dir="$tmp/mutant"
