@@ -61,7 +61,7 @@ jobs:
 
   rust-gate:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -139,7 +139,7 @@ jobs:
   # Catches Dockerfile / Cargo drift that guard.sh (stack-free) cannot detect.
   docker-build:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docker != 'false') }}
+    if: ${{ !cancelled() && needs.changes.outputs.docker == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -156,7 +156,7 @@ jobs:
   # previously manual-only (`make eval`).
   eval-gate:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.eval != 'false') }}
+    if: ${{ !cancelled() && needs.changes.outputs.eval == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
