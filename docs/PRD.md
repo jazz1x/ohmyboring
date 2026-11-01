@@ -4,8 +4,6 @@
 The product definition for this repository. `GOALS.md` is the "current-slice execution contract" derived from it.
 
 > For the 39 commits before this document, defect discovery dragged the documentation along. This document exists to reverse that direction.
-> Draft → six-seat panel review → two independent advisor rounds; the process record is not kept in the repository, so read
-> **only the decisions** here.
 
 ## 0. BLUF
 
@@ -20,7 +18,7 @@ The product definition for this repository. `GOALS.md` is the "current-slice exe
 
 ## 1. What this product does
 
-At the moment the owner types a prompt into a coding agent, the `UserPromptSubmit` hook looks in the vault for how the same problem was solved before and injects up to three snippets (280 chars, with an injection fence — `agents/shared/recall_core.py:193–198`) into the agent's context **on every prompt** (the "1h per-session throttle" v0.1 described was a false fact — it never existed on the Claude Code path, §5-R6). When the session ends, the `SessionEnd` hook distills the transcript with a local LLM into a markdown note (verifier required, one repair, dead-letter), and **now, at the same moment, also records whether what was injected into that session was actually used** (#224, `agents/shared/distill_core.py:791–819`). The vault is the source of truth and the DB is a derived index rebuilt by `sync`. Everything is local (zero cloud), with no user intervention. The product succeeds at the moment "the agent does not re-solve from scratch a problem the owner already solved" — and that success is now **measured** by the uptake ledger.
+At the moment the owner types a prompt into a coding agent, the `UserPromptSubmit` hook looks in the vault for how the same problem was solved before and injects up to three snippets (280 chars, with an injection fence — `agents/shared/recall_core.py` `SNIPPET_CHARS`·`FENCE`) into the agent's context **on every prompt** (the "1h per-session throttle" v0.1 described was a false fact — it never existed on the Claude Code path, §5-R6). When the session ends, the `SessionEnd` hook distills the transcript with a local LLM into a markdown note (verifier required, one repair, dead-letter), and **now, at the same moment, also records whether what was injected into that session was actually used** (#224, `agents/shared/distill_core.py` `log_uptake_event`). The vault is the source of truth and the DB is a derived index rebuilt by `sync`. Everything is local (zero cloud), with no user intervention. The product succeeds at the moment "the agent does not re-solve from scratch a problem the owner already solved" — and that success is now **measured** by the uptake ledger.
 
 ## 2. Users and the verdict contract
 
@@ -136,7 +134,7 @@ The first-class measurement is M8 (uptake), the diagnostic is M1 (precision). De
 ### R3. Solved experience does not silently vanish
 The gate stays (verifier → one repair → dead-letter), but **the key decision of a session that passed must not drop out of distillation.**
 
-A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all** (the 2026-08-20 rag-usage probe, §4 D2). And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
+A real violation: a four-PR session was compressed to a fixed four claims and the day's biggest decision (#218, deleting the threshold enforce path) is **in no note at all**. And this happened while M4 was green — which is why M4 was renamed "pipeline survival". **The rename is an honesty correction of the metric, not a resolution of this requirement.**
 
 **Derived work (scheduled)**: remove the structural fixed claim count per note, or split distillation per decision. Honest cost **1–2 weeks** — the prompt/verifier change itself is 2–4 days but it cuts across dedup, claim upsert, eval fixtures and mutation verification. And it is **forward-only**: the engine refused re-distillation 3/3 and the original raws are gone, so the compression of existing notes cannot be undone.
 
@@ -162,7 +160,7 @@ The exclusion clause stays for two reasons anyway: ① the first deletion is ~10
 (Confirming the state of the §8 Q7 `forget` traversal is still the owner's.)
 
 ### R6. The read door is fast and LLM-free — *throttle decision (this round's product decision)*
-Facts (all verified): the Claude Code hook injects on every prompt with no throttle (`agents/claude-code/recall.py:46` — `throttle_session` not passed, default False at `recall_core.py:128`), only Kimi has it on (`agents/kimi/recall.py:30`), and `agents/claude-code/README.md:10` **lies** with "throttled to once per session".
+Facts (all verified): the Claude Code hook injects on every prompt with no throttle (`agents/claude-code/recall.py:46` — `throttle_session` not passed, default False at `recall_core.py` `throttle_session`), and `agents/claude-code/README.md:10` **lies** with "throttled to once per session".
 
 **Decision: drop the throttle concept and make the docs match the facts.** Three grounds:
 1. ~~**The cost is not real** — 3×280 chars is ~0.1% of a modern context.~~ **This ground is rejected by the 2026-09-02 measurement.** That calculation measured **one injection**; the channel puts **32–168 per session** into the same context. Ledger measurement:
@@ -180,7 +178,7 @@ Facts (all verified): the Claude Code hook injects on every prompt with no throt
    Even with ground 1 rejected, **the decision (dropping the throttle concept) stands** — grounds 2 and 3 hold it up independently, and a throttle would not fix duplication anyway (it kills the good injections too). But **the claim that there is no cost can no longer be made**, and in-session dedup is the first candidate after the window closes (frozen under §5-R6, so no change during the window). The real cost is still noise, but **tokens were not free either.**
 2. **Measurement integrity** — the two-week uptake sample is defined on the current injection frequency. Changing frequency mid-window voids the §2 contract. Frozen for the window.
 3. **The verdict supersedes the decision** — if not working, the channel itself is redesigned and the throttle debate is moot; if working, per-prompt injection has proven its value.
-Derived: ① remove the falsehood in `agents/claude-code/README.md:10` (immediately, a doc fix) ② Kimi's `throttle_session=True` is disposed of **after the window** when the channel contract is unified (the no-change-during-window rule applies to Kimi too — though Kimi's channel volume is negligible, inferred). The AI PM's point that "nothing is offered at the moment of demand (being stuck)" is right, and that surface goes to §8 Q8 as a **next-design candidate** with M7 as input.
+Derived: ① remove the falsehood in `agents/claude-code/README.md:10` (immediately, a doc fix). The AI PM's point that "nothing is offered at the moment of demand (being stuck)" is right, and that surface goes to §8 Q8 as a **next-design candidate** with M7 as input.
 
 ### R7. The injection surface is a declaration, not code — *new*
 

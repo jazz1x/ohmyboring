@@ -201,7 +201,7 @@ flowchart LR
 
 ## 設定
 
-ポリシーは **`boring.json`**（`make up` で `boring.example.json` から生成）に記述します：
+ポリシーは **`boring.json`**（`make up` が `boring.example.json` から `config/boring.json` を作り、`./boring.json` としてリンク）に記述します：
 
 ```json
 {
@@ -235,7 +235,7 @@ flowchart LR
 | `llm.embed_model` / `llm.embed_dim` | 埋め込みモデル + そのベクトル次元（カーネル唯一のモデル） |
 | `llm.bootstrap` | `auto` = ブートストラップが起動/pull 可能 · `manual` = ヘルスチェックのみ（サーバーはユーザー所有） |
 | `repos[]` | パス/remote ルール → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | 独立した AST コードコーパスへ明示的に追加するソースルート。Tree-sitter で Rust・Python・シェルに対応し、opt-in するまで無効 |
+| `code_index.sources[]` | 独立した AST コードコーパスへ明示的に追加するソースルート。現在は Tree-sitter 経由で Rust・Python・shell に対応し、opt-in するまで無効 |
 | `agents[]` | エージェントのセッション対話記録・アダプター設定（生のリポジトリ・コードベース取り込み用ではない） |
 | `allow_company_origin` | boolean、既定 `false`。`true` = `origin:company` ノート（会社業務のセッション経験）を受け入れ済みコーパスとして扱い、監査の "clean" 表示を反転させない。`false` はレビュー対象としてフラグ。セッション経験のみ対象 — 会社 KB の原本は引き続きポリシー外 |
 | `checkout_roots` | git チェックアウトを置くディレクトリの一覧（`~` 展開、深さ ≤ 3）。夜間の衛生チェックが、リモートのリポジトリ名ではなくチェックアウトのフォルダ名で付いたプロジェクトを報告。未設定 = チェックを実行しない（0 ではなく「スキャンなし」と報告） |
@@ -317,7 +317,7 @@ make readiness
 | `BORING_READINESS_PENDING_TTL` | readiness で stale `.pending` とみなす閾値。`INGEST_PENDING_TTL`、次に `1800` 秒へフォールバック |
 | `BORING_READINESS_RETRY_TTL` | readiness で stale `.retry` とみなす閾値。`INGEST_RETRY_TTL`、次に pending 閾値へフォールバック |
 | `BORING_OWNER_TOKEN` | オーナー呼び出し(`supersedes` 訂正・カード判定ボタン)に必要な共有シークレット。エンジン・ドア・カードが同じ値を見る必要があり、compose が両コンテナに渡す。未設定 = 誰もオーナーとして書けない |
-| `BORING_DOOR_URL` | 朝カードと Claude Code SessionStart フックがドアを探す URL — 両方の利用者に必須。なければカードは起動拒否(exit 2)、フックは `오늘 승인한 것` 節(フックが出力する韓国語ヘッダーそのまま、「本日承認したもの」)を省略する。利用者側に既定値はない |
+| `BORING_DOOR_URL` | 朝カード・Claude Code SessionStart フック・イベントシンク・ブリーフィングがドアを探す URL。カードは必須で、なければ起動拒否(exit 2)。フック・イベントシンク・ブリーフィングは `http://localhost:7710`（コンテナ内では `http://boring-door:7710`）にフォールバックする |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | オプションの Slack 秘書（`make secretary`）。ボットトークンには `message.channels` スコープが必要 — スレッド返信が訂正を記憶に届ける経路 |
 
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。イベントはまず OpenTelemetry 形式のログレコードとしてローカルエンジン DB に保存されます。NDJSON ファイルはエンジン停止時の fallback スプールで、`BORING_EVENT_SINK=spool` または `both` を選んだ場合だけ意図的にファイル中心/同時記録になります。DB view は HTTP `/events`（`/otel-events` alias も同じ）または MCP `events`、`make events` は DB を先に読み、失敗時はファイルスプールを読みます。
@@ -396,7 +396,7 @@ make bench-embed
 | `make smoke` | end-to-end smoke test |
 | `make logs` | エンジンログ |
 | `make events [N=20]` | エンジン DB の最近のワークフローイベントを表示。失敗時はローカルスプールに fallback |
-| `make guard` | fmt + clippy + test + Python py-compile |
+| `make guard` | fmt + clippy + test + Python py-compile・ユニットテスト + シェルガードテスト + vault data-steward dry-run |
 | `make quality` | リリース受け入れ drift ゲート |
 | `make down` | コンテナ停止 |
 
@@ -655,7 +655,7 @@ curl -s -X POST http://localhost:7710/mcp \
 ## 開発 · ガードレール
 
 - SSOT ドキュメント: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = fmt + clippy + test + py-compile + py-unit-tests（`scripts/guard.sh`）、続いて vault データ衛生の dry-run
+- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test` + Python py-compile・ユニットテスト + シェルガードテスト + vault data-steward dry-run
 - `make quality` = MCP tool、vector モード文書、削除済み危険 surface のリリース受け入れ drift ゲート
 - CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
@@ -734,7 +734,8 @@ oh-my-boring/
 ├─ data/                    # Postgres データ (gitignored)
 ├─ docker-compose.yml
 ├─ start.sh
-├─ boring.json              # ポリシー (make up 時に生成)
+├─ config/boring.json       # ポリシー (make up 時に生成)
+├─ boring.json              # config/boring.json へのリンク
 └─ Makefile
 ```
 

@@ -81,7 +81,7 @@ The related pair is closer, so the embedding sanity check passes.
 
 ## Benchmark methodology
 
-`scripts/bench-llm.py` reuses the production distillation prompt (`agents/shared/distill_core.py::_build_prompt`) and JSON extractor (`_extract_json`). It evaluates:
+`scripts/bench-llm.py` reuses the production distillation prompt (`src/ohmyboring/distill/prompts/draft.py::build_prompt`) and JSON extractor (`src/ohmyboring/adapters/llm.py::extract_json`). It evaluates:
 
 - valid JSON rate
 - title language compliance (`--lang ko|ja|en`)

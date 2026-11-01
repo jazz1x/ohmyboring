@@ -202,7 +202,7 @@ The ingest loop also has a Rust-side workflow graph contract in `drudge/src/work
 
 ## Configuration
 
-Policy lives in **`boring.json`** (created from `boring.example.json` by `make up`):
+Policy lives in **`boring.json`** (`make up` creates `config/boring.json` from `boring.example.json` and links it as `./boring.json`):
 
 ```json
 {
@@ -236,7 +236,7 @@ Policy lives in **`boring.json`** (created from `boring.example.json` by `make u
 | `llm.embed_model` / `llm.embed_dim` | embedding model + its vector dimension (kernel's only model) |
 | `llm.bootstrap` | `auto` = bootstrap may start/pull · `manual` = health-check only (you own the server) |
 | `repos[]` | path/remote rules → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | explicit source roots for the separate AST code corpus; Rust, Python and shell via Tree-sitter, disabled unless opted in |
+| `code_index.sources[]` | explicit source roots for the separate AST code corpus; currently Rust, Python, and shell via Tree-sitter, disabled unless opted in |
 | `agents[]` | agent session transcript and adapter configuration; not raw repository/codebase ingestion |
 | `allow_company_origin` | boolean, default `false`. `true` = `origin:company` notes (session experience from company work) count as accepted corpus and do not flip the audit "clean" flag; `false` flags them for review. Session experience only — company KB originals stay off-policy |
 | `checkout_roots` | list of directories (`~` expanded, depth ≤ 3) holding your git checkouts. The nightly hygiene pass reports projects named after a checkout folder instead of its remote repo. Unset = the check is not run (reported as not scanned, never as zero) |
@@ -318,7 +318,7 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 | `BORING_READINESS_PENDING_TTL` | stale `.pending` marker threshold for readiness; falls back to `INGEST_PENDING_TTL`, then `1800` seconds |
 | `BORING_READINESS_RETRY_TTL` | stale `.retry` marker threshold for readiness; falls back to `INGEST_RETRY_TTL`, then the pending threshold |
 | `BORING_OWNER_TOKEN` | shared secret for owner calls (corrections via `supersedes`, card verdict buttons). The engine, the door, and the card must all see the same value — compose passes it to both containers. Unset = no caller can write as the owner |
-| `BORING_DOOR_URL` | where the morning card and the Claude Code SessionStart hook find the door — required by both consumers. Without it the card refuses to start (exit 2) and the hook skips the `오늘 승인한 것` section (the hook's literal Korean header, "Approved today"). No consumer defaults it |
+| `BORING_DOOR_URL` | where the morning card, the Claude Code SessionStart hook, the event sink, and the briefing find the door. The card requires it. Without it the card refuses to start (exit 2). The hook, the event sink, and the briefing fall back to `http://localhost:7710` (`http://boring-door:7710` inside a container) |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | optional Slack assistant (`make secretary`); the bot token needs the `message.channels` scope — thread replies are how corrections reach memory |
 
 Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are stored in the local engine DB first as OpenTelemetry-shaped log records; the NDJSON file is a fallback spool for engine-down cases unless you choose `BORING_EVENT_SINK=spool` or `both`. Use HTTP `/events` (or the `/otel-events` alias) or MCP `events` for the DB view; use `make events` for the DB view with automatic fallback to the file spool.
@@ -389,7 +389,7 @@ One name per layer — the `ohmyzsh` ↔ `~/.oh-my-zsh` pattern. Only the layer 
 | `make smoke` | end-to-end smoke test |
 | `make logs` | engine logs |
 | `make events [N=20]` | show recent workflow events from the engine DB, falling back to the local spool |
-| `make guard` | fmt + clippy + test + Python py-compile |
+| `make guard` | fmt + clippy + test + Python py-compile and unit tests + shell guard tests + vault data-steward dry-run |
 | `make quality` | release acceptance drift gate |
 | `make down` | stop containers |
 
@@ -617,7 +617,7 @@ curl -s -X POST http://localhost:7710/mcp \
 When hermes-agent is enabled in `boring.json`, `make up` wires it automatically:
 
 - Adds `mcp_servers.ohmyboring` to `~/.hermes/config.yaml`
-- Installs the canonical `~/.hermes/scripts/briefing.py` (reaches the door through `door_url()`, i.e. `BORING_DOOR_URL`)
+- Installs the canonical `~/.hermes/scripts/briefing.py` (reaches the door via `BORING_DOOR_URL`, default `http://localhost:7710`)
 - Validates the connection in `make smoke`
 
 Enable it in `boring.json`:
@@ -648,7 +648,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 ## Development · guardrails
 
 - SSOT docs: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = fmt + clippy + test + py-compile + py-unit-tests (`scripts/guard.sh`), then a vault data hygiene dry-run
+- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test` + Python py-compile and unit tests + shell guard tests + a vault data-steward dry-run
 - `make quality` = release acceptance drift gate for MCP tools, vector-mode docs, and removed dangerous surfaces
 - CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
@@ -727,7 +727,8 @@ oh-my-boring/
 ├─ data/                    # Postgres persistence (gitignored)
 ├─ docker-compose.yml
 ├─ start.sh
-├─ boring.json              # policy (created by make up)
+├─ config/boring.json       # policy (created by make up)
+├─ boring.json              # link to config/boring.json
 └─ Makefile
 ```
 

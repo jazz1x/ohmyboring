@@ -22,6 +22,6 @@ PRs are squash-merged, so the title becomes the commit message.
 ## Checklist
 
 - [ ] Branched off `main` (no direct push to `main`).
-- [ ] `make guard` passes locally (fmt + clippy `-D warnings` + test + py-compile).
+- [ ] `make guard` passes locally (fmt + clippy `-D warnings` + test + py-compile + ruff + Python unit tests).
 - [ ] Title follows Conventional Commits.
 - [ ] Change is consistent with `drudge/PHILOSOPHY.md` / `drudge/RUST-STYLE.md`.

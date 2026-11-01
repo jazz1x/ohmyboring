@@ -201,7 +201,7 @@ flowchart LR
 
 ## 설정
 
-정책은 **`boring.json`**(`make up` 시 `boring.example.json`에서 생성)에:
+정책은 **`boring.json`**(`make up`이 `boring.example.json`에서 `config/boring.json`을 만들고 `./boring.json`으로 연결)에:
 
 ```json
 {
@@ -235,7 +235,7 @@ flowchart LR
 | `llm.embed_model` / `llm.embed_dim` | 임베딩 모델 + 그 벡터 차원(커널의 유일한 모델) |
 | `llm.bootstrap` | `auto` = 부트스트랩이 기동/pull 가능 · `manual` = 헬스체크만(서버는 사용자 소유) |
 | `repos[]` | 경로/remote 규칙 → `origin=personal/company/mirror/community` |
-| `code_index.sources[]` | 별도 AST 코드 코퍼스에 명시적으로 넣을 소스 루트. Tree-sitter 로 Rust·Python·셸을 지원하며 opt-in 전에는 비활성 |
+| `code_index.sources[]` | 별도 AST 코드 코퍼스에 명시적으로 넣을 소스 루트. 현재 Tree-sitter로 Rust·Python·shell을 지원하며 opt-in 전에는 비활성 |
 | `agents[]` | 에이전트 세션 대화 기록·어댑터 설정(원시 저장소·코드베이스 적재 아님) |
 | `allow_company_origin` | boolean, 기본 `false`. `true` = `origin:company` 노트(회사 업무의 세션 경험)를 받아들인 코퍼스로 보고 감사 "clean" 표시를 뒤집지 않음. `false` 는 검토 대상으로 표시. 세션 경험에만 적용 — 회사 KB 원본은 계속 정책 밖 |
 | `checkout_roots` | git 체크아웃이 들어 있는 디렉터리 목록(`~` 확장, 깊이 ≤ 3). 야간 위생 점검이 원격 저장소 이름 대신 체크아웃 폴더 이름으로 잡힌 프로젝트를 보고. 미설정 = 점검을 돌리지 않음(0 이 아니라 "스캔 안 함"으로 보고) |
@@ -317,7 +317,7 @@ make readiness
 | `BORING_READINESS_PENDING_TTL` | readiness에서 stale `.pending`으로 보는 임계값; `INGEST_PENDING_TTL`, 그다음 `1800`초를 기본으로 사용 |
 | `BORING_READINESS_RETRY_TTL` | readiness에서 stale `.retry`로 보는 임계값; `INGEST_RETRY_TTL`, 그다음 pending 임계값을 기본으로 사용 |
 | `BORING_OWNER_TOKEN` | 소유자 호출(`supersedes` 정정·카드 판정 버튼)에 필요한 공유 비밀값. 엔진·문·카드가 같은 값을 봐야 하고, compose 가 두 컨테이너에 넘긴다. 미설정 = 누구도 소유자로 쓸 수 없다 |
-| `BORING_DOOR_URL` | 아침 카드와 Claude Code SessionStart 훅이 문을 찾는 URL — 두 소비자 모두 필수다. 없으면 카드가 기동 거부(exit 2)하고 훅은 `오늘 승인한 것` 절을 뺀다. 소비자는 기본값을 두지 않는다 |
+| `BORING_DOOR_URL` | 아침 카드·Claude Code SessionStart 훅·이벤트 싱크·브리핑이 문을 찾는 URL. 카드는 필수라 없으면 기동 거부(exit 2)한다. 훅·이벤트 싱크·브리핑은 `http://localhost:7710`(컨테이너 안에서는 `http://boring-door:7710`)으로 대체한다 |
 | `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` | 선택적 Slack 비서(`make secretary`); 봇 토큰에 `message.channels` 스코프가 필요하다 — 스레드 답글이 정정을 기억에 넣는 길이다 |
 
 구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 이벤트는 OpenTelemetry 형태의 로그 레코드로 로컬 엔진 DB에 먼저 저장됩니다. NDJSON 파일은 엔진이 내려간 경우의 fallback 스풀이고, `BORING_EVENT_SINK=spool` 또는 `both`를 선택한 경우에만 의도적으로 파일 중심/동시 기록이 됩니다. DB 관점은 HTTP `/events`(`/otel-events` alias도 동일) 또는 MCP `events`로 보고, `make events`는 DB를 먼저 조회하되 실패하면 파일 스풀을 봅니다.
@@ -388,7 +388,7 @@ MacBook Pro(M5 Pro, 48 GB RAM) + 로컬 Ollama에서 측정한 결과, 16 GB 티
 | `make smoke` | end-to-end smoke test |
 | `make logs` | 엔진 로그 |
 | `make events [N=20]` | 엔진 DB의 최근 작업 흐름 이벤트 보기; 실패 시 로컬 스풀 fallback |
-| `make guard` | fmt + clippy + test + Python py-compile |
+| `make guard` | fmt + clippy + test + Python py-compile·단위 테스트 + 셸 가드 테스트 + vault data-steward dry-run |
 | `make quality` | 릴리즈 수용성 drift 게이트 |
 | `make down` | 컨테이너 중지 |
 
@@ -647,7 +647,7 @@ curl -s -X POST http://localhost:7710/mcp \
 ## 개발 · 가드레일
 
 - SSOT 문서: `drudge/{PHILOSOPHY,RUST-STYLE,ENFORCEMENT}.md`
-- `make guard` = fmt + clippy + test + py-compile + py-unit-tests(`scripts/guard.sh`), 이어서 vault 데이터 위생 dry-run
+- `make guard` = `rustfmt --check` + `clippy -D warnings` + `cargo test` + Python py-compile·단위 테스트 + 셸 가드 테스트 + vault data-steward dry-run
 - `make quality` = MCP tool, vector 모드 문서, 제거된 위험 surface의 릴리즈 수용성 drift 게이트
 - CI: `rust-gate` · `quality-gate` · `gitleaks` · `cargo-deny` · `trivy` · `compose-config` · `docker-build` · `eval-gate`
 - `unsafe_code = "forbid"`
@@ -726,7 +726,8 @@ oh-my-boring/
 ├─ data/                    # Postgres 데이터 (gitignored)
 ├─ docker-compose.yml
 ├─ start.sh
-├─ boring.json              # 정책 (make up 시 생성)
+├─ config/boring.json       # 정책 (make up 시 생성)
+├─ boring.json              # config/boring.json 으로의 링크
 └─ Makefile
 ```
 
