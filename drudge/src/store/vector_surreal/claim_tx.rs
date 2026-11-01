@@ -301,8 +301,8 @@ struct NotePlan {
 
 /// `plan.planned` is the `(subject, predicate)` pairs of `older`'s rows as read before the
 /// transaction; the guards are made from them, and the transaction throws if the rows hold other
-/// pairs now (or if `claim_row` holds a different number of spellings than `plan.every`, which is
-/// what the unseal's groups were made from).
+/// pairs now (or if `claim_row` holds a different set of spellings than `plan.every`, which is
+/// what the unseal's groups were made from: a swapped spelling keeps the count and not the set).
 fn note_sql(newer: &str, older: &str, plan: &NotePlan) -> String {
     let (n, o) = (text(newer), text(older));
     let guards = guards_let(plan.planned.iter().map(|(s, p)| (s.as_str(), p.as_str())));
@@ -318,7 +318,7 @@ fn note_sql(newer: &str, older: &str, plan: &NotePlan) -> String {
         pairs_literal(&members),
         groups_literal(&groups),
     );
-    let every = plan.every.len();
+    let every = pairs_literal(&plan.every);
     format!(
         "{guards}
          LET $planned = {planned};
@@ -326,7 +326,9 @@ fn note_sql(newer: &str, older: &str, plan: &NotePlan) -> String {
          {SLOTS_UNCHANGED}
          {BUMP_GUARDS}
          LET $fslots = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row WHERE source_path = {o} AND kind = 'fact');
-         IF array::len(array::complement($fslots, {facts})) > 0 OR array::len(array::complement({facts}, $fslots)) > 0 OR array::len(array::distinct(SELECT VALUE [subject, predicate] FROM claim_row)) != {every} {{ THROW {stale}; }};
+         LET $seen = {every};
+         LET $spelled = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row);
+         IF array::len(array::complement($fslots, {facts})) > 0 OR array::len(array::complement({facts}, $fslots)) > 0 OR array::len(array::complement($spelled, $seen)) > 0 OR array::len(array::complement($seen, $spelled)) > 0 {{ THROW {stale}; }};
          LET $slots = {members_lit};
          LET $groups = {groups_lit};
          {RETIRED_LETS}

@@ -962,3 +962,133 @@ async fn unseal_promotes_within_the_canon_spelling_group_as_pg_does() {
     println!("Z2a unseal parity {same}/{}", scenarios.len());
     assert_eq!(same, scenarios.len(), "open rows differ from pg");
 }
+
+/// The group of one unseal race, numbered `tag`: note `a` (retired by `b`) holds the open row of
+/// spelling `T X`, note `c` a sealed row of spelling `t_x`, note `d` a sealed, older row of spelling
+/// `t__x`, all one canon slot.
+async fn spelling_swap_fixture(c: &SurrealClient, tag: &str) {
+    let path = |note: &str| format!("/v/z2a-swap-{tag}-{note}.md");
+    for note in ["a", "b", "c", "d"] {
+        doc(c, &path(note), "agent").await;
+    }
+    let rows = [
+        (format!("T X{tag}"), "a", 9000, "NONE"),
+        (format!("t_x{tag}"), "c", 1000, "1"),
+        (format!("t__x{tag}"), "d", 500, "1"),
+    ];
+    for (subject, note, vf, sealed) in &rows {
+        put(c, subject, "goal", &path(note), *vf, "fact")
+            .await
+            .expect("claim");
+        c.run(&format!(
+            "UPDATE claim_row SET superseded_us = {sealed} WHERE subject = {} AND source_path = {};",
+            json!(subject),
+            json!(path(note))
+        ))
+        .await
+        .expect("seal state");
+    }
+    supersedes(c, &path("b"), &path("a")).await;
+}
+
+/// The request that moves the sealed `t_x` row to another spelling of the same canon slot: one
+/// spelling goes, another comes, and the count of spellings stays what it was.
+async fn swap_the_spelling(c: &SurrealClient, tag: &str) {
+    c.run(&format!(
+        "BEGIN; UPDATE claim_row SET subject = {} WHERE subject = {} AND source_path = {}; COMMIT;",
+        json!(format!("t x{tag}")),
+        json!(format!("t_x{tag}")),
+        json!(format!("/v/z2a-swap-{tag}-c.md"))
+    ))
+    .await
+    .expect("swap");
+}
+
+async fn open_after_swap(c: &SurrealClient, tag: &str) -> Vec<String> {
+    let answer = c
+        .run(&format!(
+            "SELECT subject, source_path, valid_from_us FROM claim_row \
+             WHERE string::starts_with(source_path, '/v/z2a-swap-{tag}-') AND superseded_us = NONE;"
+        ))
+        .await
+        .expect("open rows");
+    let mut rows: Vec<String> = answer[0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            format!(
+                "{}|{}|{}",
+                r["subject"].as_str().unwrap().replace(tag, "#"),
+                r["source_path"].as_str().unwrap().replace(tag, "#"),
+                r["valid_from_us"].as_i64().unwrap()
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A seal plans its groups from the spellings it read; a request that swaps one spelling of the
+/// group for another between that read and the seal's commit leaves the count of spellings as it
+/// was. The seal must notice and plan again: the open rows must be what a seal run before the swap
+/// and a seal run after it both leave (here the same rows), not what the stale plan promotes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_seal_replans_when_a_spelling_of_its_group_is_swapped_under_it() {
+    let c = client("z2a_swap").await;
+    let race = race_client("z2a_swap");
+    let (before, after) = ("sb", "sa");
+    spelling_swap_fixture(&c, before).await;
+    c.seal_note(
+        &format!("/v/z2a-swap-{before}-b.md"),
+        &format!("/v/z2a-swap-{before}-a.md"),
+    )
+    .await
+    .expect("serial seal");
+    swap_the_spelling(&c, before).await;
+    let first = open_after_swap(&c, before).await;
+    spelling_swap_fixture(&c, after).await;
+    swap_the_spelling(&c, after).await;
+    c.seal_note(
+        &format!("/v/z2a-swap-{after}-b.md"),
+        &format!("/v/z2a-swap-{after}-a.md"),
+    )
+    .await
+    .expect("serial seal");
+    let second = open_after_swap(&c, after).await;
+    assert_eq!(first, second, "the two serial orders disagree");
+    let n = runs();
+    let mut failures = Vec::new();
+    let mut same = 0;
+    for i in 0..n {
+        let tag = format!("r{i}");
+        spelling_swap_fixture(&c, &tag).await;
+        let wait = std::time::Duration::from_micros((i % 5) as u64 * 700);
+        let (newer, older) = (
+            format!("/v/z2a-swap-{tag}-b.md"),
+            format!("/v/z2a-swap-{tag}-a.md"),
+        );
+        let (sealed, ()) = tokio::join!(race.seal_note(&newer, &older), async {
+            tokio::time::sleep(wait).await;
+            swap_the_spelling(&c, &tag).await;
+        });
+        let got = open_after_swap(&c, &tag).await;
+        if sealed.is_ok() && got == first {
+            same += 1;
+        } else {
+            failures.push(format!("run {i}: sealed={sealed:?} open={got:?}"));
+        }
+    }
+    println!(
+        "Z2a swap runs={n} same_as_serial={same} serial={first:?} first_failure={:?}",
+        failures.first()
+    );
+    assert_eq!(
+        same,
+        n,
+        "{} of {n} runs: {:?}",
+        failures.len(),
+        failures.first()
+    );
+}
