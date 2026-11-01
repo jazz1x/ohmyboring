@@ -28,6 +28,7 @@ pub mod retrieve;
 pub mod rules;
 pub mod serve;
 pub mod split_subjects;
+pub mod steward;
 pub mod store;
 pub mod vault;
 pub mod vector;
