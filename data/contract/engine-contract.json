@@ -104,6 +104,7 @@
     "POST /recurrences",
     "POST /remember",
     "POST /repairs/split-subjects",
+    "POST /repairs/split-subjects/reread",
     "POST /risks",
     "POST /rules/match",
     "POST /search",
