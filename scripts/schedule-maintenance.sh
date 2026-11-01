@@ -57,7 +57,13 @@ run_maintenance() {
             ;;
     esac
     echo "--- retention ---"
-    uv run --locked python scripts/retention.py --apply --yes
+    # The engine does it (drudge retention). BORING_RETENTION_IMPL=python runs scripts/retention.py
+    # instead — the rollback if the engine's archive/delete ever misbehaves.
+    if [ "${BORING_RETENTION_IMPL:-}" = "python" ]; then
+        uv run --locked python scripts/retention.py --apply --yes
+    else
+        ./drudge/target/release/drudge retention --apply --yes
+    fi
     # Injection precision is the product's first-class metric and it cannot be computed from
     # distances — only from labels on real injections. Collecting them by hand never happened,
     # so the daily run takes a bounded sample. Bounded on purpose: the local model judges 24

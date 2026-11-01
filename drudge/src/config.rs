@@ -1176,6 +1176,26 @@ impl BoringConfig {
         dirs
     }
 
+    /// Paths of enabled `session-end` agents, `~` expanded, duplicates dropped, no fallback —
+    /// `boring_config.source_dirs(adapter="session-end")`. Empty means "none configured".
+    pub fn session_end_source_dirs(&self) -> Vec<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut out: Vec<String> = Vec::new();
+        for agent in self
+            .agents
+            .iter()
+            .filter(|a| a.enabled && a.adapter == Adapter::SessionEnd)
+        {
+            for path in &agent.paths {
+                let expanded = expand_tilde(path, &home);
+                if !out.contains(&expanded) {
+                    out.push(expanded);
+                }
+            }
+        }
+        out
+    }
+
     pub fn canonical_repo(&self, raw_repo: &str) -> String {
         let repo = raw_repo.trim();
         if repo.is_empty() {
