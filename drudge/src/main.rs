@@ -255,7 +255,13 @@ async fn main() -> Result<()> {
         }
         Cmd::CodeStatus { repository } => {
             let dsn = config::pg_dsn();
-            let code_store = code_index::CodeIndexStore::connect(&dsn)?;
+            let surreal = match cfg.vector.effective().backend {
+                config::VectorBackend::Surreal => Some(store::SurrealClient::new(
+                    cfg.vector.surreal.settings(&config::env_set)?,
+                )?),
+                config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
+            };
+            let code_store = code_index::CodeIndexStore::connect(&dsn)?.with_surreal(surreal);
             let statuses = code_store.status(repository.as_deref()).await?;
             if let Some(requested) = repository.as_deref() {
                 anyhow::ensure!(

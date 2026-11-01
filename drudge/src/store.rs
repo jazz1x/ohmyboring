@@ -2710,7 +2710,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn recent_queries(&self, limit: i64) -> Result<Vec<QueryLogRow>> {
+    async fn recent_queries_pg(&self, limit: i64) -> Result<Vec<QueryLogRow>> {
         let rows = self.db().await?
                         .query(
                 "SELECT id, created_at, endpoint, query, hit_paths, hit_dists, hit_dist_kinds, sources, answer_snippet, latency_ms
@@ -2764,7 +2764,7 @@ impl Store {
     }
 
     /// Labels newest-first. The sampler reads these to skip pairs it has already judged.
-    pub async fn recent_recall_labels(&self, limit: i64) -> Result<Vec<RecallLabelRow>> {
+    async fn recent_recall_labels_pg(&self, limit: i64) -> Result<Vec<RecallLabelRow>> {
         let rows = self
             .db()
             .await?
@@ -3065,7 +3065,7 @@ impl Store {
 
     /// Per-judge verdict counts, plus how often the two judges agreed on hits both of them
     /// labelled. `unsure` is counted, never folded into either side — an abstention is not a vote.
-    pub async fn recall_label_stats(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {
+    async fn recall_label_stats_pg(&self) -> Result<(Vec<RecallLabelStats>, i64, i64)> {
         let rows = self
             .db()
             .await?
@@ -3205,7 +3205,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn recent_events(&self, filter: EventLogFilter<'_>) -> Result<Vec<EventLogRow>> {
+    async fn recent_events_pg(&self, filter: EventLogFilter<'_>) -> Result<Vec<EventLogRow>> {
         let rows = self
             .db()
             .await?
@@ -4428,7 +4428,7 @@ impl Store {
         .await
     }
 
-    pub async fn anchor_check_watermark(&self) -> Result<Option<AnchorCheckWatermark>> {
+    async fn anchor_check_watermark_pg(&self) -> Result<Option<AnchorCheckWatermark>> {
         let row = self
             .db()
             .await?

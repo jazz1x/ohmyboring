@@ -1,12 +1,12 @@
 //! SurrealDB implementation of five of the `VectorIndex` queries, plus the one-shot fill that
 //! copies the vectors out of pgvector.
 //!
-//! SurrealDB holds only what ranking needs: the row's key, its embedding, and the columns the pgvector
-//! SQL filters on. pgvector stays the original — every hit is hydrated from it by key, so the answer
-//! carries the same text, origin and anchor the pgvector path returns. A key Surreal returns that
-//! pgvector no longer has is an error naming the drift, never a silently shorter answer. The copy
-//! follows pg's writes (`SurrealClient::mirror`, called after each committed pg write); a drift is
-//! a Surreal write that failed (the error said so) or a pg change made outside the engine.
+//! The ranking tables (`chunk`, `chunk_p_*`, `claim`) hold the row's key, its embedding, and the
+//! columns the pgvector SQL filters on. On `backend=surreal` the answer is read back from Surreal's
+//! base rows by key (`chunk`, `claim_row`, `document`) and re-checked with the pgvector path's
+//! predicates, so the answer carries the same text, origin and anchor the pgvector path returns
+//! and a claim written only into Surreal (C-SURALL2 Z1) is still found. A key a ranking table
+//! returns that the base table lacks is an error naming the drift, never a silently shorter answer.
 //!
 //! Wire: SurrealDB's HTTP JSON-RPC (`POST /rpc`, method `query`) with bind variables, over the
 //! `reqwest` the engine already carries. The server is pinned in compose to
@@ -586,15 +586,16 @@ struct NearDoc {
     d: f64,
 }
 
-/// The surreal side of the route: Surreal ranks, pgvector hydrates.
+/// The surreal side of the route: on `backend=surreal` every answer comes out of Surreal. The
+/// ranking tables (`chunk`, `chunk_p_*`, `claim`) name the keys; the rows are re-read from the
+/// base tables (`chunk`, `claim_row`, `document`) before they are returned.
 pub(super) struct SurrealView<'a> {
     pub(super) client: &'a SurrealClient,
-    pub(super) pg: &'a Store,
 }
 
-fn drift(what: &str, missing: &[String]) -> anyhow::Error {
+fn drift(what: &str, table: &str, missing: &[String]) -> anyhow::Error {
     anyhow!(
-        "surreal 이 가리킨 {what} {n}개가 pg 에 없음 (한 번 채우기 이후 갈림, 예: {first}) — vector-fill 을 다시 돌릴 것",
+        "surreal 순위 표가 가리킨 {what} {n}개가 {table} 표에 없음 (두 표가 갈림, 예: {first}) — vector-fill 을 다시 돌릴 것",
         n = missing.len(),
         first = missing.first().map_or("", String::as_str)
     )
@@ -603,16 +604,65 @@ fn drift(what: &str, missing: &[String]) -> anyhow::Error {
 /// A dropped row is a visible event, not a silent filter: the answer is shorter than asked.
 fn report_dropped(what: &str, dropped: usize) {
     if dropped > 0 {
-        eprintln!("[vector] surreal: pg 재확인이 {what} {dropped}개를 뺌 (채운 뒤 바뀜)");
+        eprintln!("[vector] surreal: 재확인이 {what} {dropped}개를 뺌 (순위 표 행이 낡음)");
     }
 }
 
+/// One chunk as the base `chunk` table holds it now, with the `updated_us` of its document
+/// (NONE when the document row is gone).
+#[derive(Deserialize)]
+struct BaseChunk {
+    cid: String,
+    content: String,
+    origin: String,
+    project: String,
+    source_path: String,
+    #[serde(default)]
+    doc_us: Option<i64>,
+}
+
+/// One claim as `claim_row` and its live `document` hold it now.
+#[derive(Deserialize)]
+struct BaseClaim {
+    subject: String,
+    predicate: String,
+    value: String,
+    kind: String,
+    confidence: String,
+    #[serde(default)]
+    anchor: Option<String>,
+    era: String,
+    #[serde(default)]
+    stale_us: Option<i64>,
+    #[serde(default)]
+    stale_reason: Option<String>,
+    valid_from_us: i64,
+    #[serde(default)]
+    superseded_us: Option<i64>,
+    generated: bool,
+    #[serde(default)]
+    doc_origin: Option<String>,
+    #[serde(default)]
+    doc_project: Option<String>,
+}
+
+pub(super) fn micros_to_time(us: i64, what: &str) -> Result<SystemTime> {
+    let micros = u64::try_from(us).with_context(|| format!("{what} {us} is before 1970"))?;
+    Ok(SystemTime::UNIX_EPOCH + Duration::from_micros(micros))
+}
+
+/// The pg claim predicate `split_part(c.anchor, ':', 2) LIKE <prefix>%`: no anchor never matches.
+fn anchor_under(anchor: Option<&str>, prefix: &str) -> bool {
+    anchor.is_some_and(|a| a.split(':').nth(1).unwrap_or("").starts_with(prefix))
+}
+
 impl SurrealView<'_> {
-    /// pgvector is the source and the Surreal copy can lag it (a failed Surreal write, a pg change
-    /// made outside the engine), so every key Surreal returns is re-checked here against the live
-    /// pg row with the same predicates the pg path applies (the #121 origin boundary: an origin or
-    /// project changed after the fill must not leak through a stale copy). A row that fails is dropped, not replaced — the answer may come
-    /// back shorter than `k`. A key pg no longer has is drift and an error.
+    /// A ranking table can lag the base rows (a project table rebuilt later than `chunk`, a swap
+    /// not yet done), so every key the ranking returns is re-checked here against the base
+    /// `chunk` row and the live `document` row with the predicates pg's path applies (the #121
+    /// origin boundary: an origin or project changed after the ranking row was written must not
+    /// leak through it). A row that fails is dropped, not replaced — the answer may come back
+    /// shorter than `k`. A key the base table lacks is drift and an error.
     async fn hydrate_hits(
         &self,
         near: Vec<NearChunk>,
@@ -620,45 +670,51 @@ impl SurrealView<'_> {
         since_hours: Option<i32>,
         dist_kind: DistKind,
     ) -> Result<Vec<Hit>> {
-        let ids: Vec<String> = near.iter().map(|n| n.cid.clone()).collect();
-        let rows = self
-            .pg
-            .db()
-            .await?
-            .query(
-                "SELECT c.id, c.content, c.origin, c.project, c.source_path,
-                        (($2::text IS NULL OR c.project = $2)
-                         AND ($3::int IS NULL OR d.updated_at >= now() - make_interval(hours => $3)))
-                 FROM chunk c JOIN document d ON d.source_path = c.source_path
-                 WHERE c.id = ANY($1);",
-                &[&ids, &project, &since_hours],
-            )
-            .await
-            .context("hydrate chunk hits")?;
-        let mut by_id: HashMap<String, (String, String, String, String, bool)> = rows
+        if near.is_empty() {
+            return Ok(Vec::new());
+        }
+        let records: Vec<String> = near
             .iter()
-            .map(|r| (r.get(0), (r.get(1), r.get(2), r.get(3), r.get(4), r.get(5))))
+            .map(|n| format!("type::record('chunk', {})", text(&n.cid)))
             .collect();
+        let sql = format!(
+            "SELECT cid, content, origin, project, source_path,
+                    (SELECT VALUE updated_us FROM ONLY type::record('document', $parent.source_path)) AS doc_us
+               FROM [{}];",
+            records.join(",")
+        );
+        let rows: Vec<BaseChunk> = first_statement(&sql, self.client.rows(&sql).await?)?;
+        let cutoff = since_hours
+            .map(|h| now_micros().map(|now| now - i64::from(h) * 3_600_000_000))
+            .transpose()?;
+        let mut by_id: HashMap<String, BaseChunk> =
+            rows.into_iter().map(|r| (r.cid.clone(), r)).collect();
         let mut missing = Vec::new();
         let mut dropped = 0_usize;
         let mut hits = Vec::with_capacity(near.len());
         for n in near {
-            match by_id.remove(&n.cid) {
-                Some((content, origin, project, source_path, true)) => hits.push(Hit {
+            let Some(row) = by_id.remove(&n.cid) else {
+                missing.push(n.cid);
+                continue;
+            };
+            let in_project = project.is_none_or(|p| row.project == p);
+            let in_window = row.doc_us.is_some_and(|us| cutoff.is_none_or(|c| us >= c));
+            if in_project && in_window {
+                hits.push(Hit {
                     id: n.cid,
-                    content,
-                    origin,
-                    project,
-                    source_path,
+                    content: row.content,
+                    origin: row.origin,
+                    project: row.project,
+                    source_path: row.source_path,
                     #[allow(clippy::cast_possible_truncation)]
                     dist: n.d as f32,
                     dist_kind,
-                }),
-                Some((.., false)) => dropped += 1,
-                None => missing.push(n.cid),
+                });
+            } else {
+                dropped += 1;
             }
         }
-        ensure!(missing.is_empty(), drift("chunk", &missing));
+        ensure!(missing.is_empty(), drift("chunk", "chunk", &missing));
         report_dropped("chunk", dropped);
         Ok(hits)
     }
@@ -836,81 +892,76 @@ impl VectorIndex for SurrealView<'_> {
             .next()
             .unwrap_or_default();
         near.truncate(want);
-        let subjects: Vec<String> = near.iter().map(|n| n.subject.clone()).collect();
-        let predicates: Vec<String> = near.iter().map(|n| n.predicate.clone()).collect();
-        let froms: Vec<i64> = near.iter().map(|n| n.valid_from_us).collect();
-        let rows = self
-            .pg
-            .db()
-            .await?
-            .query(
-                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.anchor, c.era,
-                        c.stale_at, c.stale_reason,
-                        (extract(epoch from c.valid_from) * 1000000)::bigint,
-                        (NOT (d.origin = ANY($4))
-                         AND ($5::text IS NULL OR d.project = $5)
-                         AND ($6::text[] IS NULL OR c.kind = ANY($6))
-                         AND d.source_path !~ $7
-                         AND ($8::text IS NULL OR split_part(c.anchor, ':', 2) LIKE replace(replace($8, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
-                         AND ($9::bool OR c.stale_at IS NULL))
-                 FROM claim c
-                 JOIN document d ON d.source_path = c.source_path
-                 JOIN unnest($1::text[], $2::text[], $3::bigint[]) AS k(s, p, v)
-                   ON c.subject = k.s AND c.predicate = k.p
-                  AND (extract(epoch from c.valid_from) * 1000000)::bigint = k.v
-                 WHERE c.superseded_at IS NULL;",
-                &[
-                    &subjects,
-                    &predicates,
-                    &froms,
-                    &exclude_origins,
-                    &project,
-                    &kinds,
-                    &NOT_USER_MEMORY_RE,
-                    &anchor_path,
-                    &include_stale,
-                ],
-            )
-            .await
-            .context("hydrate claims")?;
-        // Same re-check as `hydrate_hits`: the copy can lag, pg is the source.
-        let mut by_key: HashMap<(String, String, i64), (bool, AnchoredClaim)> = rows
+        if near.is_empty() {
+            return Ok(Vec::new());
+        }
+        let records: Vec<String> = near
             .iter()
-            .map(|r| {
-                (
-                    (r.get(0), r.get(1), r.get(9)),
-                    (
-                        r.get::<_, bool>(10),
-                        AnchoredClaim {
-                            claim: Claim {
-                                subject: r.get(0),
-                                predicate: r.get(1),
-                                value: r.get(2),
-                                kind: r.get(3),
-                                confidence: r.get(4),
-                                said_by: None,
-                            },
-                            anchor: r.get(5),
-                            era: r.get(6),
-                            stale_at: r.get(7),
-                            stale_reason: r.get(8),
-                        },
-                    ),
-                )
+            .map(|n| {
+                let key = claim_key(&n.subject, &n.predicate, n.valid_from_us);
+                format!("type::record('claim_row', {})", text(&key))
             })
+            .collect();
+        let sql = format!(
+            "SELECT subject, predicate, value, kind, confidence, anchor, era, stale_us,
+                    stale_reason, valid_from_us, superseded_us,
+                    string::matches(source_path, <regex> {re}) AS generated,
+                    (SELECT VALUE origin FROM ONLY type::record('document', $parent.source_path)) AS doc_origin,
+                    (SELECT VALUE project FROM ONLY type::record('document', $parent.source_path)) AS doc_project
+               FROM [{records}];",
+            re = text(NOT_USER_MEMORY_RE),
+            records = records.join(",")
+        );
+        let rows: Vec<BaseClaim> = first_statement(&sql, self.client.rows(&sql).await?)?;
+        // Same re-check as `hydrate_hits`: the `claim` ranking row can lag `claim_row` and
+        // `document`, which are the base rows.
+        let mut by_key: HashMap<(String, String, i64), BaseClaim> = rows
+            .into_iter()
+            .map(|r| ((r.subject.clone(), r.predicate.clone(), r.valid_from_us), r))
             .collect();
         let mut missing = Vec::new();
         let mut dropped = 0_usize;
         let mut out = Vec::with_capacity(near.len());
         for n in near {
             let key = (n.subject, n.predicate, n.valid_from_us);
-            match by_key.remove(&key) {
-                Some((true, claim)) => out.push(claim),
-                Some((false, _)) => dropped += 1,
-                None => missing.push(format!("{}:{}", key.0, key.1)),
+            let Some(row) = by_key.remove(&key) else {
+                missing.push(format!("{}:{}", key.0, key.1));
+                continue;
+            };
+            let kept = row.superseded_us.is_none()
+                && row
+                    .doc_origin
+                    .as_ref()
+                    .is_some_and(|o| !exclude_origins.contains(o))
+                && project.is_none_or(|p| row.doc_project.as_deref() == Some(p))
+                && kinds.is_none_or(|ks| ks.contains(&row.kind))
+                && !row.generated
+                && anchor_path.is_none_or(|prefix| anchor_under(row.anchor.as_deref(), prefix))
+                && (include_stale || row.stale_us.is_none());
+            if !kept {
+                dropped += 1;
+                continue;
             }
+            let stale_at = row
+                .stale_us
+                .map(|us| micros_to_time(us, "claim_row stale_us"))
+                .transpose()?;
+            out.push(AnchoredClaim {
+                claim: Claim {
+                    subject: row.subject,
+                    predicate: row.predicate,
+                    value: row.value,
+                    kind: row.kind,
+                    confidence: row.confidence,
+                    said_by: None,
+                },
+                anchor: row.anchor,
+                era: row.era,
+                stale_at,
+                stale_reason: row.stale_reason,
+            });
         }
-        ensure!(missing.is_empty(), drift("claim", &missing));
+        ensure!(missing.is_empty(), drift("claim", "claim_row", &missing));
         report_dropped("claim", dropped);
         Ok(out)
     }
@@ -1035,6 +1086,7 @@ impl FillTable {
 
 mod claim_tx;
 pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
+mod reads;
 mod recurrences;
 
 #[cfg(test)]
