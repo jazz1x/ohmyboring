@@ -1697,12 +1697,20 @@ async fn mcp_recurrences(s: &AppState, args: Option<&Value>) -> Result<Value, (i
         .recurrences(days, project, limit)
         .await
         .map_err(|e| (-32603_i32, format!("recurrences: {e:#}")))?;
-    Ok(json!({
-        "rows": rows,
-        "days": days,
-        "max_distance": crate::store::RECURRENCE_MAX_DISTANCE,
-        "min_days_apart": crate::store::RECURRENCE_MIN_DAYS_APART,
-    }))
+    recurrences_value(&crate::serve::RecurrencesResp {
+        rows,
+        days,
+        max_distance: crate::store::RECURRENCE_MAX_DISTANCE,
+        min_days_apart: crate::store::RECURRENCE_MIN_DAYS_APART,
+    })
+}
+
+/// Through text, not `json!`: a `Value` holds no f32, so `json!` widens 0.2f32 to
+/// 0.20000000298023224 while the HTTP body (and the door) spell it 0.2.
+fn recurrences_value(resp: &crate::serve::RecurrencesResp) -> Result<Value, (i32, String)> {
+    serde_json::to_string(resp)
+        .and_then(|text| serde_json::from_str(&text))
+        .map_err(|e| (-32603_i32, format!("recurrences: {e}")))
 }
 
 fn register_json(out: &ask::RegisterOut) -> Value {
@@ -3135,6 +3143,22 @@ mod tests {
 
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn recurrences_writes_f32_numbers_at_their_shortest_like_http() {
+        let resp = crate::serve::RecurrencesResp {
+            rows: Vec::new(),
+            days: 30,
+            max_distance: crate::store::RECURRENCE_MAX_DISTANCE,
+            min_days_apart: crate::store::RECURRENCE_MIN_DAYS_APART,
+        };
+        let value = super::recurrences_value(&resp).unwrap();
+        assert_eq!(
+            value["max_distance"].to_string(),
+            serde_json::to_string(&resp.max_distance).unwrap(),
+            "the MCP answer must spell the f32 the way the HTTP body does"
+        );
+    }
 
     use super::{
         DedupOutcome, DuplicateMatch, DuplicateReason, MCP_TOOL_NAMES, RememberNote, ToolCallError,

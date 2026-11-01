@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Fixed
+- **MCP `recurrences` 의 f32 표기를 HTTP 와 같게 (C-RUSTA1 2단계)** — `json!` 이 f32 를 f64 로 넓혀 `max_distance` 가 0.20000000298023224, 행 `distance` 도 긴 꼴로 나갔다(HTTP 본문과 문은 0.2). 응답을 텍스트로 한 번 직렬화해 같은 최단 표기를 낸다. MCP 도구 중 f32 를 `Value` 로 넘기는 것은 이 하나.
 - **소유자 판정이 이미 있는 간선의 judge 를 순위로 올린다 (C-OWNEREDGE1)** — 간선이 이미 있으면 먼저 쓴 judge 가 남아(`ON CONFLICT DO NOTHING`) 세션 끝에 distill 이 쓴 `inferred` 위에 소유자 눌림이 닿지 않았다(소유자 동의 눌림이 간선에 닿은 것 0/42). 이제 owner > `agent:*` > inferred > NULL·그 밖 순으로 높은 쪽만 덮고, 같거나 낮으면 행을 쓰지 않는다. 순위는 `judge_rank_sql` 한 곳.
 
 ### Added
