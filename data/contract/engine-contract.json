@@ -105,6 +105,7 @@
     "POST /remember",
     "POST /repairs/split-subjects",
     "POST /risks",
+    "POST /rules/match",
     "POST /search",
     "POST /stalled",
     "POST /status",

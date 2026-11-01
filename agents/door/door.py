@@ -62,7 +62,7 @@ recall (wiki first, vector only when the wiki is empty, read-only session) and
 compares its text with the engine text as it was before the numbered-note blocks
 were prepended, leaving one recall_shadow event (status ok|tie|mismatch|error, reader, path,
 line counts, first differing line, skipped wiki files — never the query); the answer stays the engine's.
-The recall read switch: DOOR_RECALL_READER=python (compose default) answers POST /mcp tools/call
+The recall read switch: DOOR_RECALL_READER=python (compose default engine) answers POST /mcp tools/call
 recall from inside the door — same numbered-note blocks, the engine's JSON-RPC errors (-32602/-32603),
 and the session_id handover written once by the python path; the shadow then runs the other way, a
 background call to the engine without session_id, event reader=python (engine = rollback).
