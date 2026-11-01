@@ -36,6 +36,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -eu
+          echo "control C: forced failure of changes"; exit 1
           emit() { printf 'rust=%s\neval=%s\ndocker=%s\n' "$1" "$2" "$3" | tee -a "$GITHUB_OUTPUT"; }
           if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = 0000000000000000000000000000000000000000 ]; then
             echo "no diff base -> everything runs"; emit true true true; exit 0
