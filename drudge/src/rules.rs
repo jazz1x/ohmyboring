@@ -63,10 +63,81 @@ pub fn group_rules(rows: Vec<RuleRow>) -> Rules {
     Rules { rules, incomplete }
 }
 
+/// Python `re.split(r"[|\s]+")` treats these as whitespace: `str.isspace()` also covers the
+/// separators U+001C..U+001F, which Rust's `char::is_whitespace` does not.
+fn is_separator(c: char) -> bool {
+    c == '|' || c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// Same as `agents/shared/rules_core.py::parse_trigger`: groups split on `" + "`, alternatives
+/// on `|` or whitespace, empty alternatives dropped.
+pub fn parse_trigger(trigger: &str) -> Vec<Vec<&str>> {
+    trigger
+        .split(" + ")
+        .map(|group| {
+            group
+                .split(is_separator)
+                .filter(|a| !a.is_empty())
+                .collect()
+        })
+        .collect()
+}
+
+/// Same as `rules_core.py::fired`: the rules whose every group has an alternative that is a
+/// case-insensitive substring of the prompt, in input order. A group with no alternative
+/// (blank trigger included) never matches, so the rule never fires.
+pub fn fired(rules: Vec<Rule>, prompt: &str) -> Vec<Rule> {
+    let needle = prompt.to_lowercase();
+    rules
+        .into_iter()
+        .filter(|r| {
+            parse_trigger(&r.trigger)
+                .iter()
+                .all(|group| group.iter().any(|alt| needle.contains(&alt.to_lowercase())))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    fn rule(trigger: &str) -> Rule {
+        Rule {
+            subject: "s".into(),
+            rule: "r".into(),
+            trigger: trigger.into(),
+            source_path: "x".into(),
+        }
+    }
+
+    // Expected values: Python rules_core.fired on the same inputs (repo .venv, 2026-11-01).
+    #[test]
+    fn fired_matches_python_trigger_semantics() {
+        let hermes = "hermes 헤르메스 + 제거|빼|내리|remove|drop";
+        let hit = |t: &str, p: &str| fired(vec![rule(t)], p).len();
+        assert_eq!(hit(hermes, "hermes 좀 봐줘"), 0);
+        assert_eq!(hit(hermes, "제거해줘"), 0);
+        assert_eq!(hit(hermes, "Hermes 좀 DROP 해줘"), 1);
+        assert_eq!(hit("hermes + ", "hermes whatever"), 0);
+        assert_eq!(hit("", "anything 제거"), 0);
+        assert_eq!(hit("   ", "anything 제거"), 0);
+        assert_eq!(hit("aaa bbb", "xx bbb yy"), 1);
+        assert_eq!(hit("aaa|bbb", "xx aa yy"), 0);
+        assert_eq!(hit("a\u{1c}b", "xx b"), 1, "U+001C splits like Python \\s");
+    }
+
+    #[test]
+    fn fired_keeps_input_order() {
+        let mut a = rule("x");
+        a.subject = "a".into();
+        let mut b = rule("x");
+        b.subject = "b".into();
+        let out = fired(vec![b, a], "X");
+        assert_eq!(out[0].subject, "b");
+        assert_eq!(out[1].subject, "a");
+    }
 
     fn row(s: &str, p: &str, v: &str, f: &str) -> RuleRow {
         RuleRow {
