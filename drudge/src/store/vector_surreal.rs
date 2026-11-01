@@ -1589,6 +1589,50 @@ struct TableKeys {
     chunks: Vec<String>,
     claims: Vec<String>,
     claim_rows: Vec<String>,
+    /// `claim(open)` keys with `stale_us`, the value that moves under a key both sides hold.
+    claim_stale: Vec<String>,
+}
+
+/// `stale_us` of each vector claim by key (`None` = open).
+type ClaimStales = HashMap<String, Option<i64>>;
+
+fn stale_entries(stales: &ClaimStales) -> Vec<String> {
+    stales
+        .iter()
+        .map(|(key, stale)| match stale {
+            Some(us) => format!("{key}{KEY_SEP}{us}"),
+            None => format!("{key}{KEY_SEP}-"),
+        })
+        .collect()
+}
+
+/// pg's `stale_us` for every vector claim (the rows `pg_claim_keys` names).
+async fn pg_claim_stales(db: &tokio_postgres::Client) -> Result<ClaimStales> {
+    Ok(db
+        .query(
+            &format!(
+                "SELECT c.subject, c.predicate, {valid}, {stale} {CLAIM_FROM};",
+                valid = epoch_us("c.valid_from"),
+                stale = epoch_us("c.stale_at")
+            ),
+            &[],
+        )
+        .await
+        .context("read open claim stale_at from pgvector")?
+        .iter()
+        .map(|r| {
+            (
+                claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)),
+                r.get::<_, Option<i64>>(3),
+            )
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct CidStale {
+    cid: String,
+    stale_us: Option<i64>,
 }
 
 fn tables(pg: TableKeys, surreal: TableKeys) -> Vec<FillTable> {
@@ -1617,6 +1661,11 @@ fn tables(pg: TableKeys, surreal: TableKeys) -> Vec<FillTable> {
             table: "claim(open)",
             pg: KeySet::of(pg.claims),
             surreal: KeySet::of(surreal.claims),
+        },
+        FillTable {
+            table: "claim(stale_at)",
+            pg: KeySet::of(pg.claim_stale),
+            surreal: KeySet::of(surreal.claim_stale),
         },
         FillTable {
             table: "claim_row(all)",
@@ -2440,6 +2489,44 @@ impl SurrealClient {
         }
     }
 
+    /// `stale_us` of every row of the vector `claim` table, a page at a time like `table_keys`.
+    async fn surreal_claim_stales(&self) -> Result<ClaimStales> {
+        let mut stales = ClaimStales::new();
+        loop {
+            let query = format!(
+                "SELECT cid, stale_us FROM claim LIMIT {KEY_PAGE} START {};",
+                stales.len()
+            );
+            let page: Vec<CidStale> =
+                first_statement(&query, self.rows::<CidStale>(&query).await?)?;
+            let done = page.len() < KEY_PAGE;
+            stales.extend(page.into_iter().map(|r| (r.cid, r.stale_us)));
+            if done {
+                return Ok(stales);
+            }
+        }
+    }
+
+    /// Set `stale_us` on claims Surreal already holds under the same key; the HNSW index is not
+    /// touched (the embedding stays).
+    async fn set_stale(&self, changed: &[(String, Option<i64>)]) -> Result<()> {
+        for batch in changed.chunks(FILL_BATCH) {
+            let rows: Vec<String> = batch
+                .iter()
+                .map(|(cid, stale)| {
+                    let value = stale.map_or_else(|| "NONE".to_owned(), |us| us.to_string());
+                    format!("{{cid: {}, s: {value}}}", text(cid))
+                })
+                .collect();
+            self.run(&format!(
+                "FOR $r IN [{}] {{ UPDATE type::record('claim', $r.cid) SET stale_us = $r.s; }};",
+                rows.join(",")
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn surreal_keys(&self) -> Result<TableKeys> {
         Ok(TableKeys {
             documents: self.table_keys("document").await?,
@@ -2448,6 +2535,7 @@ impl SurrealClient {
             chunks: self.table_keys("chunk").await?,
             claims: self.table_keys("claim").await?,
             claim_rows: self.table_keys("claim_row").await?,
+            claim_stale: stale_entries(&self.surreal_claim_stales().await?),
         })
     }
 
@@ -2600,6 +2688,14 @@ impl SurrealClient {
         let stale: Vec<&String> = have.iter().filter(|k| !want.contains(k.as_str())).collect();
         let missing: Vec<&String> = pg_claims.iter().filter(|k| !have.contains(*k)).collect();
         let stale_claims = stale.len();
+        let surreal_stales = self.surreal_claim_stales().await?;
+        let moved: Vec<(String, Option<i64>)> = pg_claim_stales(&db)
+            .await?
+            .into_iter()
+            .filter(|(key, us)| surreal_stales.get(key).is_some_and(|held| held != us))
+            .collect();
+        self.set_stale(&moved).await?;
+        written += moved.len();
         written += missing.len();
         deleted += stale.len();
         let slots: Vec<(String, String)> = missing
@@ -2692,6 +2788,7 @@ impl SurrealClient {
                 chunks: pg_chunks,
                 claims: pg_claims,
                 claim_rows: pg_claim_rows,
+                claim_stale: stale_entries(&pg_claim_stales(&db).await?),
             },
             self.surreal_keys().await?,
         ))
@@ -2921,6 +3018,7 @@ impl SurrealClient {
                 chunks: chunk_keys,
                 claims: claim_keys,
                 claim_rows: claim_row_keys,
+                claim_stale: stale_entries(&pg_claim_stales(&*store.db().await?).await?),
             },
             self.surreal_keys().await?,
         ))
