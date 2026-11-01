@@ -321,3 +321,5 @@ Rewriting values is data tampering and cannot be audited. Instead an era marker 
 ### Schedule
 
 Implementation of D2 and D3 starts **after the window closes**. Changing the distillation or claim surface changes the content of the notes that get injected, and that is not orthogonal to the §2 measurement (same reason as §5-R3).
+
+<!-- control D -->
