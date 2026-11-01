@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use drudge::config::{BoringConfig, SurrealConfig};
 use drudge::frontmatter::FrontMatter;
 use drudge::ingest::{DefaultChunker, Embed, FrontmatterGraphExtractor, ingest_file_with};
-use drudge::store::{Doc, Store, SurrealClient, VectorRoute};
+use drudge::store::{Doc, Scope, Store, SurrealClient, VectorRoute};
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
@@ -49,6 +49,10 @@ fn client_at(url: &str, namespace: &str) -> SurrealClient {
 
 struct Fixture {
     store: Store,
+    /// The same pg without the Surreal route: what the ingest writes a claim through (inside a pg
+    /// transaction), after which the mirror copies it. A claim written through `store` goes to
+    /// Surreal only (Z1), so the pg-versus-Surreal comparisons here write through this one.
+    pg_store: Store,
     client: SurrealClient,
     db: tokio_postgres::Client,
     nanos: u128,
@@ -71,7 +75,9 @@ async fn fixture(namespace: &str) -> Fixture {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let pg_store = Store::open(&dsn, DIM).await.expect("open store");
     Fixture {
+        pg_store,
         store: pg.with_vector_route(VectorRoute::Surreal(client.clone())),
         client,
         db,
@@ -112,7 +118,7 @@ impl Fixture {
     }
 
     async fn claim(&self, path: &str, subject: &str, kind: &str, hours_ago: u64) {
-        self.store
+        self.pg_store
             .upsert_claim(
                 subject,
                 "observed",
@@ -125,6 +131,10 @@ impl Fixture {
             )
             .await
             .expect("claim");
+        self.store
+            .mirror_surreal(&Scope::notes([path.to_owned()]))
+            .await
+            .expect("mirror");
     }
 
     /// (pg ids, Surreal ids) of chunks, then of open claims — each side sorted, as the strings the
