@@ -40,7 +40,21 @@ run_maintenance() {
     load_dot_env
     echo "=== oh-my-boring maintenance started at $(date) ==="
     echo "--- data-steward ---"
-    uv run --locked python scripts/data-steward.py --fix --yes
+    # The engine does the rewrite (drudge steward --fix). BORING_DATA_STEWARD_IMPL=python runs
+    # scripts/data-steward.py --fix instead — the rollback if the engine's rewrite ever misbehaves.
+    # Same rule as retention below: a failed step must show as a ✗ line and a non-zero exit, not
+    # as a status nobody reads (an old binary without the subcommand, a broken boring.json, a note
+    # that cannot be written).
+    steward_rc=0
+    if [ "${BORING_DATA_STEWARD_IMPL:-}" = "python" ]; then
+        uv run --locked python scripts/data-steward.py --fix --yes || steward_rc=$?
+    else
+        ./drudge/target/release/drudge steward --fix --yes || steward_rc=$?
+    fi
+    if [ "$steward_rc" -ne 0 ]; then
+        echo "✗ data-steward failed (rc=${steward_rc}) — old drudge binary without the subcommand, a broken boring.json, or a note that cannot be rewritten?"
+        notify_slack "새벽 점검: data-steward 실패(rc=${steward_rc})"
+    fi
     # --fix cannot repair this one: which repo a folder-named project belongs to takes the
     # session's cwd, and `re-work` fronted two repos (2026-09-28). So it reports, and says so.
     # Where checkouts live is boring.json's checkout_roots; unset is "not scanned", not zero.
@@ -114,6 +128,7 @@ run_maintenance() {
     echo "=== maintenance finished at $(date) ==="
     [ "$swap_rc" -eq 0 ] || exit 1
     [ "$retention_rc" -eq 0 ] || exit 1
+    [ "$steward_rc" -eq 0 ] || exit 1
 }
 
 escaped_boring_home() {

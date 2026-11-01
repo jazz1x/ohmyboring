@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use drudge::{
     ask, audit, code_index, config, frontmatter, graph, ingest, llm, retention, retrieve, serve,
-    store, vault, vector::VectorIndex,
+    steward, store, vault, vector::VectorIndex,
 };
 use std::path::PathBuf;
 
@@ -90,6 +90,19 @@ enum Cmd {
         #[arg(long)]
         apply: bool,
         /// with --apply: skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Vault note hygiene: canonical `project:` slug and no placeholder tags, each rewritten note
+    /// backed up to `<note>.md.bak`; owner-written notes are only reported (dry-run unless --fix)
+    Steward {
+        /// vault root (default: $BORING_VAULT_DIR, then $BORING_HOME/vault, then ~/oh-my-boring/vault)
+        #[arg(long)]
+        vault: Option<String>,
+        /// actually rewrite instead of printing the plan
+        #[arg(long)]
+        fix: bool,
+        /// with --fix: skip the confirmation prompt
         #[arg(long)]
         yes: bool,
     },
@@ -273,6 +286,10 @@ async fn main() -> Result<()> {
             let places = retention::Places::resolve(&cfg.session_end_source_dirs(), &home);
             let policy = retention::Policy::from_env(&|name| std::env::var(name).ok());
             return retention::run(&places, &policy, retention::Mode { apply, yes });
+        }
+        Cmd::Steward { vault, fix, yes } => {
+            let wiki = steward::wiki_dir(vault.as_deref(), &|name| std::env::var(name).ok())?;
+            return steward::run(&cfg, &wiki, steward::Mode { fix, yes });
         }
         Cmd::Version => {
             // Empty means the build could not resolve a commit (no .git, no BUILD_SHA), which is
@@ -543,6 +560,7 @@ async fn main() -> Result<()> {
         | Cmd::CodeCheck
         | Cmd::CodeStatus { .. }
         | Cmd::Retention { .. }
+        | Cmd::Steward { .. }
         | Cmd::Version => {}
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
