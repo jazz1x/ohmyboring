@@ -86,4 +86,4 @@
 | iterator chain / `&str`·`&[T]` args | clippy pedantic (`needless_collect`, `ptr_arg`, etc.) |
 | ADT · PDV · SRP · linearity · DIP | review (adversarial) — verify the proof via the type signature |
 
-Gate: `cargo clippy --all-targets -- -D warnings` (unsafe forbid + all/pedantic/nursery deny + the restrictions above).
+Gate: `cargo clippy --all-targets -- -D warnings` (unsafe forbid + all/pedantic deny, nursery excluded + the restrictions above).

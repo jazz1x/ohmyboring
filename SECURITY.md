@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Security fixes target `main` and the latest published `v0.1.x` tag. Older
-pre-release tags are not supported; upgrade to the latest `v0.1.x` release
+Security fixes target `main` and the latest published `v0.2.x` tag. Older
+pre-release tags are not supported; upgrade to the latest `v0.2.x` release
 before reporting version-specific issues.
 
 ## Reporting a vulnerability

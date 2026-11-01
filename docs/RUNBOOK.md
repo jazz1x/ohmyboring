@@ -32,8 +32,7 @@ make agent-logs    # hermes 로그 (MCP 연결 진단)
 | 라벨 | 주기 | 하는 일 |
 |---|---|---|
 | `com.ohmyboring.codex-ingest` | 20분 | Codex 세션 하나를 집어 증류·저장 |
-| `com.ohmyboring.maintenance` | 매일 | `scripts/schedule-maintenance.sh run` — data-steward + retention |
-| `com.ohmyboring.night-drain` | 03:20 | 밀린 Codex·Claude 세션을 한 번에 최대 40개 |
+| `com.ohmyboring.maintenance` | 매일 03:00 | `scripts/schedule-maintenance.sh run` — data-steward + retention + recall labels + code-sync, 끝에 읽기 전용 doctor |
 | `com.ohmyboring.morning-card` (launchd 잡 — 2026-09-28 에 지움) | 매일 08:00 | 아침 카드는 이제 hermes 크론 `morning-card`((다) 아래)만 돌린다 — 문의 `POST /run/morning-card` 로. 문(:7710)이 살아 있어야 돌고, 실행·성패 기록은 `~/.hermes/cron/output/<job-id>/` 의 최신 파일(파일 이름이 시각) |
 | `com.ohmyboring.weekly-card` | 월 09:00 | `scripts/schedule-card.sh run weekly` — 주간 브리핑 카드. 볼트의 매일 브리핑을 먼저 읽어서 문이 필요 없고, 로그는 `/tmp/com.ohmyboring.weekly-card.log`. 이주 중 잡 — hermes 크론 `weekly-card` 가 같은 도구를 문에 시킨다 |
 
@@ -145,7 +144,7 @@ curl -s 'localhost:7700/events?limit=5&component=hermes-ingest-worker' \
 호스트 스케줄러는 `/tmp` 에 남긴다.
 
 ```bash
-tail -20 /tmp/com.ohmyboring.night-drain.log
+tail -20 /tmp/com.ohmyboring.maintenance.log
 tail -20 /tmp/com.ohmyboring.codex-ingest.log
 ```
 
