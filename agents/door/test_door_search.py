@@ -65,6 +65,7 @@ class SearchRouteTests(unittest.TestCase):
             return mock.MagicMock()
 
         patchers = [
+            mock.patch.dict(os.environ, {"DOOR_SEARCH_READER": "python"}),
             mock.patch.object(door.search_retriever, "PgRetriever", side_effect=fake_retriever),
             mock.patch.object(door, "_search_execute", side_effect=self._execute),
             mock.patch.object(door, "_search_handover", side_effect=self._handover),
