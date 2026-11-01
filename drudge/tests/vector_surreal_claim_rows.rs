@@ -2,7 +2,8 @@
 //! moved only in pg (a seal written straight to pg, as the Python door does) is found and repaired
 //! by `catch_up`, which a key-only compare would miss. Also the register read over the copy.
 //!
-//! Needs a throwaway pgvector (its document and claim tables are emptied on each run) and a
+//! Needs a throwaway pgvector (its document and claim tables are emptied on each run; the 16-dim
+//! tests create and drop their own `claim_rows_dim16` database beside it) and a
 //! throwaway SurrealDB. Run:
 //!   BORING_TEST_DATABASE_URL=postgresql://boring:boring@127.0.0.1:<pg-port>/boring \
 //!   BORING_TEST_SURREAL_URL=http://127.0.0.1:<surreal-port> BORING_SURREAL_PASSWORD=root \
@@ -18,6 +19,25 @@ use serde_json::json;
 use tokio_postgres::NoTls;
 
 const DIM: usize = 1024;
+
+/// A database of its own for the 16-dim tests: the vector column's dimension is fixed by whichever
+/// schema was created first, so 16-dim inserts into the 1024-dim shared database fail.
+async fn sixteen_dim_database() -> String {
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let (server, _) = dsn.rsplit_once('/').expect("dsn ends in /<database>");
+    let name = "claim_rows_dim16";
+    let (admin, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    admin
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .expect("drop the 16-dim database");
+    admin
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .expect("create the 16-dim database");
+    format!("{server}/{name}")
+}
 
 fn front(path: &str) -> FrontMatter {
     FrontMatter {
@@ -311,7 +331,7 @@ async fn a_mass_delete_catch_up_rebuilds_the_claim_index_instead_of_deleting_thr
 async fn mass_delete_leaves_an_index(namespace: &str, total: i64, kept: i64) {
     // A small dimension keeps 150k indexed rows inside the throwaway server (1024 dims ran it out of memory in the fill).
     let dim = 16;
-    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let dsn = sixteen_dim_database().await;
     let url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
     let config: SurrealConfig =
         serde_json::from_value(json!({"url": url, "namespace": namespace, "database": namespace}))
@@ -385,7 +405,7 @@ async fn a_mass_delete_then_define_leaves_an_index_after_deleting_all_150k() {
 async fn three_hundred_open_claims(
     namespace: &str,
 ) -> (SurrealClient, Store, tokio_postgres::Client) {
-    let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
+    let dsn = sixteen_dim_database().await;
     let url = std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL");
     let config: SurrealConfig =
         serde_json::from_value(json!({"url": url, "namespace": namespace, "database": namespace}))
