@@ -34,16 +34,27 @@ fn runs() -> usize {
         .unwrap_or(100)
 }
 
-async fn client(namespace: &str) -> SurrealClient {
+fn plain_client(namespace: &str) -> SurrealClient {
     let config: SurrealConfig = serde_json::from_value(
         json!({"url": env("BORING_TEST_SURREAL_URL"), "namespace": namespace, "database": "z1"}),
     )
     .unwrap();
-    let client = SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap();
+    SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap()
+}
+
+/// The client that races: its retry count is `Z1_TX_RETRIES`, and its counters hold only the
+/// racing requests. Fixtures and the serial run use `client`, with the default retries, because
+/// the vector index of `claim` can conflict with the request before it even with no other writer.
+fn race_client(namespace: &str) -> SurrealClient {
     let retries: u32 = std::env::var("Z1_TX_RETRIES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(drudge::store::TX_RETRIES);
+    plain_client(namespace).with_tx_retries(retries)
+}
+
+async fn client(namespace: &str) -> SurrealClient {
+    let client = plain_client(namespace);
     let store = Store::open(&env("BORING_TEST_DATABASE_URL"), DIM)
         .await
         .expect("open store");
@@ -56,7 +67,7 @@ async fn client(namespace: &str) -> SurrealClient {
         .await
         .unwrap();
     client.fill_from(&store).await.expect("fill of an empty pg");
-    client.with_tx_retries(retries)
+    client
 }
 
 async fn doc(c: &SurrealClient, path: &str, author: &str) {
@@ -156,16 +167,24 @@ async fn open_vector_claims(c: &SurrealClient, prefix: &str) -> i64 {
 }
 
 fn table(place: TxPlace, c: &SurrealClient, runs: usize, same: usize, failures: &[String]) {
-    let n = c.tx_count(place);
     println!(
-        "Z1 place={} runs={runs} final_equals_serial={same}/{runs} committed={} conflicts={} retries={} exhausted={} failures={}",
+        "Z1 test_place={} runs={runs} final_equals_serial={same}/{runs} failures={}",
         place.name(),
-        n.committed,
-        n.conflicts,
-        n.retries,
-        n.exhausted,
         failures.len()
     );
+    for p in TxPlace::ALL {
+        let n = c.tx_count(p);
+        if n.committed + n.conflicts > 0 {
+            println!(
+                "Z1   counted place={} committed={} conflicts={} retries={} exhausted={}",
+                p.name(),
+                n.committed,
+                n.conflicts,
+                n.retries,
+                n.exhausted
+            );
+        }
+    }
     for f in failures.iter().take(3) {
         println!("Z1   first failure: {f}");
     }
@@ -175,6 +194,7 @@ fn table(place: TxPlace, c: &SurrealClient, runs: usize, same: usize, failures: 
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn one_claim_slot_two_writers() {
     let c = client("z1_slot").await;
+    let race = race_client("z1_slot");
     let n = runs();
     let mut same = 0;
     let mut failures = Vec::new();
@@ -185,8 +205,28 @@ async fn one_claim_slot_two_writers() {
             doc(&c, &format!("/v/b-{s}.md"), "agent").await;
         }
         let (a, b) = tokio::join!(
-            async { put(&c, &conc, "goal", &format!("/v/a-{conc}.md"), 1000, "fact").await },
-            async { put(&c, &conc, "goal", &format!("/v/b-{conc}.md"), 2000, "fact").await },
+            async {
+                put(
+                    &race,
+                    &conc,
+                    "goal",
+                    &format!("/v/a-{conc}.md"),
+                    1000,
+                    "fact",
+                )
+                .await
+            },
+            async {
+                put(
+                    &race,
+                    &conc,
+                    "goal",
+                    &format!("/v/b-{conc}.md"),
+                    2000,
+                    "fact",
+                )
+                .await
+            },
         );
         put(&c, &ser, "goal", &format!("/v/a-{ser}.md"), 1000, "fact")
             .await
@@ -208,7 +248,7 @@ async fn one_claim_slot_two_writers() {
             )),
         }
     }
-    table(TxPlace::Slot, &c, n, same, &failures);
+    table(TxPlace::Slot, &race, n, same, &failures);
     assert!(
         failures.is_empty(),
         "{} of {n} runs differ from the serial run",
@@ -236,6 +276,7 @@ async fn note_fixture(c: &SurrealClient, tag: &str, slot_order: [&str; 2]) {
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn every_slot_of_a_note_against_a_slot_writer() {
     let c = client("z1_note").await;
+    let race = race_client("z1_note");
     let n = runs();
     let mut same = 0;
     let mut failures = Vec::new();
@@ -246,10 +287,10 @@ async fn every_slot_of_a_note_against_a_slot_writer() {
         }
         let (sealed, written) = tokio::join!(
             async {
-                c.seal_note(&format!("/v/new-{conc}.md"), &format!("/v/old-{conc}.md"))
+                race.seal_note(&format!("/v/new-{conc}.md"), &format!("/v/old-{conc}.md"))
                     .await
             },
-            async { put(&c, &conc, "p1", &format!("/v/c-{conc}.md"), 900, "fact").await },
+            async { put(&race, &conc, "p1", &format!("/v/c-{conc}.md"), 900, "fact").await },
         );
         let sealed_serial = c
             .seal_note(&format!("/v/new-{ser}.md"), &format!("/v/old-{ser}.md"))
@@ -272,7 +313,7 @@ async fn every_slot_of_a_note_against_a_slot_writer() {
             )),
         }
     }
-    table(TxPlace::Note, &c, n, same, &failures);
+    table(TxPlace::Note, &race, n, same, &failures);
     assert!(
         failures.is_empty(),
         "{} of {n} runs differ from the serial run",
@@ -288,6 +329,7 @@ async fn every_slot_of_a_note_against_a_slot_writer() {
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn a_seal_and_an_ingest_that_meet_in_a_cycle_both_finish() {
     let c = client("z1_cycle").await;
+    let race = race_client("z1_cycle");
     let n = runs().min(30);
     let mut same = 0;
     let mut failures = Vec::new();
@@ -305,16 +347,16 @@ async fn a_seal_and_an_ingest_that_meet_in_a_cycle_both_finish() {
             supersedes(&c, &new2, &old2).await;
         }
         let ingest = async {
-            put(&c, &conc, "p1", &format!("/v/c-{conc}.md"), 900, "fact").await?;
-            put(&c, &conc, "p2", &format!("/v/c-{conc}.md"), 900, "fact").await
+            put(&race, &conc, "p1", &format!("/v/c-{conc}.md"), 900, "fact").await?;
+            put(&race, &conc, "p2", &format!("/v/c-{conc}.md"), 900, "fact").await
         };
         let (s1, s2, ing) = tokio::join!(
             async {
-                c.seal_note(&format!("/v/new-{conc}.md"), &format!("/v/old-{conc}.md"))
+                race.seal_note(&format!("/v/new-{conc}.md"), &format!("/v/old-{conc}.md"))
                     .await
             },
             async {
-                c.seal_note(&format!("/v/new2-{conc}.md"), &format!("/v/old2-{conc}.md"))
+                race.seal_note(&format!("/v/new2-{conc}.md"), &format!("/v/old2-{conc}.md"))
                     .await
             },
             ingest,
@@ -344,7 +386,7 @@ async fn a_seal_and_an_ingest_that_meet_in_a_cycle_both_finish() {
             )),
         }
     }
-    table(TxPlace::Note, &c, n, same, &failures);
+    table(TxPlace::Note, &race, n, same, &failures);
     assert!(
         failures.is_empty(),
         "{} of {n} cycle runs differ or failed",
@@ -356,6 +398,7 @@ async fn a_seal_and_an_ingest_that_meet_in_a_cycle_both_finish() {
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn one_split_group_two_merges() {
     let c = client("z1_split").await;
+    let race = race_client("z1_split");
     let n = runs();
     let mut same = 0;
     let mut failures = Vec::new();
@@ -381,8 +424,8 @@ async fn one_split_group_two_merges() {
             .unwrap();
         }
         let (a, b) = tokio::join!(
-            c.merge_split_subject(&subject, SplitStanding::Owner),
-            c.merge_split_subject(&subject, SplitStanding::Owner),
+            race.merge_split_subject(&subject, SplitStanding::Owner),
+            race.merge_split_subject(&subject, SplitStanding::Owner),
         );
         let live = c
             .run(&format!(
@@ -428,10 +471,41 @@ async fn one_split_group_two_merges() {
             ));
         }
     }
-    table(TxPlace::Split, &c, n, same, &failures);
+    table(TxPlace::Split, &race, n, same, &failures);
     assert!(
         failures.is_empty(),
         "{} of {n} runs differ from the serial run",
+        failures.len()
+    );
+}
+
+/// Control: two writers on two different slots share no guard row. Whatever conflicts this shows
+/// is not the slot's; it is the vector index of `claim` that every claim write touches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn control_two_different_slots_share_no_guard() {
+    let c = client("z1_control").await;
+    let race = race_client("z1_control");
+    let n = runs();
+    let mut failures = Vec::new();
+    for i in 0..n {
+        let (x, y) = (format!("z1-x-{i}"), format!("z1-y-{i}"));
+        doc(&c, &format!("/v/x-{i}.md"), "agent").await;
+        doc(&c, &format!("/v/y-{i}.md"), "agent").await;
+        let (a, b) = tokio::join!(
+            async { put(&race, &x, "goal", &format!("/v/x-{i}.md"), 1000, "fact").await },
+            async { put(&race, &y, "goal", &format!("/v/y-{i}.md"), 1000, "fact").await },
+        );
+        let open = open_vector_claims(&c, &format!("z1-x-{i}")).await
+            + open_vector_claims(&c, &format!("z1-y-{i}")).await;
+        if a.is_err() || b.is_err() || open != 2 {
+            failures.push(format!("run {i}: a={a:?} b={b:?} open_vectors={open}"));
+        }
+    }
+    table(TxPlace::Slot, &race, n, n - failures.len(), &failures);
+    assert!(
+        failures.is_empty() || std::env::var("Z1_TX_RETRIES").as_deref() == Ok("0"),
+        "{} of {n} control runs failed",
         failures.len()
     );
 }

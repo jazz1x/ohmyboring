@@ -333,6 +333,13 @@ impl SurrealClient {
                 let failed: Vec<String> = statements
                     .iter()
                     .filter(|s| s.status != "OK")
+                    .filter(|s| {
+                        // After the first failure the server answers every later statement with
+                        // a sentence about the aborted transaction; only the first one says why.
+                        let said = s.result.as_str().unwrap_or_default();
+                        !said.contains("not executed due to a")
+                            && !said.contains("Cannot COMMIT: the transaction was aborted")
+                    })
                     .map(|s| {
                         s.result
                             .as_str()
