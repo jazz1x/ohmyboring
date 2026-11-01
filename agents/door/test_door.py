@@ -655,6 +655,7 @@ class StreamsNeverStarveShortRequestsTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.enterClassContext(mock.patch.dict(os.environ, {"DOOR_MEMORY_READER": "python"}))
         cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
         cls._saved_dsn = os.environ.get("DOOR_PG_DSN")
         cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), HangStubHandler)
@@ -1459,6 +1460,7 @@ class ActiveProjectsRouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.enterClassContext(mock.patch.dict(os.environ, {"DOOR_SEARCH_READER": "python"}))
         cls._saved_upstream = os.environ.get("DOOR_UPSTREAM")
         cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
         cls.stub_thread = threading.Thread(target=cls.stub.serve_forever, daemon=True)
@@ -1686,6 +1688,7 @@ class ApprovedRouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.enterClassContext(mock.patch.dict(os.environ, {"DOOR_MEMORY_READER": "python"}))
         cls.door_port = _free_port()
         cls.door_server = uvicorn.Server(
             uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
@@ -1864,6 +1867,7 @@ class ClaimSourceRouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.enterClassContext(mock.patch.dict(os.environ, {"DOOR_MEMORY_READER": "python"}))
         cls.door_port = _free_port()
         cls.door_server = uvicorn.Server(
             uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
@@ -2366,6 +2370,7 @@ class RulesRouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.enterClassContext(mock.patch.dict(os.environ, {"DOOR_MEMORY_READER": "python"}))
         cls.door_port = _free_port()
         cls.door_server = uvicorn.Server(
             uvicorn.Config(door.app, host="127.0.0.1", port=cls.door_port, log_level="warning")
@@ -3730,8 +3735,9 @@ _REAL_FETCH = door._fetch
 
 class HandoverSwitchTest(unittest.TestCase):
     """1차 넘김 — DOOR_MEMORY_READER(/approved·/claim-source·/claim-sources·/rules)와
-    DOOR_SEARCH_READER(/projects·/search 함께). 값이 정확히 engine 일 때만 엔진(프록시)으로,
-    그 밖(없음·python·오타)은 문 Python 이 답한다. 엔진 이음매(_fetch)는 목, 저장소는 꺼 둔다."""
+    DOOR_SEARCH_READER(/projects·/search 함께). 값이 정확히 python 일 때만 문 Python 이 답하고,
+    그 밖(없음·engine·오타)은 엔진(프록시)으로 — 다른 READER 스위치와 같은 규칙. 엔진 이음매(_fetch)는 목,
+    저장소는 꺼 둔다."""
 
     ENGINE = b'{"from":"engine"}'
     MEMORY = (
@@ -3767,13 +3773,13 @@ class HandoverSwitchTest(unittest.TestCase):
                 os.environ[name] = value
 
     def check_switch(self, env, requests):
-        os.environ[env] = "engine"
+        os.environ[env] = "python"
         for method, path, body in requests:
             self.fetch.reset_mock()
             response = self.client.request(method, path, json=body)
-            self.assertEqual(response.content, self.ENGINE, f"{env}=engine {path}")
-            self.assertEqual(self.fetch.call_count, 1, f"{env}=engine {path}")
-        for value in (None, "python", "Engine", "engin", ""):
+            self.assertNotEqual(response.content, self.ENGINE, f"{env}=python {path}")
+            self.fetch.assert_not_called()
+        for value in (None, "engine", "Python", "pyth", ""):
             if value is None:
                 os.environ.pop(env, None)
             else:
@@ -3781,25 +3787,27 @@ class HandoverSwitchTest(unittest.TestCase):
             for method, path, body in requests:
                 self.fetch.reset_mock()
                 response = self.client.request(method, path, json=body)
-                self.assertNotEqual(response.content, self.ENGINE, f"{env}={value!r} {path}")
-                self.fetch.assert_not_called()
+                self.assertEqual(response.content, self.ENGINE, f"{env}={value!r} {path}")
+                self.assertEqual(self.fetch.call_count, 1, f"{env}={value!r} {path}")
 
-    def test_memory_reader_engine_only_when_exactly_engine(self):
+    def test_memory_reader_python_only_when_exactly_python(self):
         self.check_switch("DOOR_MEMORY_READER", self.MEMORY)
 
-    def test_search_reader_engine_only_when_exactly_engine(self):
+    def test_search_reader_python_only_when_exactly_python(self):
         self.check_switch("DOOR_SEARCH_READER", self.SEARCH)
 
     def test_the_two_switches_do_not_cross(self):
-        os.environ["DOOR_MEMORY_READER"] = "engine"
+        os.environ["DOOR_MEMORY_READER"] = "python"
         for method, path, body in self.SEARCH:
+            self.fetch.reset_mock()
             self.client.request(method, path, json=body)
-        self.fetch.assert_not_called()
+            self.assertEqual(self.fetch.call_count, 1, path)
         os.environ.pop("DOOR_MEMORY_READER")
-        os.environ["DOOR_SEARCH_READER"] = "engine"
+        os.environ["DOOR_SEARCH_READER"] = "python"
         for method, path, body in self.MEMORY:
+            self.fetch.reset_mock()
             self.client.request(method, path, json=body)
-        self.fetch.assert_not_called()
+            self.assertEqual(self.fetch.call_count, 1, path)
 
     def test_engine_search_header_survives_the_proxy(self):
         os.environ["DOOR_SEARCH_READER"] = "engine"

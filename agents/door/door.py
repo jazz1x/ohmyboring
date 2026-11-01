@@ -2159,10 +2159,9 @@ async def _search(request: Request) -> Response:
 
 
 #: 1차 넘김 스위치 — 엔진이 답하는 표(http_routes)에 있는 여섯 경로를 문 Python 도 답할 수 있다.
-#: 값이 정확히 engine 일 때만 엔진(프록시)으로 가고, 그 밖(없음·python·오타)은 문 Python 이 답한다.
+#: 값이 정확히 python 일 때만 문 Python 이 답하고, 그 밖(없음·engine·오타)은 엔진(프록시)으로 간다.
 _MEMORY_READER_ENV = "DOOR_MEMORY_READER"
 _SEARCH_READER_ENV = "DOOR_SEARCH_READER"
-_HANDOVER_ENGINE = "engine"
 _HANDED_OVER_PATHS = {
     "/approved": (_MEMORY_READER_ENV, _approved),
     "/claim-source": (_MEMORY_READER_ENV, _claim_source),
@@ -2175,9 +2174,9 @@ _HANDED_OVER_PATHS = {
 
 def _handover_route(env: str, native: Any) -> Any:
     async def handler(request: Request, background_tasks: BackgroundTasks) -> Response:
-        if os.environ.get(env) == _HANDOVER_ENGINE:
-            return await _proxy(request, background_tasks)
-        return await native(request)
+        if os.environ.get(env) == _READER_PYTHON:
+            return await native(request)
+        return await _proxy(request, background_tasks)
 
     return handler
 
