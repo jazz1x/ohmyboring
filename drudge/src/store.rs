@@ -1751,23 +1751,54 @@ impl Store {
         anchor_hash: Option<&str>,
         anchor_symbol: Option<&str>,
     ) -> Result<()> {
-        self.upsert_claim_with_anchor_on(
-            &self.db().await?,
-            subject,
-            predicate,
-            value,
-            source_path,
-            valid_from,
-            embedding,
-            kind,
-            confidence,
-            anchor,
-            anchor_hash,
-            anchor_symbol,
-        )
-        .await?;
-        self.mirror_surreal(&Scope::notes([source_path.to_owned()]))
-            .await
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.upsert_claim_with_anchor_on(
+                    &self.db().await?,
+                    subject,
+                    predicate,
+                    value,
+                    source_path,
+                    valid_from,
+                    embedding,
+                    kind,
+                    confidence,
+                    anchor,
+                    anchor_hash,
+                    anchor_symbol,
+                )
+                .await?;
+                self.mirror_surreal(&Scope::notes([source_path.to_owned()]))
+                    .await
+            }
+            // backend=surreal: the row is written on Surreal, in its own transaction with the
+            // slot guard and the seal (`SurrealClient::claim_slot_upsert`), not on pg.
+            VectorRoute::Surreal(client) => {
+                self.checked_vector(embedding)?;
+                let valid_from_us = i64::try_from(
+                    valid_from
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .context("claim valid_from is before 1970")?
+                        .as_micros(),
+                )
+                .context("claim valid_from out of range")?;
+                client
+                    .claim_slot_upsert(&ClaimWrite {
+                        subject,
+                        predicate,
+                        value,
+                        source_path,
+                        valid_from_us,
+                        embedding,
+                        kind,
+                        confidence,
+                        anchor,
+                        anchor_hash,
+                        anchor_symbol,
+                    })
+                    .await
+            }
+        }
     }
 
     /// Lock every claim row of one canon slot, in the order `lock_claim_slots_of` takes them.
@@ -2951,6 +2982,25 @@ impl Store {
         standing: crate::serve::owner::Standing,
     ) -> Result<Option<crate::split_subjects::Merged>> {
         use crate::serve::owner::Standing;
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.merge_split_subject_pg(subject, standing).await,
+            // backend=surreal: the merge runs on Surreal's rows (`SurrealClient::merge_split_subject`).
+            VectorRoute::Surreal(client) => {
+                let standing = match standing {
+                    Standing::Owner => SplitStanding::Owner,
+                    Standing::NotOwner => SplitStanding::NotOwner,
+                };
+                client.merge_split_subject(subject, standing).await
+            }
+        }
+    }
+
+    async fn merge_split_subject_pg(
+        &self,
+        subject: &str,
+        standing: crate::serve::owner::Standing,
+    ) -> Result<Option<crate::split_subjects::Merged>> {
+        use crate::serve::owner::Standing;
         let mut conn = self.db().await?;
         let tx = conn
             .transaction()
@@ -3655,11 +3705,19 @@ impl Store {
                 continue;
             };
             // One transaction per edge: a failure at edge N keeps the seals of edges before it.
-            let mut conn = self.db().await?;
-            let tx = conn.transaction().await.context("begin seal transaction")?;
-            total += Self::seal_superseded_claims(&tx, &newer, &older).await?;
-            tx.commit().await.context("commit seal transaction")?;
-            self.mirror_surreal(&Scope::notes([older])).await?;
+            total += match &self.vector_route {
+                VectorRoute::Pgvector => {
+                    let mut conn = self.db().await?;
+                    let tx = conn.transaction().await.context("begin seal transaction")?;
+                    let sealed = Self::seal_superseded_claims(&tx, &newer, &older).await?;
+                    tx.commit().await.context("commit seal transaction")?;
+                    self.mirror_surreal(&Scope::notes([older])).await?;
+                    sealed
+                }
+                // backend=surreal: the seal runs on Surreal's rows, in one transaction with the
+                // guards of every slot the note holds (`SurrealClient::seal_note`).
+                VectorRoute::Surreal(client) => client.seal_note(&newer, &older).await?,
+            };
         }
         Ok(total)
     }

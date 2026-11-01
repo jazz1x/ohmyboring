@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{KEY_SEP, RpcReply, SurrealClient, claim_key, floats, rejection, text, texts};
+use crate::ingest::canon;
 use crate::split_subjects::{Merged, find_group};
 
 /// Whole-transaction resends before a conflict goes up as an error. A conflict means another
@@ -137,13 +138,39 @@ fn opt(v: Option<&str>) -> String {
     v.map_or_else(|| "NONE".to_owned(), text)
 }
 
+/// The guard of one slot, keyed the way pg's lock is: by the canon spelling of subject and
+/// predicate (`lock_claim_slot_on` matches `canon(c.subject) = canon($1)`), so two spellings of
+/// one slot meet on one guard.
 fn guard_key(subject: &str, predicate: &str) -> String {
-    format!("{subject}{KEY_SEP}{predicate}")
+    format!("{}{KEY_SEP}{}", canon(subject), canon(predicate))
 }
 
+/// `LET $guards = [..]` for these `(subject, predicate)` pairs: their canon keys, each once.
+fn guards_let<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let keys: std::collections::BTreeSet<String> =
+        pairs.into_iter().map(|(s, p)| guard_key(s, p)).collect();
+    let keys: Vec<String> = keys.into_iter().collect();
+    format!("LET $guards = {};", texts(&keys))
+}
+
+/// `[[s, p], ..]` as a SurrealQL literal, each pair once.
+fn pairs_literal(pairs: &[(String, String)]) -> String {
+    let set: std::collections::BTreeSet<&(String, String)> = pairs.iter().collect();
+    let inner: Vec<String> = set
+        .into_iter()
+        .map(|(s, p)| format!("[{},{}]", text(s), text(p)))
+        .collect();
+    format!("[{}]", inner.join(","))
+}
+
+/// Throws `SPLIT_STALE` when the pairs a transaction planned its guards on are not the pairs in
+/// `$slots` any more (a spelling appeared or went away since the plan was read).
+const SLOTS_UNCHANGED: &str = "IF array::len(array::complement($slots, $planned)) > 0 OR \
+     array::len(array::complement($planned, $slots)) > 0 { THROW 'z1-split-stale'; };";
+
 /// The write both sides of a race make; the Surreal stand-in for pg's row lock.
-const BUMP_GUARDS: &str = "FOR $s IN $slots { UPSERT type::record('claim_slot', \
-     string::concat($s[0], $sep, $s[1])) SET n = (n ?? 0) + 1; };";
+const BUMP_GUARDS: &str =
+    "FOR $g IN $guards { UPSERT type::record('claim_slot', $g) SET n = (n ?? 0) + 1; };";
 
 /// The notes that hold a row in `$slots`, which of them (or of the notes that replaced them) the
 /// owner wrote, and which are retired: `Store`'s `RETIRED_NOTE` over Surreal's rows. A
@@ -157,18 +184,6 @@ LET $src_docs = SELECT VALUE source_path FROM document WHERE source_path INSIDE 
 LET $owners = SELECT VALUE source_path FROM document WHERE author = 'owner' AND source_path INSIDE array::union($paths, $srcs);
 LET $retired = SELECT VALUE string::slice(dst, 4) FROM edge WHERE kind = 'supersedes' AND dst INSIDE $dsts AND string::slice(src, 4) INSIDE $src_docs AND (string::slice(src, 4) INSIDE $owners OR !(string::slice(dst, 4) INSIDE $owners));";
 
-fn slots_let(slots: &[(&str, &str)]) -> String {
-    let inner: Vec<String> = slots
-        .iter()
-        .map(|(s, p)| format!("[{},{}]", text(s), text(p)))
-        .collect();
-    format!(
-        "LET $slots = [{}]; LET $sep = {};",
-        inner.join(","),
-        text(&KEY_SEP.to_string())
-    )
-}
-
 fn slot_sql(w: &ClaimWrite<'_>) -> String {
     let cid = text(&claim_key(w.subject, w.predicate, w.valid_from_us));
     let (s, p, sp) = (text(w.subject), text(w.predicate), text(w.source_path));
@@ -177,22 +192,23 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
     } else {
         "'unanchored'"
     };
-    let slots = slots_let(&[(w.subject, w.predicate)]);
+    let guards = guards_let([(w.subject, w.predicate)]);
+    let slots = format!("LET $slots = [[{s},{p}]];");
     let seal = if w.kind == "fact" {
         format!(
             "LET $mx = (SELECT VALUE valid_from_us FROM claim_row WHERE subject = {s} AND predicate = {p} AND !(source_path INSIDE $retired) ORDER BY valid_from_us DESC LIMIT 1)[0];
              IF $mx != NONE {{
                  LET $latest_owner = array::len(SELECT VALUE cid FROM claim_row WHERE subject = {s} AND predicate = {p} AND valid_from_us = $mx AND source_path INSIDE $owners) > 0;
-                 UPDATE claim_row SET superseded_us = $mx WHERE subject = {s} AND predicate = {p} AND valid_from_us < $mx AND superseded_us != $mx AND (!(source_path INSIDE $owners) OR $latest_owner);
-                 UPDATE claim_row SET superseded_us = NONE WHERE subject = {s} AND predicate = {p} AND superseded_us != NONE AND valid_from_us = $mx;
+                 UPDATE claim_row SET superseded_us = $mx, via = 'surreal' WHERE subject = {s} AND predicate = {p} AND valid_from_us < $mx AND superseded_us != $mx AND (!(source_path INSIDE $owners) OR $latest_owner);
+                 UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE subject = {s} AND predicate = {p} AND superseded_us != NONE AND valid_from_us = $mx;
              }};"
         )
     } else {
         format!(
             "LET $mx = (SELECT VALUE valid_from_us FROM claim_row WHERE subject = {s} AND predicate = {p} AND source_path = {sp} ORDER BY valid_from_us DESC LIMIT 1)[0];
-             UPDATE claim_row SET superseded_us = $mx WHERE subject = {s} AND predicate = {p} AND source_path = {sp} AND valid_from_us < $mx AND superseded_us != $mx;
+             UPDATE claim_row SET superseded_us = $mx, via = 'surreal' WHERE subject = {s} AND predicate = {p} AND source_path = {sp} AND valid_from_us < $mx AND superseded_us != $mx;
              IF !({sp} INSIDE $retired) {{
-                 UPDATE claim_row SET superseded_us = NONE WHERE subject = {s} AND predicate = {p} AND source_path = {sp} AND superseded_us != NONE AND valid_from_us = $mx;
+                 UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE subject = {s} AND predicate = {p} AND source_path = {sp} AND superseded_us != NONE AND valid_from_us = $mx;
              }};"
         )
     };
@@ -200,13 +216,14 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
         .anchor
         .map_or_else(String::new, |a| format!("anchor: {},", text(a)));
     format!(
-        "UPSERT type::record('claim_slot', {guard}) SET n = (n ?? 0) + 1;
+        "{guards}
+         {BUMP_GUARDS}
          {slots}
          LET $d = (SELECT origin, project FROM document WHERE source_path = {sp})[0];
          UPSERT type::record('claim_row', {cid}) SET cid = {cid}, subject = {s}, predicate = {p},
              value = {value}, source_path = {sp}, valid_from_us = {vf}, kind = {kind},
              confidence = {conf}, anchor = {anchor}, anchor_hash = {ah}, anchor_symbol = {asym},
-             era = {era}, origin = $d.origin, project = $d.project;
+             era = {era}, origin = $d.origin, project = $d.project, via = 'surreal';
          {RETIRED_LETS}
          {seal}
          DELETE claim WHERE subject = {s} AND predicate = {p} AND cid INSIDE (SELECT VALUE cid FROM claim_row WHERE subject = {s} AND predicate = {p} AND superseded_us != NONE);
@@ -216,7 +233,6 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
                  valid_from_us: {vf}, source_path: {sp}, origin: $d.origin, project: $d.project,
                  kind: {kind}, {vector_anchor} stale_us: $row.stale_us, embedding: {emb}}};
          }};",
-        guard = text(&guard_key(w.subject, w.predicate)),
         value = text(w.value),
         vf = w.valid_from_us,
         kind = text(w.kind),
@@ -228,26 +244,31 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
     )
 }
 
-fn note_sql(newer: &str, older: &str) -> String {
+/// `planned` is the `(subject, predicate)` pairs of `older`'s rows as read before the transaction;
+/// the guards are made from them, and the transaction throws if the rows hold other pairs now.
+fn note_sql(newer: &str, older: &str, planned: &[(String, String)]) -> String {
     let (n, o) = (text(newer), text(older));
+    let guards = guards_let(planned.iter().map(|(s, p)| (s.as_str(), p.as_str())));
+    let planned = pairs_literal(planned);
     format!(
-        "LET $sep = {sep};
+        "{guards}
+         LET $planned = {planned};
          LET $slots = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row WHERE source_path = {o});
+         {SLOTS_UNCHANGED}
          {BUMP_GUARDS}
          LET $fslots = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row WHERE source_path = {o} AND kind = 'fact');
          {RETIRED_LETS}
          LET $newest = (SELECT VALUE valid_from_us FROM claim_row WHERE source_path = {n} ORDER BY valid_from_us DESC LIMIT 1)[0];
          LET $stamp = $newest ?? time::micros(time::now());
-         LET $sealed = UPDATE claim_row SET superseded_us = $stamp WHERE source_path = {o} AND superseded_us = NONE AND {o} INSIDE $retired RETURN VALUE cid;
+         LET $sealed = UPDATE claim_row SET superseded_us = $stamp, via = 'surreal' WHERE source_path = {o} AND superseded_us = NONE AND {o} INSIDE $retired RETURN VALUE cid;
          DELETE claim WHERE source_path = {o} AND cid INSIDE $sealed;
          FOR $sl IN $fslots {{
              LET $live = SELECT VALUE valid_from_us FROM claim_row WHERE subject = $sl[0] AND predicate = $sl[1] AND !(source_path INSIDE $retired) ORDER BY valid_from_us DESC LIMIT 1;
              IF array::len($live) > 0 {{
-                 UPDATE claim_row SET superseded_us = NONE WHERE subject = $sl[0] AND predicate = $sl[1] AND kind = 'fact' AND superseded_us != NONE AND valid_from_us = $live[0];
+                 UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE subject = $sl[0] AND predicate = $sl[1] AND kind = 'fact' AND superseded_us != NONE AND valid_from_us = $live[0];
              }};
          }};
-         RETURN array::len($sealed);",
-        sep = text(&KEY_SEP.to_string()),
+         RETURN array::len($sealed);"
     )
 }
 
@@ -255,8 +276,11 @@ fn split_sql(
     variants: &[String],
     notes: &[String],
     expected: &[String],
+    planned: &[(String, String)],
     standing: SplitStanding,
 ) -> String {
+    let guards = guards_let(planned.iter().map(|(s, p)| (s.as_str(), p.as_str())));
+    let planned = pairs_literal(planned);
     let owner = match standing {
         SplitStanding::Owner => "LET $owner = [];".to_owned(),
         SplitStanding::NotOwner => format!(
@@ -266,11 +290,13 @@ fn split_sql(
     };
     let v = texts(variants);
     format!(
-        "LET $sep = {sep};
+        "{guards}
+         LET $planned = {planned};
          LET $now = SELECT VALUE cid FROM claim_row WHERE subject INSIDE {v} AND superseded_us = NONE;
          LET $want = {want};
          IF array::len(array::complement($now, $want)) > 0 OR array::len(array::complement($want, $now)) > 0 {{ THROW {stale}; }};
          LET $slots = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row WHERE subject INSIDE {v});
+         {SLOTS_UNCHANGED}
          {BUMP_GUARDS}
          {owner}
          LET $touched = array::complement({notes}, $owner);
@@ -279,7 +305,6 @@ fn split_sql(
          DELETE claim WHERE cid INSIDE $gone;
          LET $blanked = UPDATE document SET sha = '' WHERE source_path INSIDE $touched RETURN source_path;
          RETURN {{deleted: array::len($gone), reread: array::len($blanked), owner_held: $owner}};",
-        sep = text(&KEY_SEP.to_string()),
         want = texts(expected),
         stale = text(SPLIT_STALE),
         notes = texts(notes),
@@ -299,7 +324,28 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(u64::from(attempt) * (3 + nanos % 7))
 }
 
+#[derive(Deserialize)]
+struct PairRow {
+    subject: String,
+    predicate: String,
+}
+
 impl SurrealClient {
+    /// `claim_row.via` marks a row a Surreal write made or moved (`'surreal'`): `catch_up` and the
+    /// mirror copy pg's rows over Surreal's but leave a marked row as it is, and never delete it.
+    /// A table laid down by `fill_from` has the field; one made before it gets it here, once per
+    /// client (a DDL statement inside a racing transaction would itself conflict).
+    pub(super) async fn ensure_via_field(&self) -> Result<()> {
+        self.claim_via
+            .get_or_try_init(|| async {
+                self.run("DEFINE FIELD IF NOT EXISTS via ON claim_row TYPE option<string>;")
+                    .await
+                    .map(drop)
+            })
+            .await?;
+        Ok(())
+    }
+
     /// A client whose transactions are resent at most `n` times on a conflict (`TX_RETRIES` by
     /// default). 0 turns the retry off: the conflict goes up as the error it is.
     #[must_use]
@@ -401,6 +447,7 @@ impl SurrealClient {
     /// # Errors
     /// A statement failed, or the slot stayed in conflict for more than `tx_retries` resends.
     pub async fn claim_slot_upsert(&self, w: &ClaimWrite<'_>) -> Result<()> {
+        self.ensure_via_field().await?;
         let sql = slot_sql(w);
         self.retrying(TxPlace::Slot, || async {
             Ok(match self.tx_once(&sql).await? {
@@ -418,8 +465,19 @@ impl SurrealClient {
     /// # Errors
     /// A statement failed, or a slot stayed in conflict for more than `tx_retries` resends.
     pub async fn seal_note(&self, newer: &str, older: &str) -> Result<usize> {
-        let sql = note_sql(newer, older);
+        self.ensure_via_field().await?;
         self.retrying(TxPlace::Note, || async {
+            let query = format!(
+                "SELECT subject, predicate FROM claim_row WHERE source_path = {};",
+                text(older)
+            );
+            let planned: Vec<PairRow> =
+                super::first_statement(&query, self.rows::<PairRow>(&query).await?)?;
+            let planned: Vec<(String, String)> = planned
+                .into_iter()
+                .map(|r| (r.subject, r.predicate))
+                .collect();
+            let sql = note_sql(newer, older, &planned);
             Ok(match self.tx_once(&sql).await? {
                 Attempt::Done(answers) => {
                     let n = answers
@@ -448,6 +506,7 @@ impl SurrealClient {
         subject: &str,
         standing: SplitStanding,
     ) -> Result<Option<Merged>> {
+        self.ensure_via_field().await?;
         self.retrying(TxPlace::Split, || self.split_attempt(subject, standing))
             .await
     }
@@ -472,7 +531,17 @@ impl SurrealClient {
                     .filter(|r| variants.contains(&r.subject))
                     .map(|r| claim_key(&r.subject, &r.predicate, r.valid_from_us))
                     .collect();
-                let sql = split_sql(&variants, &notes, &expected, standing);
+                let query = format!(
+                    "SELECT subject, predicate FROM claim_row WHERE subject INSIDE {};",
+                    texts(&variants)
+                );
+                let planned: Vec<PairRow> =
+                    super::first_statement(&query, self.rows::<PairRow>(&query).await?)?;
+                let planned: Vec<(String, String)> = planned
+                    .into_iter()
+                    .map(|r| (r.subject, r.predicate))
+                    .collect();
+                let sql = split_sql(&variants, &notes, &expected, &planned, standing);
                 Ok(match self.tx_once(&sql).await? {
                     Attempt::Done(answers) => {
                         let answer: SplitAnswer = serde_json::from_value(

@@ -344,6 +344,7 @@ pub struct SurrealClient {
     token: Arc<RwLock<Option<Token>>>,
     tx_retries: u32,
     tx_stats: Arc<claim_tx::TxStats>,
+    claim_via: Arc<tokio::sync::OnceCell<()>>,
 }
 
 /// The `/signin` token, shared by every clone. Hand-written `Debug`: it must never reach a log.
@@ -412,6 +413,7 @@ impl SurrealClient {
             token: Arc::new(RwLock::new(None)),
             tx_retries: claim_tx::TX_RETRIES,
             tx_stats: Arc::default(),
+            claim_via: Arc::default(),
         })
     }
 
@@ -1071,6 +1073,11 @@ pub struct ClaimRowDiff {
     pub redo: Vec<String>,
 }
 
+/// A row a Surreal write made or moved (`claim_row.via`): the diff leaves it alone.
+fn written_on_surreal(row: &Value) -> bool {
+    row.get("via").and_then(Value::as_str) == Some("surreal")
+}
+
 impl ClaimRowDiff {
     /// Compare pg's rows (by key) with what Surreal read back, keyed by `cid`.
     #[must_use]
@@ -1089,6 +1096,7 @@ impl ClaimRowDiff {
                     diff.missing.push(key.clone());
                     diff.redo.push(want.to_string());
                 }
+                Some(have) if written_on_surreal(have) => {}
                 Some(have) if have != want => {
                     diff.different.push(key.clone());
                     diff.redo.push(want.to_string());
@@ -1097,9 +1105,9 @@ impl ClaimRowDiff {
             }
         }
         diff.extra = surreal
-            .keys()
-            .filter(|k| !pg.contains_key(*k))
-            .cloned()
+            .iter()
+            .filter(|(k, row)| !pg.contains_key(*k) && !written_on_surreal(row))
+            .map(|(k, _)| k.clone())
             .collect();
         diff.extra.sort_unstable();
         diff
@@ -1399,6 +1407,7 @@ const CLAIM_ROW_DDL: &str = "DEFINE TABLE claim_row SCHEMAFULL;
          DEFINE FIELD said_by ON claim_row TYPE option<string>;
          DEFINE FIELD origin ON claim_row TYPE option<string>;
          DEFINE FIELD project ON claim_row TYPE option<string>;
+         DEFINE FIELD via ON claim_row TYPE option<string>;
          DEFINE INDEX claim_row_path ON claim_row FIELDS source_path;
          DEFINE INDEX claim_row_slot ON claim_row FIELDS subject, predicate;";
 
@@ -2442,7 +2451,12 @@ impl SurrealClient {
             )
             .await
             .context("read the written notes' open claims from pgvector")?;
-        let wanted: Vec<(String, String)> = rows.iter().map(claim_literal).collect();
+        let written = self.surreal_written().await?;
+        let wanted: Vec<(String, String)> = rows
+            .iter()
+            .map(claim_literal)
+            .filter(|(cid, _)| !written.contains(cid))
+            .collect();
         // One membership test, not an `OR` chain: Surreal's parser refuses a chain of ~120 terms
         // ("nests or chains operators too deeply"), and a 1,280-note scope has more slots than that.
         let slot_pairs: Vec<String> = slots
@@ -2458,7 +2472,10 @@ impl SurrealClient {
         let existing: Vec<String> = first_statement(
             &existing_claims,
             self.rows::<String>(&existing_claims).await?,
-        )?;
+        )?
+        .into_iter()
+        .filter(|cid| !written.contains(cid))
+        .collect();
         self.reconcile("claim", wanted, existing).await?;
         self.mirror_claim_rows(store, scope, &slots).await
     }
@@ -2486,12 +2503,14 @@ impl SurrealClient {
             )
             .await
             .context("read the written notes' claim rows from pgvector")?;
+        let written = self.surreal_written().await?;
         let wanted: Vec<(String, String)> = rows
             .iter()
             .map(|r| {
                 let (key, row) = claim_row_json(r);
                 (key, row.to_string())
             })
+            .filter(|(key, _)| !written.contains(key))
             .collect();
         let slot_pairs: Vec<String> = slots
             .iter()
@@ -2509,7 +2528,7 @@ impl SurrealClient {
             wanted.iter().map(|(k, _)| k.as_str()).collect();
         let stale: Vec<String> = existing
             .into_iter()
-            .filter(|k| !keep.contains(k.as_str()))
+            .filter(|k| !keep.contains(k.as_str()) && !written.contains(k))
             .collect();
         let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
         self.upsert_rows("claim_row", &literals).await?;
@@ -2555,8 +2574,10 @@ impl SurrealClient {
         }
         let mut seen = 0_usize;
         loop {
-            let query =
-                format!("SELECT VALUE cid FROM claim_row LIMIT {CLAIM_ROW_PAGE} START {seen};");
+            let query = format!(
+                "SELECT VALUE cid FROM claim_row WHERE via != 'surreal' \
+                 LIMIT {CLAIM_ROW_PAGE} START {seen};"
+            );
             let keys: Vec<String> = first_statement(&query, self.rows::<String>(&query).await?)?;
             seen += keys.len();
             let held: std::collections::HashSet<String> = db
@@ -2650,6 +2671,17 @@ impl SurrealClient {
             .await?;
         }
         Ok(())
+    }
+
+    /// The keys of the claim rows a Surreal write made or moved (`claim_row.via`, see
+    /// `ensure_via_field`). pg does not hold them, or holds an older value: the copies from pg
+    /// (`catch_up`, the mirror, `claim_row_diff`) skip these keys in both tables, so a claim
+    /// written on Surreal is never deleted or put back by a pass that reads pg.
+    pub(super) async fn surreal_written(&self) -> Result<std::collections::HashSet<String>> {
+        let query = "SELECT VALUE cid FROM claim_row WHERE via = 'surreal';";
+        Ok(first_statement(query, self.rows::<String>(query).await?)?
+            .into_iter()
+            .collect())
     }
 
     async fn surreal_keys(&self) -> Result<TableKeys> {
@@ -2750,6 +2782,7 @@ impl SurrealClient {
     /// and writes what it holds. Without this a seal or an insert the Python door wrote straight
     /// to pg leaves the vector tables off by exactly those keys until the next fill. Returns
     /// `(written, deleted)`: keys pg had and Surreal lacked, keys the other way round.
+    #[allow(clippy::too_many_lines)] // the chunk half and the claim half read one pg connection
     async fn catch_up_vectors(&self, store: &Store) -> Result<(usize, usize)> {
         let db = store.db().await?;
         let mut written = 0;
@@ -2810,8 +2843,15 @@ impl SurrealClient {
         let have: std::collections::HashSet<String> =
             self.table_keys("claim").await?.into_iter().collect();
         let want: std::collections::HashSet<&str> = pg_claims.iter().map(String::as_str).collect();
-        let stale: Vec<&String> = have.iter().filter(|k| !want.contains(k.as_str())).collect();
-        let missing: Vec<&String> = pg_claims.iter().filter(|k| !have.contains(*k)).collect();
+        let on_surreal = self.surreal_written().await?;
+        let stale: Vec<&String> = have
+            .iter()
+            .filter(|k| !want.contains(k.as_str()) && !on_surreal.contains(*k))
+            .collect();
+        let missing: Vec<&String> = pg_claims
+            .iter()
+            .filter(|k| !have.contains(*k) && !on_surreal.contains(*k))
+            .collect();
         let stale_claims = stale.len();
         let surreal_stales = self.surreal_claim_stales().await?;
         let moved: Vec<(String, Option<i64>)> = pg_claim_stales(&db)

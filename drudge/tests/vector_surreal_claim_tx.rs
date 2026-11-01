@@ -13,6 +13,7 @@
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::many_single_char_names,
+    clippy::too_many_lines,
     clippy::cast_possible_wrap
 )]
 
@@ -507,5 +508,183 @@ async fn control_two_different_slots_share_no_guard() {
         failures.is_empty() || std::env::var("Z1_TX_RETRIES").as_deref() == Ok("0"),
         "{} of {n} control runs failed",
         failures.len()
+    );
+}
+
+/// pg's lock matches `canon(c.subject) = canon($1)`: `Foo Bar` and `foo-bar` are one slot. Two
+/// writers that spell one slot two ways must meet on one guard, so one of them is resent. A
+/// guard keyed by the exact spelling sees no conflict at all; the rows end the same either way
+/// (the seal reads the exact spelling, as pg's does), so what this counts is the runs in which
+/// the two writers were serialised.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn two_spellings_of_one_slot_meet_on_one_guard() {
+    let c = client("z1_spelling").await;
+    let race = race_client("z1_spelling");
+    let n = runs();
+    let mut failures = Vec::new();
+    let mut serialised = 0;
+    for i in 0..n {
+        let (loud, canon) = (format!("Z1 Spell {i}"), format!("z1-spell-{i}"));
+        doc(&c, &format!("/v/l-{i}.md"), "agent").await;
+        doc(&c, &format!("/v/c-{i}.md"), "agent").await;
+        let before = race.tx_count(TxPlace::Slot).conflicts;
+        let (a, b) = tokio::join!(
+            async { put(&race, &loud, "goal", &format!("/v/l-{i}.md"), 1000, "fact").await },
+            async { put(&race, &canon, "goal", &format!("/v/c-{i}.md"), 2000, "fact").await },
+        );
+        if race.tx_count(TxPlace::Slot).conflicts > before {
+            serialised += 1;
+        }
+        if a.is_err() || b.is_err() {
+            failures.push(format!("run {i}: a={a:?} b={b:?}"));
+        }
+    }
+    println!("Z1 spelling runs={n} runs_with_a_conflict={serialised}");
+    table(TxPlace::Slot, &race, n, n - failures.len(), &failures);
+    assert!(
+        serialised * 10 >= n * 8,
+        "only {serialised} of {n} runs put the two spellings on one guard"
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+fn micros(us: u64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_micros(us)
+}
+
+fn front(path: &str) -> drudge::frontmatter::FrontMatter {
+    drudge::frontmatter::FrontMatter {
+        origin: "personal".to_string(),
+        project: "z1".to_string(),
+        kind: "note".to_string(),
+        source_path: path.to_string(),
+        title: Some("z1".to_string()),
+        ..Default::default()
+    }
+}
+
+async fn count(c: &SurrealClient, sql: &str) -> i64 {
+    let answer = c.run(sql).await.expect("count");
+    answer[0]
+        .as_array()
+        .unwrap()
+        .first()
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
+/// backend=surreal: `remember`'s writer (`Store::upsert_claim`) goes through the Surreal
+/// transaction, not pg, and one `catch_up` pass afterwards neither deletes those rows nor undoes
+/// the seal they made (the pass copies pg's rows over Surreal's and used to delete what pg lacked).
+/// The claims Python wrote to pg only reach Surreal in the same pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn surreal_written_claims_survive_catch_up_and_pg_written_ones_arrive() {
+    let c = client("z1_wire").await;
+    let dsn = env("BORING_TEST_DATABASE_URL");
+    let pg = Store::open(&dsn, DIM).await.expect("open store");
+    let routed = Store::open(&dsn, DIM)
+        .await
+        .expect("open store")
+        .with_vector_route(drudge::store::VectorRoute::Surreal(c.clone()));
+    let n = runs().min(20);
+    let e = emb();
+    for i in 0..n {
+        let path = format!("/v/w1-{i}.md");
+        routed
+            .upsert_document(&front(&path), "sha", micros(1))
+            .await
+            .expect("document");
+        for (k, vf) in [
+            (0_u64, 1_700_000_000_000_000_u64),
+            (1, 1_700_000_100_000_000),
+        ] {
+            routed
+                .upsert_claim(
+                    &format!("z1-w1-{i}"),
+                    "goal",
+                    &format!("a long enough value to count as a statement {k}"),
+                    &path,
+                    micros(vf),
+                    &e,
+                    "fact",
+                    "certain",
+                )
+                .await
+                .expect("remember-style claim on the surreal route");
+        }
+    }
+    for i in 0..n {
+        let path = format!("/v/w2-{i}.md");
+        pg.upsert_document(&front(&path), "sha", micros(1))
+            .await
+            .expect("document");
+        pg.upsert_claim(
+            &format!("z1-w2-{i}"),
+            "goal",
+            "a long enough value to count as a statement",
+            &path,
+            micros(1_700_000_000_000_000),
+            &e,
+            "fact",
+            "certain",
+        )
+        .await
+        .expect("pg claim");
+    }
+    let (db, conn) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+        .await
+        .expect("connect");
+    tokio::spawn(conn);
+    let in_pg: i64 = db
+        .query_one(
+            "SELECT count(*) FROM claim WHERE subject LIKE 'z1-w1-%'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let rows = |p: &str| {
+        format!(
+            "SELECT VALUE count() FROM claim_row WHERE string::starts_with(subject, '{p}') GROUP ALL;"
+        )
+    };
+    let sealed = "SELECT VALUE count() FROM claim_row WHERE string::starts_with(subject, 'z1-w1-') AND superseded_us = 1700000100000000 GROUP ALL;";
+    let open_vectors =
+        "SELECT VALUE count() FROM claim WHERE string::starts_with(subject, 'z1-w1-') GROUP ALL;";
+    let before = (
+        count(&c, &rows("z1-w1-")).await,
+        count(&c, &rows("z1-w2-")).await,
+    );
+    for lap in 0..2 {
+        c.catch_up(&pg).await.expect("catch_up");
+        println!(
+            "Z1 wire lap={lap} surreal_written_rows={}/{} sealed={}/{n} open_vector_claims={}/{n} pg_has_surreal_written={in_pg} pg_written_rows_in_surreal={}/{n}",
+            count(&c, &rows("z1-w1-")).await,
+            2 * n,
+            count(&c, sealed).await,
+            count(&c, open_vectors).await,
+            count(&c, &rows("z1-w2-")).await,
+        );
+    }
+    println!(
+        "Z1 wire before_first_catch_up surreal_written={}/{} pg_written={}/{n}",
+        before.0,
+        2 * n,
+        before.1
+    );
+    assert_eq!(in_pg, 0, "the surreal route wrote to pg");
+    assert_eq!(
+        count(&c, &rows("z1-w1-")).await,
+        2 * n as i64,
+        "a surreal-written claim vanished"
+    );
+    assert_eq!(count(&c, sealed).await, n as i64, "a seal was undone");
+    assert_eq!(count(&c, open_vectors).await, n as i64);
+    assert_eq!(
+        count(&c, &rows("z1-w2-")).await,
+        n as i64,
+        "a pg-written claim did not arrive"
     );
 }
