@@ -1306,7 +1306,7 @@ impl Store {
 
     // ── document ─────────────────────────────────────────────────────────────
 
-    pub async fn get_doc_sha(&self, path: &str) -> Result<Option<String>> {
+    async fn get_doc_sha_pg(&self, path: &str) -> Result<Option<String>> {
         Self::get_doc_sha_on(&self.db().await?, path).await
     }
 
@@ -1330,7 +1330,7 @@ impl Store {
         Ok(None)
     }
 
-    pub async fn all_doc_paths(&self) -> Result<Vec<String>> {
+    async fn all_doc_paths_pg(&self) -> Result<Vec<String>> {
         let rows = self
             .db()
             .await?
@@ -1377,7 +1377,7 @@ impl Store {
     /// Top-N documents by recency — full body (chunks joined). Retrieval for the recency-first/supersede briefing.
     /// Ordered by `updated_at` descending rather than semantic similarity = "most recently changed knowledge on top".
     /// If `since_hours` is Some, only documents updated within that window are returned.
-    pub async fn recent_docs(
+    async fn recent_docs_pg(
         &self,
         limit: i64,
         exclude_origins: &[String],
@@ -1445,7 +1445,7 @@ impl Store {
     /// 2-hop over the graph (edge): doc → (shared dst) ← otherDoc.
     /// `project:`/`topic:` are excluded — the same project / common tags would link everything and create a hairball.
     /// Requires at least 2 shared nodes to link (cuts the noise of an accidental single overlap).
-    pub async fn related_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
+    async fn related_docs_pg(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
         let doc_id = doc_node_id(source_path);
         let rows = self
             .db()
@@ -1497,7 +1497,7 @@ impl Store {
     /// this reachable only through tools.
     ///
     /// Older only. A briefing already holds today; what it never had was last week.
-    pub async fn related_by_shared_ground(
+    async fn related_by_shared_ground_pg(
         &self,
         source_path: &str,
         limit: i64,
@@ -1578,7 +1578,7 @@ impl Store {
             .collect())
     }
 
-    pub async fn related_doc_content(
+    async fn related_doc_content_pg(
         &self,
         source_path: &str,
         limit: i64,
@@ -1622,7 +1622,7 @@ impl Store {
 
     /// The most recent other documents in the same project — fallback links for isolated documents (0 concept overlap).
     /// Supplements only when there are no concept-based links to prevent orphans, but only a few so it doesn't become a mesh.
-    pub async fn recent_project_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
+    async fn recent_project_docs_pg(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
         let rows = self
             .db()
             .await?
@@ -2595,7 +2595,7 @@ impl Store {
 
     // ── retrieval ─────────────────────────────────────────────────────────────
 
-    pub async fn text_search(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
+    async fn text_search_pg(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
         let k_i64 = i64::try_from(k).unwrap_or(i64::MAX);
         let rows = self
             .db()
@@ -2646,11 +2646,11 @@ impl Store {
             .collect())
     }
 
-    pub async fn count(&self) -> Result<usize> {
+    async fn count_pg(&self) -> Result<usize> {
         pg_count(&*self.db().await?, "SELECT count(*) FROM chunk;").await
     }
 
-    pub async fn all_meta(&self) -> Result<Vec<Meta>> {
+    async fn all_meta_pg(&self) -> Result<Vec<Meta>> {
         let rows = self
             .db()
             .await?
@@ -2799,7 +2799,7 @@ impl Store {
     /// writes section titles there as readily as project names. A name the corpus has never heard
     /// of is not a project the reader can look up, so the briefing checks its headings against
     /// this list. Returning the names, not a count: the caller is deciding membership.
-    pub async fn project_names(&self) -> Result<Vec<String>> {
+    async fn project_names_pg(&self) -> Result<Vec<String>> {
         let rows = self
             .db()
             .await?
@@ -2815,7 +2815,7 @@ impl Store {
     }
 
     /// Projects with a document touched within `days`, busiest first (ties by name) — `GET /projects?active_days=`.
-    pub async fn active_project_counts(&self, days: i32) -> Result<Vec<(String, i64)>> {
+    async fn active_project_counts_pg(&self, days: i32) -> Result<Vec<(String, i64)>> {
         let rows = self
             .db()
             .await?
@@ -3051,7 +3051,7 @@ impl Store {
 
     /// Card-session edges for `GET /approved` (SQL copied from the Python door). Row order is
     /// not fixed; the caller sorts.
-    pub async fn approved_edges(&self) -> Result<Vec<crate::approved::EdgeRow>> {
+    async fn approved_edges_pg(&self) -> Result<Vec<crate::approved::EdgeRow>> {
         let rows = self
             .db()
             .await?
@@ -3949,7 +3949,7 @@ impl Store {
         self.counts_by(paths, ContestedBy::OwnerOnOwnerNotes).await
     }
 
-    async fn counts_by(
+    async fn counts_by_pg(
         &self,
         paths: &[String],
         contested_by: ContestedBy,
@@ -4069,7 +4069,7 @@ impl Store {
     /// The concept names written on each document (`about` edges to `concept:` nodes), as the
     /// note spelled them — what `recall` shows so a writer reuses a name instead of coining one.
     /// Same query as the Python door's `pg.concepts_by_doc`.
-    pub async fn concepts_of(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+    async fn concepts_of_pg(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
         let rows = self
             .db()
@@ -4095,7 +4095,7 @@ impl Store {
 
     /// `supersedes` edges pointing at these documents — the `source_path`s of the newer docs that
     /// replaced each one, i.e. `superseded_by` for every hit of a `/search` response in one query.
-    pub async fn superseded_by(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+    async fn superseded_by_pg(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
         let rows = self
             .db()
@@ -4119,7 +4119,7 @@ impl Store {
 
     /// Per document: replaced by a newer note (a `supersedes` edge points at it), and whether
     /// the owner wrote it, then when (`updated_at`). The one read that orders a returned set.
-    pub async fn rank_facts(&self, paths: &[String]) -> Result<HashMap<String, RankFacts>> {
+    async fn rank_facts_pg(&self, paths: &[String]) -> Result<HashMap<String, RankFacts>> {
         let rows = self
             .db()
             .await?
@@ -4159,7 +4159,7 @@ impl Store {
     /// guarded by `kind = 'session'` so non-session nodes are never cast, and by a regex that
     /// requires the RFC 3339 date-time prefix — a label that fails to parse must not abort the
     /// query, it just drops out of the window.
-    pub async fn reused_recently(
+    async fn reused_recently_pg(
         &self,
         days: i64,
         limit: i64,
@@ -4337,7 +4337,7 @@ impl Store {
     // ── graph retrieval ───────────────────────────────────────────────────────
 
     /// Structural neighbors (project/topic) — 1-hop from the chunk's document. Returns labels.
-    pub async fn graph_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
+    async fn graph_neighbors_pg(&self, chunk_id: &str) -> Result<Vec<String>> {
         let doc_id = doc_node_id(chunk_id);
         let rows = self
             .db()
@@ -4352,7 +4352,7 @@ impl Store {
     }
 
     /// Semantic neighbors (`uses`/`about`/`claims` edges) — 1-hop from the document. Returns labels.
-    pub async fn semantic_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
+    async fn semantic_neighbors_pg(&self, chunk_id: &str) -> Result<Vec<String>> {
         let doc_id = doc_node_id(chunk_id);
         let rows = self
             .db()
@@ -4368,7 +4368,7 @@ impl Store {
 
     // ── stats / GC ──────────────────────────────────────────────────────────────
 
-    pub async fn graph_stats(&self) -> Result<GraphStats> {
+    async fn graph_stats_pg(&self) -> Result<GraphStats> {
         let db = self.db().await?;
         Ok(GraphStats {
             documents: pg_count(&db, "SELECT count(*) FROM document;").await?,
@@ -4387,7 +4387,7 @@ impl Store {
         })
     }
 
-    pub async fn semantic_stats(&self) -> Result<SemanticStats> {
+    async fn semantic_stats_pg(&self) -> Result<SemanticStats> {
         let db = self.db().await?;
         Ok(SemanticStats {
             tools: count_node_kind(&db, "tool").await?,

@@ -1086,6 +1086,7 @@ impl FillTable {
 
 mod claim_reads;
 mod claim_tx;
+mod doc_reads;
 pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
 mod reads;
 mod recurrences;

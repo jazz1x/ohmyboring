@@ -10,10 +10,12 @@ use super::LogCopy;
 use super::vector_pg::Pg;
 use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView, Swap};
 use super::{
-    AnchorCheckRow, AnchorCheckWatermark, AnchoredClaim, ClaimEraCounts, EventLogFilter,
-    EventLogRow, Hit, QueryLogRow, RecallLabelRow, RecallLabelStats, Recurrence, RegisterAsk,
-    RegisterRow, RegisterRows, Store,
+    AnchorCheckRow, AnchorCheckWatermark, AnchoredClaim, ClaimEraCounts, ConsumptionCounts,
+    ContestedBy, EventLogFilter, EventLogRow, GraphStats, Hit, Meta, QueryLogRow, RankFacts,
+    RecallLabelRow, RecallLabelStats, RecentDoc, Recurrence, RegisterAsk, RegisterRow,
+    RegisterRows, SEMANTIC_EDGE_KINDS, SemanticStats, Store,
 };
+use crate::approved::EdgeRow;
 use crate::claim_priors::ClaimPrior;
 use crate::claim_source::{ClaimRow, ListRow};
 use crate::frontmatter::Claim;
@@ -627,5 +629,234 @@ impl VectorIndex for Store {
             .view(self)
             .nearest_document(vec, max_dist)
             .await
+    }
+}
+
+/// C-SURALL2 C0a: the document, graph and consumption reads. Each sends the question to the
+/// backend the process was started on: pg's SQL (`*_pg` in `store.rs`) on pgvector, the
+/// `document` / `chunk` / `node` / `edge` copies (`vector_surreal/doc_reads.rs`) on Surreal.
+/// Every method below fails with the backend's error.
+impl Store {
+    /// The stored change-detection sha of a note.
+    pub async fn get_doc_sha(&self, path: &str) -> Result<Option<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.get_doc_sha_pg(path).await,
+            VectorRoute::Surreal(client) => client.get_doc_sha(path).await,
+        }
+    }
+
+    /// Every note path with a `document` row.
+    pub async fn all_doc_paths(&self) -> Result<Vec<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.all_doc_paths_pg().await,
+            VectorRoute::Surreal(client) => client.all_doc_paths().await,
+        }
+    }
+
+    /// Newest notes with their chunks joined.
+    pub async fn recent_docs(
+        &self,
+        limit: i64,
+        exclude_origins: &[String],
+        since_hours: Option<i32>,
+        project: Option<&str>,
+    ) -> Result<Vec<RecentDoc>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.recent_docs_pg(limit, exclude_origins, since_hours, project)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .recent_docs(limit, exclude_origins, since_hours, project)
+                    .await
+            }
+        }
+    }
+
+    /// Notes sharing at least two concrete graph nodes with this one.
+    pub async fn related_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.related_docs_pg(source_path, limit).await,
+            VectorRoute::Surreal(client) => client.related_docs(source_path, limit).await,
+        }
+    }
+
+    /// The older notes this one shares a claim or a concept with.
+    pub async fn related_by_shared_ground(
+        &self,
+        source_path: &str,
+        limit: i64,
+        min_shared: i64,
+    ) -> Result<Vec<RecentDoc>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.related_by_shared_ground_pg(source_path, limit, min_shared)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .related_by_shared_ground(source_path, limit, min_shared)
+                    .await
+            }
+        }
+    }
+
+    /// The related notes (`related_docs`) with their chunks joined.
+    pub async fn related_doc_content(
+        &self,
+        source_path: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentDoc>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.related_doc_content_pg(source_path, limit).await,
+            VectorRoute::Surreal(client) => client.related_doc_content(source_path, limit).await,
+        }
+    }
+
+    /// The most recent other notes of the same project.
+    pub async fn recent_project_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.recent_project_docs_pg(source_path, limit).await,
+            VectorRoute::Surreal(client) => client.recent_project_docs(source_path, limit).await,
+        }
+    }
+
+    /// Full-text search without filters: pg's `tsv`, or the BM25 index on Surreal.
+    pub async fn text_search(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.text_search_pg(query, k).await,
+            VectorRoute::Surreal(client) => {
+                SurrealView { client }
+                    .text_search_filtered(query, k, None, None)
+                    .await
+            }
+        }
+    }
+
+    /// Chunk count.
+    pub async fn count(&self) -> Result<usize> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.count_pg().await,
+            VectorRoute::Surreal(client) => client.chunk_count().await,
+        }
+    }
+
+    /// Origin / project / kind / path of every chunk, for the audit.
+    pub async fn all_meta(&self) -> Result<Vec<Meta>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.all_meta_pg().await,
+            VectorRoute::Surreal(client) => client.all_meta().await,
+        }
+    }
+
+    /// Every project name the corpus knows.
+    pub async fn project_names(&self) -> Result<Vec<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.project_names_pg().await,
+            VectorRoute::Surreal(client) => client.project_names().await,
+        }
+    }
+
+    /// Projects with a note touched within `days`, busiest first.
+    pub async fn active_project_counts(&self, days: i32) -> Result<Vec<(String, i64)>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.active_project_counts_pg(days).await,
+            VectorRoute::Surreal(client) => client.active_project_counts(days).await,
+        }
+    }
+
+    /// Card-session edges for `GET /approved`.
+    pub async fn approved_edges(&self) -> Result<Vec<EdgeRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.approved_edges_pg().await,
+            VectorRoute::Surreal(client) => client.approved_edges().await,
+        }
+    }
+
+    /// `used` / `contested` edge counts per note.
+    pub(super) async fn counts_by(
+        &self,
+        paths: &[String],
+        contested_by: ContestedBy,
+    ) -> Result<HashMap<String, ConsumptionCounts>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.counts_by_pg(paths, contested_by).await,
+            VectorRoute::Surreal(client) => client.consumption_counts_by(paths, contested_by).await,
+        }
+    }
+
+    /// The concept names written on each note.
+    pub async fn concepts_of(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.concepts_of_pg(paths).await,
+            VectorRoute::Surreal(client) => client.concepts_of(paths).await,
+        }
+    }
+
+    /// The newer notes whose `supersedes` edge points at each path.
+    pub async fn superseded_by(&self, paths: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.superseded_by_pg(paths).await,
+            VectorRoute::Surreal(client) => client.superseded_by(paths).await,
+        }
+    }
+
+    /// Replaced / owner-written / updated facts that order a returned set.
+    pub async fn rank_facts(&self, paths: &[String]) -> Result<HashMap<String, RankFacts>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.rank_facts_pg(paths).await,
+            VectorRoute::Surreal(client) => client.rank_facts(paths).await,
+        }
+    }
+
+    /// Notes with the most `used` edges from recent sessions.
+    pub async fn reused_recently(
+        &self,
+        days: i64,
+        limit: i64,
+    ) -> Result<Vec<(RecentDoc, i64, i64)>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.reused_recently_pg(days, limit).await,
+            VectorRoute::Surreal(client) => client.reused_recently(days, limit).await,
+        }
+    }
+
+    /// Structural neighbours (project / topic / claim labels) of a chunk's note.
+    pub async fn graph_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.graph_neighbors_pg(chunk_id).await,
+            VectorRoute::Surreal(client) => {
+                client
+                    .neighbor_labels(chunk_id, &["in_project", "tagged", "claims"])
+                    .await
+            }
+        }
+    }
+
+    /// Semantic neighbours (`uses` / `about` / `claims` labels) of a chunk's note.
+    pub async fn semantic_neighbors(&self, chunk_id: &str) -> Result<Vec<String>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.semantic_neighbors_pg(chunk_id).await,
+            VectorRoute::Surreal(client) => {
+                client.neighbor_labels(chunk_id, &SEMANTIC_EDGE_KINDS).await
+            }
+        }
+    }
+
+    /// Graph size summary for the audit.
+    pub async fn graph_stats(&self) -> Result<GraphStats> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.graph_stats_pg().await,
+            VectorRoute::Surreal(client) => client.graph_stats().await,
+        }
+    }
+
+    /// Semantic node and edge counts for the audit.
+    pub async fn semantic_stats(&self) -> Result<SemanticStats> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.semantic_stats_pg().await,
+            VectorRoute::Surreal(client) => client.semantic_stats().await,
+        }
     }
 }
