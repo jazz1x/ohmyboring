@@ -38,7 +38,7 @@ pub use code_copy_surreal::{CodeCheck, CodeCopy};
 pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
-    ClaimRowDiff, ClaimWrite, FillTable, KeySet, NoteChunk, NoteWrite, ProjectTable,
+    ClaimRowDiff, ClaimWrite, FillTable, GraphOp, KeySet, NoteChunk, NoteWrite, ProjectTable,
     ProjectTableError, RegisterAsk, SURREAL_BEHIND, Scope, SplitStanding, SurrealClient, Swap,
     TX_RETRIES, TxCount, TxPlace,
 };
@@ -578,9 +578,77 @@ impl DocLookup<'_> {
             Self::Surreal(client) => client.known_paths(paths).await,
         }
     }
+
+    /// Apply graph writes where the backend keeps `node` and `edge` (C0b1 bundle 2): on pgvector
+    /// the pg SQL on `c`, on `backend=surreal` one Surreal transaction and nothing on pg. `c` is
+    /// then unused for the graph, so a pg transaction that also writes claim rows commits apart
+    /// from these rows (the inter-bundle state bundle 3 closes).
+    pub async fn graph(self, c: &impl GenericClient, ops: &[GraphOp]) -> Result<()> {
+        match self {
+            Self::Pg => Store::graph_ops_pg(c, ops).await,
+            Self::Surreal(client) => client.graph_write(ops).await,
+        }
+    }
+
+    /// `Store::upsert_node_on` on the backend's graph.
+    pub async fn node(
+        self,
+        c: &impl GenericClient,
+        id: &str,
+        kind: &str,
+        label: &str,
+        outcome: Option<&str>,
+    ) -> Result<()> {
+        self.graph(c, &[GraphOp::node(id, kind, label, outcome)])
+            .await
+    }
+
+    /// `Store::upsert_edge_on` on the backend's graph.
+    pub async fn edge(
+        self,
+        c: &impl GenericClient,
+        src: &str,
+        dst: &str,
+        kind: &str,
+        judge: Option<&str>,
+    ) -> Result<()> {
+        self.graph(c, &[GraphOp::edge(src, dst, kind, judge)]).await
+    }
 }
 
 impl Store {
+    /// The graph ops on a pg connection or transaction: the SQL the helpers below always ran.
+    async fn graph_ops_pg(c: &impl GenericClient, ops: &[GraphOp]) -> Result<()> {
+        for op in ops {
+            match op {
+                GraphOp::Node {
+                    id,
+                    kind,
+                    label,
+                    outcome,
+                } => Self::upsert_node_on(c, id, kind, label, outcome.as_deref()).await?,
+                GraphOp::Edge {
+                    src,
+                    dst,
+                    kind,
+                    judge,
+                } => Self::upsert_edge_on(c, src, dst, kind, judge.as_deref()).await?,
+                GraphOp::DeleteEdgesFrom { src, kinds } => {
+                    c.execute(
+                        "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
+                        &[src, kinds],
+                    )
+                    .await?;
+                }
+                GraphOp::DeleteEdgesAt { id } => {
+                    c.execute("DELETE FROM edge WHERE src = $1 OR dst = $1;", &[id])
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The document reader of the backend this process runs on.
     #[must_use]
     pub fn doc_lookup(&self) -> DocLookup<'_> {
@@ -2068,16 +2136,25 @@ impl Store {
         predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<usize> {
-        let written =
-            Self::upsert_claim_node_on(&self.db().await?, path, project, subject, predicate, claim)
-                .await?;
+        let written = Self::upsert_claim_node_on(
+            self.doc_lookup(),
+            &self.db().await?,
+            path,
+            project,
+            subject,
+            predicate,
+            claim,
+        )
+        .await?;
         self.mirror_surreal(&Scope::notes([path.to_owned()]))
             .await?;
         Ok(written)
     }
 
-    /// `upsert_claim_node` on a caller-held connection or transaction handle.
+    /// `upsert_claim_node` on a caller-held connection or transaction handle. The graph rows go
+    /// where `lookup` keeps them (Surreal on `backend=surreal`, whatever `c` is).
     pub async fn upsert_claim_node_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         path: &str,
         project: &str,
@@ -2091,29 +2168,40 @@ impl Store {
         let confidence = claim.confidence();
 
         // claim node
-        Self::upsert_node_on(c, &claim_id, "claim", &label, Some(kind)).await?;
+        let mut ops = vec![GraphOp::node(&claim_id, "claim", &label, Some(kind))];
 
         // typed node for decisions/risks/etc.
         if kind != "fact" {
             let typed_id = format!("{kind}:{subject}:{predicate}");
             let typed_label = format!("{subject} — {}", claim.value);
-            Self::upsert_node_on(c, &typed_id, kind, &typed_label, Some(confidence)).await?;
-            Self::upsert_edge_on(c, &claim_id, &typed_id, "is_a", None).await?;
+            ops.push(GraphOp::node(
+                &typed_id,
+                kind,
+                &typed_label,
+                Some(confidence),
+            ));
+            ops.push(GraphOp::edge(&claim_id, &typed_id, "is_a", None));
         }
 
         // doc -> claim edge
         let doc_id = doc_node_id(path);
-        Self::upsert_edge_on(c, &doc_id, &claim_id, "claims", None).await?;
+        ops.push(GraphOp::edge(&doc_id, &claim_id, "claims", None));
 
         // claim -> project edge
         if !project.is_empty() {
             let project_id = format!("project:{project}");
-            Self::upsert_edge_on(c, &claim_id, &project_id, "claim_of_project", None).await?;
+            ops.push(GraphOp::edge(
+                &claim_id,
+                &project_id,
+                "claim_of_project",
+                None,
+            ));
         }
 
         if let Some(said_by) = claim.said_by {
-            Self::relate_said_on(c, said_by, path, subject, predicate).await?;
+            ops.extend(Self::said_ops(said_by, path, subject, predicate));
         }
+        lookup.graph(c, &ops).await?;
 
         Ok(1 + usize::from(kind != "fact")
             + usize::from(!project.is_empty())
@@ -2543,13 +2631,16 @@ impl Store {
         sha: &str,
         updated_at: SystemTime,
     ) -> Result<()> {
-        Self::upsert_document_on(&self.db().await?, front, sha, updated_at).await?;
+        Self::upsert_document_on(self.doc_lookup(), &self.db().await?, front, sha, updated_at)
+            .await?;
         self.mirror_surreal(&Scope::notes([front.source_path.clone()]))
             .await
     }
 
-    /// `upsert_document` on a caller-held connection or transaction handle.
+    /// `upsert_document` on a caller-held connection or transaction handle. The document row is
+    /// pg's; the graph half goes where `lookup` keeps `node` and `edge`.
     pub async fn upsert_document_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         front: &FrontMatter,
         sha: &str,
@@ -2579,42 +2670,43 @@ impl Store {
             )
             .await
             .context("upsert document")?;
-        Self::upsert_document_graph_on(c, front).await
+        Self::upsert_document_graph_on(lookup, c, front).await
     }
 
     /// The graph half of `upsert_document_on`: the note's project node and `in_project` edge, and
-    /// its `tagged` edges regenerated. Nodes and edges stay in pg until their bundle, so this runs
-    /// on the pg transaction whichever backend holds the document row.
+    /// its `tagged` edges regenerated. The rows go where `lookup` keeps `node` and `edge`:
+    /// Surreal on `backend=surreal` (one transaction for the whole list), the pg `c` otherwise.
     pub async fn upsert_document_graph_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         front: &FrontMatter,
     ) -> Result<()> {
         let path = &front.source_path;
         let doc_id = doc_node_id(path);
+        let mut ops = Vec::new();
 
         // project node + in_project edge
         if !front.project.is_empty() {
             let pid = format!("project:{}", front.project);
-            Self::upsert_node_on(c, &pid, "project", &front.project, None).await?;
-            Self::upsert_edge_on(c, &doc_id, &pid, "in_project", None).await?;
+            ops.push(GraphOp::node(&pid, "project", &front.project, None));
+            ops.push(GraphOp::edge(&doc_id, &pid, "in_project", None));
         }
 
         // tagged: remove existing then regenerate (idempotent)
-        c.execute(
-            "DELETE FROM edge WHERE src = $1 AND kind = 'tagged';",
-            &[&doc_id],
-        )
-        .await?;
+        ops.push(GraphOp::DeleteEdgesFrom {
+            src: doc_id.clone(),
+            kinds: vec!["tagged".to_owned()],
+        });
         // Topic nodes are shared between notes: take them in tag order for every file, so two
         // files in flight wait on each other instead of deadlocking.
         let mut tags: Vec<&String> = front.tags.iter().collect();
         tags.sort();
         for tag in tags {
             let tid = format!("topic:{tag}");
-            Self::upsert_node_on(c, &tid, "topic", tag, None).await?;
-            Self::upsert_edge_on(c, &doc_id, &tid, "tagged", None).await?;
+            ops.push(GraphOp::node(&tid, "topic", tag, None));
+            ops.push(GraphOp::edge(&doc_id, &tid, "tagged", None));
         }
-        Ok(())
+        lookup.graph(c, &ops).await
     }
 
     /// Prune chunks at or beyond `from_idx` for a document — the stale tail left when a re-ingested
@@ -2649,14 +2741,13 @@ impl Store {
                     .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
                     .await?;
             }
-            // The document and every chunk of the note leave Surreal; the edges and claims below
-            // are still pg's until their bundle.
+            // The document and every chunk of the note leave Surreal; the claims below are still
+            // pg's until their bundle.
             VectorRoute::Surreal(client) => client.delete_note(path).await?,
         }
         let doc_id = doc_node_id(path);
-        self.db()
-            .await?
-            .execute("DELETE FROM edge WHERE src = $1 OR dst = $1;", &[&doc_id])
+        self.doc_lookup()
+            .graph(&self.db().await?, &[GraphOp::DeleteEdgesAt { id: doc_id }])
             .await?;
         // claim has NO FK to document (unlike chunk's ON DELETE CASCADE) so the document delete does not
         // cascade here — mirror the explicit edge delete above. Provenance is single-valued (source_path
@@ -2705,9 +2796,9 @@ impl Store {
     /// A changed note's document row and its whole chunk set (`embedded` = chunk text and vector,
     /// in order). On pgvector: the upsert-then-prune sequence on the caller's transaction. On
     /// `backend=surreal`: one Surreal transaction for the document and chunk rows (`doc_tx.rs`),
-    /// then the graph half on the caller's pg transaction. Between the bundles a note therefore
-    /// commits in two places; a failure after the Surreal commit leaves the new sha without the
-    /// graph rows, and bundle 2 closes that.
+    /// then a second one for the graph half (`graph_tx.rs`, C0b1 bundle 2). A failure between the
+    /// two leaves the new sha without the graph rows; the caller's pg transaction (claims) is a
+    /// third place until bundle 3.
     ///
     /// # Errors
     /// The write failed, or a vector's length is not the configured dimension.
@@ -2722,7 +2813,7 @@ impl Store {
         let path = &front.source_path;
         match &self.vector_route {
             VectorRoute::Pgvector => {
-                Self::upsert_document_on(tx, front, sha, mtime).await?;
+                Self::upsert_document_on(DocLookup::Pg, tx, front, sha, mtime).await?;
                 let count = embedded.len();
                 for (i, (content, embedding)) in embedded.into_iter().enumerate() {
                     self.upsert_chunk_on(
@@ -2774,7 +2865,7 @@ impl Store {
                         dim: self.dim,
                     })
                     .await?;
-                Self::upsert_document_graph_on(tx, front).await
+                Self::upsert_document_graph_on(DocLookup::Surreal(client), tx, front).await
             }
         }
     }
@@ -3706,14 +3797,15 @@ impl Store {
         }
         known.sort_by(|a, b| (&a[1], &a[0]).cmp(&(&b[1], &b[0])));
         for pair in known {
-            Self::upsert_edge_on(
-                tx,
-                &doc_node_id(&pair[0]),
-                &doc_node_id(&pair[1]),
-                "supersedes",
-                judge,
-            )
-            .await?;
+            lookup
+                .edge(
+                    tx,
+                    &doc_node_id(&pair[0]),
+                    &doc_node_id(&pair[1]),
+                    "supersedes",
+                    judge,
+                )
+                .await?;
             report.supersedes += 1;
             match rule {
                 SealRule::WholeNote => {
@@ -3891,16 +3983,25 @@ impl Store {
     /// reaches edges whose retirement pass has not run yet, e.g. one written straight onto
     /// the graph. Returns the number of claims sealed.
     async fn seal_claims_under_supersedes_edges(&self) -> Result<usize> {
-        let rows = self
-            .db()
-            .await?
-            .query("SELECT src, dst FROM edge WHERE kind = 'supersedes';", &[])
-            .await
-            .context("list supersedes edges")?;
+        // The edges live where `node`/`edge` live (C0b1 bundle 2); the seal below is already
+        // routed per backend.
+        let edges: Vec<(String, String)> = match &self.vector_route {
+            VectorRoute::Pgvector => self
+                .db()
+                .await?
+                .query("SELECT src, dst FROM edge WHERE kind = 'supersedes';", &[])
+                .await
+                .context("list supersedes edges")?
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect(),
+            VectorRoute::Surreal(client) => client
+                .supersedes_edges()
+                .await
+                .context("list supersedes edges")?,
+        };
         let mut total = 0_usize;
-        for row in rows {
-            let src: String = row.get(0);
-            let dst: String = row.get(1);
+        for (src, dst) in edges {
             let (Some(newer), Some(older)) = (
                 src.strip_prefix("doc:").map(str::to_owned),
                 dst.strip_prefix("doc:").map(str::to_owned),
@@ -3991,7 +4092,9 @@ impl Store {
         judge: Option<&str>,
     ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
-        Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
+        lookup
+            .node(tx, &session_node, "session", observed_at, None)
+            .await?;
 
         let mut report = ConsumptionReport::default();
         for path in used {
@@ -3999,7 +4102,9 @@ impl Store {
                 report.unknown += 1;
                 continue;
             };
-            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "used", judge).await?;
+            lookup
+                .edge(tx, &session_node, &doc_node_id(&keyed), "used", judge)
+                .await?;
             report.used += 1;
         }
         for path in contested {
@@ -4007,7 +4112,8 @@ impl Store {
                 report.unknown += 1;
                 continue;
             };
-            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "contested", judge)
+            lookup
+                .edge(tx, &session_node, &doc_node_id(&keyed), "contested", judge)
                 .await?;
             report.contested += 1;
         }
@@ -4043,7 +4149,9 @@ impl Store {
         paths: &[String],
     ) -> Result<HandoverReport> {
         let session_node = format!("session:{session_id}");
-        Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
+        lookup
+            .node(tx, &session_node, "session", observed_at, None)
+            .await?;
 
         let mut report = HandoverReport::default();
         for path in paths {
@@ -4051,7 +4159,9 @@ impl Store {
                 report.unknown += 1;
                 continue;
             };
-            Self::upsert_edge_on(tx, &session_node, &doc_node_id(&keyed), "handed", None).await?;
+            lookup
+                .edge(tx, &session_node, &doc_node_id(&keyed), "handed", None)
+                .await?;
             report.handed += 1;
         }
         Ok(report)
@@ -4073,8 +4183,6 @@ impl Store {
             Self::record_handover_with(self.doc_lookup(), &tx, session_id, observed_at, paths)
                 .await?;
         tx.commit().await.context("commit handover transaction")?;
-        self.mirror_surreal(&Scope::graph([format!("session:{session_id}")]))
-            .await?;
         Ok(report)
     }
 
@@ -4091,17 +4199,22 @@ impl Store {
         let session_node = format!("session:{}", args.session_id);
         let mut conn = self.db().await?;
         let tx = conn.transaction().await.context("begin gap transaction")?;
-        Self::upsert_node_on(&tx, &gap, "gap", &args.query, Some(args.kind.as_str())).await?;
-        Self::upsert_node_on(&tx, &session_node, "session", observed_at, None).await?;
-        Self::upsert_edge_on(&tx, &session_node, &gap, "gap", None).await?;
-        let known: HashSet<String> = self.doc_lookup().known(&tx, &args.handed).await?;
+        let lookup = self.doc_lookup();
+        lookup
+            .node(&tx, &gap, "gap", &args.query, Some(args.kind.as_str()))
+            .await?;
+        lookup
+            .node(&tx, &session_node, "session", observed_at, None)
+            .await?;
+        lookup.edge(&tx, &session_node, &gap, "gap", None).await?;
+        let known: HashSet<String> = lookup.known(&tx, &args.handed).await?;
         let handed: Vec<&String> = args.handed.iter().filter(|p| known.contains(*p)).collect();
         for path in &handed {
-            Self::upsert_edge_on(&tx, &gap, &doc_node_id(path), "gap_handed", None).await?;
+            lookup
+                .edge(&tx, &gap, &doc_node_id(path), "gap_handed", None)
+                .await?;
         }
         tx.commit().await.context("commit gap transaction")?;
-        self.mirror_surreal(&Scope::graph([gap.clone(), session_node]))
-            .await?;
         Ok(crate::gap::GapReport {
             gap,
             kind: args.kind.as_str(),
@@ -4286,7 +4399,18 @@ impl Store {
     /// reach, distinct, in path order. This is what a bare `{session_id, verdict}` `/consumption`
     /// applies the verdict to: the engine already knows what was handed, the caller only brings
     /// the thumbs-up/down. An unknown session hands nothing — an empty read, not an error.
-    pub async fn handed_paths(tx: &Transaction<'_>, session_id: &str) -> Result<Vec<String>> {
+    pub async fn handed_paths(
+        lookup: DocLookup<'_>,
+        tx: &Transaction<'_>,
+        session_id: &str,
+    ) -> Result<Vec<String>> {
+        match lookup {
+            DocLookup::Pg => Self::handed_paths_pg(tx, session_id).await,
+            DocLookup::Surreal(client) => client.handed_paths(session_id).await,
+        }
+    }
+
+    async fn handed_paths_pg(tx: &Transaction<'_>, session_id: &str) -> Result<Vec<String>> {
         let rows = tx
             .query(
                 "SELECT DISTINCT dst FROM edge WHERE src = $1 AND kind = 'handed' ORDER BY dst;",
@@ -4453,79 +4577,98 @@ impl Store {
 
     // ── semantic nodes ──────────────────────────────────────────────────────────
 
+    // The graph helpers below write `node` / `edge` through `lookup` (C0b1 bundle 2): Surreal on
+    // `backend=surreal`, pg otherwise. The `&self` forms pick `self.doc_lookup()`.
+
     pub async fn upsert_tool(&self, slug: &str, text: &str) -> Result<()> {
-        Self::upsert_tool_on(&self.db().await?, slug, text).await?;
-        self.mirror_surreal(&Scope::graph([format!("tool:{slug}")]))
-            .await
+        Self::upsert_tool_on(self.doc_lookup(), &self.db().await?, slug, text).await
     }
-    pub async fn upsert_tool_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
-        Self::upsert_node_on(c, &format!("tool:{slug}"), "tool", text, None).await
+    pub async fn upsert_tool_on(
+        lookup: DocLookup<'_>,
+        c: &impl GenericClient,
+        slug: &str,
+        text: &str,
+    ) -> Result<()> {
+        lookup
+            .node(c, &format!("tool:{slug}"), "tool", text, None)
+            .await
     }
     pub async fn upsert_concept(&self, slug: &str, text: &str) -> Result<()> {
-        Self::upsert_concept_on(&self.db().await?, slug, text).await?;
-        self.mirror_surreal(&Scope::graph([format!("concept:{slug}")]))
-            .await
+        Self::upsert_concept_on(self.doc_lookup(), &self.db().await?, slug, text).await
     }
-    pub async fn upsert_concept_on(c: &impl GenericClient, slug: &str, text: &str) -> Result<()> {
-        Self::upsert_node_on(c, &format!("concept:{slug}"), "concept", text, None).await
+    pub async fn upsert_concept_on(
+        lookup: DocLookup<'_>,
+        c: &impl GenericClient,
+        slug: &str,
+        text: &str,
+    ) -> Result<()> {
+        lookup
+            .node(c, &format!("concept:{slug}"), "concept", text, None)
+            .await
     }
 
     /// Remove this document's semantic edges (uses/about) — makes the deterministic graph rebuild idempotent.
     pub async fn clear_semantic_edges(&self, doc_path: &str) -> Result<()> {
-        Self::clear_semantic_edges_on(&self.db().await?, doc_path).await?;
-        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
-            .await
+        Self::clear_semantic_edges_on(self.doc_lookup(), &self.db().await?, doc_path).await
     }
-    pub async fn clear_semantic_edges_on(c: &impl GenericClient, doc_path: &str) -> Result<()> {
-        let doc_id = doc_node_id(doc_path);
-        let kinds: Vec<&str> = SEMANTIC_EDGE_KINDS.to_vec();
-        c.execute(
-            "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
-            &[&doc_id, &kinds],
-        )
-        .await?;
-        Ok(())
+    pub async fn clear_semantic_edges_on(
+        lookup: DocLookup<'_>,
+        c: &impl GenericClient,
+        doc_path: &str,
+    ) -> Result<()> {
+        lookup
+            .graph(
+                c,
+                &[GraphOp::DeleteEdgesFrom {
+                    src: doc_node_id(doc_path),
+                    kinds: SEMANTIC_EDGE_KINDS
+                        .iter()
+                        .map(|k| (*k).to_owned())
+                        .collect(),
+                }],
+            )
+            .await
     }
 
     // ── semantic edges (doc → entity) ───────────────────────────────────────────
 
     pub async fn relate_doc_tool(&self, doc_path: &str, slug: &str) -> Result<()> {
-        Self::relate_doc_tool_on(&self.db().await?, doc_path, slug).await?;
-        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
-            .await
+        Self::relate_doc_tool_on(self.doc_lookup(), &self.db().await?, doc_path, slug).await
     }
     pub async fn relate_doc_tool_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         doc_path: &str,
         slug: &str,
     ) -> Result<()> {
-        Self::upsert_edge_on(
-            c,
-            &doc_node_id(doc_path),
-            &format!("tool:{slug}"),
-            "uses",
-            None,
-        )
-        .await
-    }
-    pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
-        Self::relate_doc_concept_on(&self.db().await?, doc_path, slug).await?;
-        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
+        lookup
+            .edge(
+                c,
+                &doc_node_id(doc_path),
+                &format!("tool:{slug}"),
+                "uses",
+                None,
+            )
             .await
     }
+    pub async fn relate_doc_concept(&self, doc_path: &str, slug: &str) -> Result<()> {
+        Self::relate_doc_concept_on(self.doc_lookup(), &self.db().await?, doc_path, slug).await
+    }
     pub async fn relate_doc_concept_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         doc_path: &str,
         slug: &str,
     ) -> Result<()> {
-        Self::upsert_edge_on(
-            c,
-            &doc_node_id(doc_path),
-            &format!("concept:{slug}"),
-            "about",
-            None,
-        )
-        .await
+        lookup
+            .edge(
+                c,
+                &doc_node_id(doc_path),
+                &format!("concept:{slug}"),
+                "about",
+                None,
+            )
+            .await
     }
 
     /// `person:owner —said→ doc` and `—said→ claim:{subject}:{predicate}`, from the note's own
@@ -4537,38 +4680,68 @@ impl Store {
         subject: &str,
         predicate: &str,
     ) -> Result<()> {
-        Self::relate_said_on(&self.db().await?, said_by, doc_path, subject, predicate).await?;
-        self.mirror_surreal(&Scope::notes([doc_path.to_owned()]))
-            .await
+        Self::relate_said_on(
+            self.doc_lookup(),
+            &self.db().await?,
+            said_by,
+            doc_path,
+            subject,
+            predicate,
+        )
+        .await
     }
     /// The `person:` node a `said_by` names, upserted; returns its id.
     pub async fn upsert_speaker_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         said_by: crate::frontmatter::SaidBy,
     ) -> Result<&'static str> {
-        let speaker = match said_by {
+        lookup.graph(c, &[Self::speaker_op(said_by)]).await?;
+        Ok(Self::speaker_id(said_by))
+    }
+    fn speaker_id(said_by: crate::frontmatter::SaidBy) -> &'static str {
+        match said_by {
             crate::frontmatter::SaidBy::Owner => OWNER_SPEAKER_NODE,
-        };
-        Self::upsert_node_on(c, speaker, "person", &String::from(said_by), None).await?;
-        Ok(speaker)
+        }
+    }
+    fn speaker_op(said_by: crate::frontmatter::SaidBy) -> GraphOp {
+        GraphOp::node(
+            Self::speaker_id(said_by),
+            "person",
+            &String::from(said_by),
+            None,
+        )
+    }
+    /// The speaker node and the two `said` edges, in the order they are written.
+    fn said_ops(
+        said_by: crate::frontmatter::SaidBy,
+        doc_path: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> Vec<GraphOp> {
+        let speaker = Self::speaker_id(said_by);
+        vec![
+            Self::speaker_op(said_by),
+            GraphOp::edge(speaker, &doc_node_id(doc_path), "said", None),
+            GraphOp::edge(
+                speaker,
+                &format!("claim:{subject}:{predicate}"),
+                "said",
+                None,
+            ),
+        ]
     }
     pub async fn relate_said_on(
+        lookup: DocLookup<'_>,
         c: &impl GenericClient,
         said_by: crate::frontmatter::SaidBy,
         doc_path: &str,
         subject: &str,
         predicate: &str,
     ) -> Result<()> {
-        let speaker = Self::upsert_speaker_on(c, said_by).await?;
-        Self::upsert_edge_on(c, speaker, &doc_node_id(doc_path), "said", None).await?;
-        Self::upsert_edge_on(
-            c,
-            speaker,
-            &format!("claim:{subject}:{predicate}"),
-            "said",
-            None,
-        )
-        .await
+        lookup
+            .graph(c, &Self::said_ops(said_by, doc_path, subject, predicate))
+            .await
     }
 
     // ── graph retrieval ───────────────────────────────────────────────────────
@@ -4805,8 +4978,57 @@ impl Store {
 
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
     pub async fn gc_orphans(&self) -> Result<GcStats> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.gc_orphans_pg().await,
+            VectorRoute::Surreal(client) => self.gc_orphans_surreal(client).await,
+        }
+    }
+
+    /// `gc_orphans` on `backend=surreal` (C0b1 bundle 2): the `node` / `edge` side is Surreal's.
+    /// Which claim nodes are stale is still decided by pg's `claim` rows (the same
+    /// `STALE_CLAIM_MIRROR_NODES` predicate, evaluated here over the ids Surreal holds) until
+    /// bundle 3 moves `claim`.
+    async fn gc_orphans_surreal(&self, client: &SurrealClient) -> Result<GcStats> {
         let mut gc = GcStats::default();
-        let mut gone: Vec<String> = Vec::new();
+        (gc.tool, gc.concept) = client.gc_orphan_entities().await?;
+        let claims = self
+            .db()
+            .await?
+            .query("SELECT subject, predicate, kind FROM claim;", &[])
+            .await
+            .context("read claim keys for the stale-node sweep")?;
+        let mut live_claim: HashSet<String> = HashSet::new();
+        let mut live_typed: HashSet<String> = HashSet::new();
+        let mut typed_kinds: HashSet<String> = HashSet::new();
+        for row in &claims {
+            let (subject, predicate, kind): (String, String, String) =
+                (row.get(0), row.get(1), row.get(2));
+            live_claim.insert(format!("claim:{subject}:{predicate}"));
+            if kind != "fact" {
+                live_typed.insert(format!("{kind}:{subject}:{predicate}"));
+                typed_kinds.insert(kind);
+            }
+        }
+        let kinds: Vec<String> = typed_kinds.into_iter().collect();
+        let doomed: Vec<String> = client
+            .claim_node_candidates(&kinds)
+            .await?
+            .into_iter()
+            .filter(|(id, kind)| {
+                (kind == "claim" && !live_claim.contains(id))
+                    || (kinds.contains(kind) && !live_typed.contains(id))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        gc.claim_nodes = doomed.len();
+        if !doomed.is_empty() {
+            gc.claim_edges = client.delete_nodes_with_edges(&doomed).await?;
+        }
+        Ok(gc)
+    }
+
+    async fn gc_orphans_pg(&self) -> Result<GcStats> {
+        let mut gc = GcStats::default();
         for kind in ["tool", "concept"] {
             let removed: Vec<String> = self
                 .db()
@@ -4822,7 +5044,6 @@ impl Store {
                 .map(|row| row.get(0))
                 .collect();
             let c = removed.len();
-            gone.extend(removed);
             match kind {
                 "tool" => gc.tool = c,
                 _ => gc.concept = c,
@@ -4849,9 +5070,7 @@ impl Store {
             db.execute("DELETE FROM node WHERE id = ANY($1);", &[&doomed])
                 .await?;
             gc.claim_edges = usize::try_from(edges).unwrap_or(0);
-            gone.extend(doomed);
         }
-        self.mirror_surreal(&Scope::graph(gone)).await?;
         Ok(gc)
     }
 }

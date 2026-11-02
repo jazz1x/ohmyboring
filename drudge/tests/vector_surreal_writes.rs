@@ -135,6 +135,14 @@ impl Fixture {
             })
             .await
             .expect("surreal document and chunks");
+        // C0b1 bundle 2: the graph half goes into Surreal directly, as `write_note_on` does.
+        Store::upsert_document_graph_on(
+            self.store.doc_lookup(),
+            &self.store.conn().await.expect("conn"),
+            &fm,
+        )
+        .await
+        .expect("surreal graph");
         self.store
             .mirror_surreal(&Scope::notes([path.to_owned()]))
             .await
@@ -558,7 +566,10 @@ impl Fixture {
     }
 }
 
-/// C-SURALL2 A2: node and edge follow every pg write that changes them, by value.
+/// C-SURALL2 A2, C0b1 bundle 2: old contract "node and edge follow every pg write by copy" ->
+/// new contract "the engine writes Surreal's node and edge directly, and the rows are the ones the
+/// pg path writes". Every step is done once on the pg-route store (`pg_store`, pg SQL) and once
+/// on the Surreal-route store (`store`, Surreal only); the two graphs must be equal by value.
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
@@ -585,20 +596,24 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
     f.assert_graph_same("after a tag was dropped", 3, 2).await;
 
     // semantic entities
-    f.store.upsert_tool("tl", "Tool").await.unwrap();
-    f.store.upsert_concept("cn", "Concept").await.unwrap();
-    f.store.relate_doc_tool(&a, "tl").await.unwrap();
-    f.store.relate_doc_concept(&a, "cn").await.unwrap();
+    for s in [&f.pg_store, &f.store] {
+        s.upsert_tool("tl", "Tool").await.unwrap();
+        s.upsert_concept("cn", "Concept").await.unwrap();
+        s.relate_doc_tool(&a, "tl").await.unwrap();
+        s.relate_doc_concept(&a, "cn").await.unwrap();
+    }
     f.assert_graph_same("after uses/about", 5, 4).await;
-    f.store.clear_semantic_edges(&a).await.unwrap();
+    for s in [&f.pg_store, &f.store] {
+        s.clear_semantic_edges(&a).await.unwrap();
+    }
     f.assert_graph_same("after clear_semantic_edges", 5, 2)
         .await;
 
     // a non-fact claim: +3 nodes (claim, typed, owner speaker) and +5 edges (is_a, claims,
     // claim_of_project, said speaker→doc, said speaker→claim) on top of 5 nodes / 2 edges
     f.claim(&a, &format!("g-{}", f.nanos), "decision", 1).await;
-    f.store
-        .upsert_claim_node(
+    for s in [&f.pg_store, &f.store] {
+        s.upsert_claim_node(
             &a,
             "writes",
             &format!("g-{}", f.nanos),
@@ -614,20 +629,20 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
         )
         .await
         .expect("claim node");
+    }
     f.assert_graph_same("after a decision claim", 8, 7).await;
 
     // consumption doors: session, gap, supersedes edge with a judge
     f.doc(&b).await;
-    f.store
-        .handover_in_tx(
+    for s in [&f.pg_store, &f.store] {
+        s.handover_in_tx(
             &format!("s-{}", f.nanos),
             "2026-10-30",
             std::slice::from_ref(&a),
         )
         .await
         .expect("handover");
-    f.store
-        .record_gap_in_tx(
+        s.record_gap_in_tx(
             &drudge::gap::GapArgs {
                 session_id: format!("s-{}", f.nanos),
                 query: "what".to_string(),
@@ -638,10 +653,10 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
         )
         .await
         .expect("gap");
-    f.store
-        .supersedes_in_tx(&[[b.clone(), a.clone()]], Some("owner"))
-        .await
-        .expect("supersedes");
+        s.supersedes_in_tx(&[[b.clone(), a.clone()]], Some("owner"))
+            .await
+            .expect("supersedes");
+    }
     let [(_, s_nodes), (_, s_edges)] = f.graph_rows().await;
     assert!(
         s_edges.iter().any(|e| e.ends_with("|supersedes|owner")),
@@ -652,7 +667,8 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
     // delete + GC: the note's edges leave, then the orphans nobody points at leave
     f.delete(&a).await;
     f.delete(&b).await;
-    f.store.gc_orphans().await.expect("gc");
+    f.pg_store.gc_orphans().await.expect("pg gc");
+    f.store.gc_orphans().await.expect("surreal gc");
     let [(pg_nodes, s_nodes), (pg_edges, s_edges)] = f.graph_rows().await;
     assert_eq!(pg_nodes, s_nodes, "after gc: node rows differ");
     assert_eq!(pg_edges, s_edges, "after gc: edge rows differ");
@@ -693,11 +709,11 @@ async fn a_legacy_sha_move_reaches_the_surreal_document() {
     );
 }
 
-/// Rows the Python door writes straight to pg (no mirror there) reach Surreal on the next sync:
-/// the catch-up the sync ends with writes what pg has and Surreal lacks, deletes the reverse.
+/// Graph rows written straight to pg are not copied by the sync's catch-up, and a row only Surreal
+/// holds is not deleted by it (the door refuses to start with a pg-writing graph path on surreal).
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn rows_written_straight_to_pg_reach_surreal_on_catch_up() {
+async fn node_and_edge_rows_written_straight_to_pg_are_not_copied_by_catch_up() {
     let f = fixture("w_catchup").await;
     f.db.batch_execute("DELETE FROM edge; DELETE FROM node;")
         .await
@@ -707,8 +723,8 @@ async fn rows_written_straight_to_pg_reach_surreal_on_catch_up() {
         .await
         .expect("fill of an empty graph");
     let path = format!("/vault/wiki/py-{}.md", f.nanos);
-    // C0b1: node and edge are still copied; document and chunk are not (the engine writes those
-    // into Surreal), so no document row is inserted here.
+    // C0b1 bundle 2: old contract "node/edge written straight to pg reach Surreal on catch_up" ->
+    // new contract "catch_up copies no node/edge (the engine writes them into Surreal)".
     f.db.batch_execute(&format!(
         "INSERT INTO node (id, kind, label, outcome) VALUES ('gap:py-{n}', 'gap', 'q', 'missing'),
                                                             ('session:py-{n}', 'session', 't', NULL);
@@ -719,17 +735,27 @@ async fn rows_written_straight_to_pg_reach_surreal_on_catch_up() {
     .await
     .unwrap();
     let (written, deleted) = f.store.catch_up_surreal().await.expect("catch up");
-    assert_eq!((written, deleted), (4, 0));
-    f.assert_graph_same("after catch-up of python-door rows", 2, 2)
-        .await;
+    assert_eq!((written, deleted), (0, 0));
+    let [(_, s_nodes), (_, s_edges)] = f.graph_rows().await;
+    assert!(
+        s_nodes.is_empty() && s_edges.is_empty(),
+        "pg-only graph rows must not be copied: {s_nodes:?} {s_edges:?}"
+    );
 
-    // a row only Surreal holds leaves on the next catch-up
+    // a row only Surreal holds stays on the next catch-up
+    f.client
+        .run(
+            "UPSERT type::record('node', 'tool:only-s') CONTENT {cid: 'tool:only-s', kind: 'tool', label: 'S'};",
+        )
+        .await
+        .unwrap();
     f.db.batch_execute("DELETE FROM edge; DELETE FROM node;")
         .await
         .unwrap();
     let (written, deleted) = f.store.catch_up_surreal().await.expect("catch up again");
-    assert_eq!((written, deleted), (0, 4));
-    f.assert_graph_same("after pg dropped the rows", 0, 0).await;
+    assert_eq!((written, deleted), (0, 0));
+    let [(_, s_nodes), _] = f.graph_rows().await;
+    assert_eq!(s_nodes, vec!["tool:only-s|tool|S|-".to_owned()]);
 }
 
 #[tokio::test]

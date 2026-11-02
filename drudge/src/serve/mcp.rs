@@ -1265,7 +1265,7 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
         .transaction()
         .await
         .map_err(|e| (-32603, format!("verdict: {e}")))?;
-    let handed = Store::handed_paths(&tx, session_id)
+    let handed = Store::handed_paths(store.doc_lookup(), &tx, session_id)
         .await
         .map_err(|e| (-32603, format!("handed paths: {e:#}")))?;
     let empty: Vec<String> = Vec::new();
@@ -1289,12 +1289,6 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     tx.commit()
         .await
         .map_err(|e| (-32603, format!("verdict: {e}")))?;
-    store
-        .mirror_surreal(&crate::store::Scope::graph([format!(
-            "session:{session_id}"
-        )]))
-        .await
-        .map_err(|e| (-32603, format!("verdict: {e:#}")))?;
     Ok(json!({
         "session": format!("session:{session_id}"),
         "used": report.used,

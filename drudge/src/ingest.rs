@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use crate::config;
 use crate::frontmatter::{self, FrontMatter};
 use crate::llm::Llm;
-use crate::store::Store;
+use crate::store::{DocLookup, Store};
 
 /// Max embedding requests in flight per file. Caps load on a local single-GPU LLM server
 /// (Ollama/LM Studio) — going wider stops helping once the server serializes internally, and
@@ -173,23 +173,24 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         stats: &mut Stats,
     ) -> Result<()> {
         let path = &front.source_path;
-        Store::clear_semantic_edges_on(tx, path).await?;
+        let lookup = store.doc_lookup();
+        Store::clear_semantic_edges_on(lookup, tx, path).await?;
 
         // Rows shared between notes (tool, concept, claim and speaker nodes) are locked in one
         // order for every file — tools, concepts, speaker, then claims by slot, each sorted — so
         // two files in flight wait on each other instead of deadlocking.
         // tool nodes + uses edges (Han drift filter + slug dedup + cap)
         for (slug, t) in named_slugs(&front.tools, self.cap) {
-            Store::upsert_tool_on(tx, &slug, t).await?;
-            Store::relate_doc_tool_on(tx, path, &slug).await?;
+            Store::upsert_tool_on(lookup, tx, &slug, t).await?;
+            Store::relate_doc_tool_on(lookup, tx, path, &slug).await?;
             stats.tools += 1;
             stats.edges += 1;
         }
 
         // concept nodes + about edges
         for (slug, c) in named_slugs(&front.concepts, self.cap) {
-            Store::upsert_concept_on(tx, &slug, c).await?;
-            Store::relate_doc_concept_on(tx, path, &slug).await?;
+            Store::upsert_concept_on(lookup, tx, &slug, c).await?;
+            Store::relate_doc_concept_on(lookup, tx, path, &slug).await?;
             stats.concepts += 1;
             stats.edges += 1;
         }
@@ -203,7 +204,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
             } else {
                 crate::anchor::from_note_body(&front.project, body)
             };
-            lock_speaker_node(tx, front).await?;
+            lock_speaker_node(lookup, tx, front).await?;
             for ((subject, predicate), cl) in sorted_claims(front) {
                 let value = cl.value.trim();
                 let anchor = crate::anchor::anchor_for_claim(&note_anchors, &subject, value);
@@ -251,9 +252,16 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                     stats.claims += 1;
                 }
                 Store::mirror_claim_said_by_on(tx, &subject, &predicate, path, cl.said_by).await?;
-                stats.edges +=
-                    Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl)
-                        .await?;
+                stats.edges += Store::upsert_claim_node_on(
+                    lookup,
+                    tx,
+                    path,
+                    &front.project,
+                    &subject,
+                    &predicate,
+                    cl,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -307,12 +315,18 @@ fn named_slugs(names: &[String], cap: usize) -> Vec<(String, &str)> {
 
 /// Take the speaker node before the first claim, not at whichever claim names a speaker: the node
 /// is shared by every note with a `said_by`, so its place in the lock order must be the same in all.
-async fn lock_speaker_node(tx: &Transaction<'_>, front: &FrontMatter) -> Result<()> {
+async fn lock_speaker_node(
+    lookup: DocLookup<'_>,
+    tx: &Transaction<'_>,
+    front: &FrontMatter,
+) -> Result<()> {
     let speaker = sorted_claims(front)
         .into_iter()
         .find_map(|(_, cl)| cl.said_by);
     match speaker {
-        Some(said_by) => Store::upsert_speaker_on(tx, said_by).await.map(|_| ()),
+        Some(said_by) => Store::upsert_speaker_on(lookup, tx, said_by)
+            .await
+            .map(|_| ()),
         None => Ok(()),
     }
 }
@@ -321,15 +335,17 @@ async fn lock_speaker_node(tx: &Transaction<'_>, front: &FrontMatter) -> Result<
 /// Insert-only (`ON CONFLICT DO NOTHING`) — existing edges are never deleted, so their
 /// `first_seen_at` survives; no embedding, no claim-row write.
 async fn heal_claim_edges(
+    lookup: DocLookup<'_>,
     tx: &Transaction<'_>,
     front: &FrontMatter,
     stats: &mut Stats,
 ) -> Result<()> {
     let path = &front.source_path;
-    lock_speaker_node(tx, front).await?;
+    lock_speaker_node(lookup, tx, front).await?;
     for ((subject, predicate), cl) in sorted_claims(front) {
         stats.edges +=
-            Store::upsert_claim_node_on(tx, path, &front.project, &subject, &predicate, cl).await?;
+            Store::upsert_claim_node_on(lookup, tx, path, &front.project, &subject, &predicate, cl)
+                .await?;
     }
     Ok(())
 }
@@ -650,7 +666,7 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
         // Content identical — no `updated_at` write and no `clear_semantic_edges` (it deletes and
         // reinserts every edge, resetting each edge's `first_seen_at` on every sync). Edges are
         // cleared only for changed notes (below); here only missing claim edges are inserted.
-        heal_claim_edges(tx, &front, stats).await?;
+        heal_claim_edges(store.doc_lookup(), tx, &front, stats).await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::Unchanged);
     }

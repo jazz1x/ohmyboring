@@ -131,8 +131,8 @@ async fn survive(table: &str) {
     assert_eq!(after, 1, "catch_up deleted the Surreal-only {table} row");
 }
 
-// Bundle 1 moves document and chunk: these two must be GREEN on head. node and edge are bundle 2:
-// they stay RED on head (catch_up still copies pg over them) until it lands.
+// Bundle 1 moved document and chunk, bundle 2 moves node and edge: all four are GREEN on head
+// (RED on df2eba4 for node and edge, where catch_up still copied pg over them).
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
@@ -147,13 +147,13 @@ async fn a_chunk_written_only_to_surreal_survives_catch_up() {
 }
 
 #[tokio::test]
-#[ignore = "bundle 2 (node+edge): red until their writes go straight to Surreal; needs throwaway pg+surreal"]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn a_node_written_only_to_surreal_survives_catch_up() {
     survive("node").await;
 }
 
 #[tokio::test]
-#[ignore = "bundle 2 (node+edge): red until their writes go straight to Surreal; needs throwaway pg+surreal"]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn an_edge_written_only_to_surreal_survives_catch_up() {
     survive("edge").await;
 }
