@@ -195,7 +195,11 @@ def _refuse_python_writers_on_surreal() -> None:
     """backend=surreal 이면 document·chunk 의 쓰기 주인은 엔진 하나다. 문 안의 파이썬 쓰기 길은 pg 에 직접
     써서 Surreal 에 닿지 않으니, 셋 중 하나라도 python 이면 이유를 찍고 뜨지 않는다. 기동에 한 번만 본다.
     document·chunk 를 쓰는 파이썬 SQL 은 이 셋뿐이다: writer.py:97·115·121·125(REMEMBER_WRITER, SYNC_OWNER),
-    sync/run.py:44(SYNC_OWNER), door.py:1505(LINK_WRITER). 나머지 DOOR_* 는 읽기만 하거나 다른 표를 쓴다."""
+    sync/run.py:44(SYNC_OWNER), door.py:1505(LINK_WRITER). node·edge 를 쓰는 파이썬 SQL(묶음2): writer.py:104-113
+    (REMEMBER_WRITER), sync/run.py:55-59 gc (SYNC_OWNER, COMPACT_OWNER 는 compact/run.py:166 gc_apply),
+    gap/pg.py:39-58 (LINK_WRITER), search/pg.py:485·496 write_handover (VERDICT_WRITER verdict/run.py:151,
+    RECALL_READER door.py:1205, SEARCH_READER door.py:2259). 나머지(EVENTS_OWNER=event_log, BRIEF_OWNER=볼트 md,
+    MEMORY_READER·REGISTER_READER=읽기) 는 node·edge 를 쓰지 않는다."""
     # rollback = backend=pg + DOOR_*=python as a pair
     backend = (boring_config.load().get("vector") or {}).get("backend")
     python_on = [
@@ -204,13 +208,17 @@ def _refuse_python_writers_on_surreal() -> None:
             (_REMEMBER_WRITER_ENV, _remember_writer()),
             (_SYNC_OWNER_ENV, _sync_owner()),
             (_LINK_WRITER_ENV, _link_writer()),
+            (_VERDICT_WRITER_ENV, _verdict_writer()),
+            (_COMPACT_OWNER_ENV, _compact_owner()),
+            (_RECALL_READER_ENV, _recall_reader()),
+            (_SEARCH_READER_ENV, os.environ.get(_SEARCH_READER_ENV, "engine")),
         )
         if owner == _WRITER_PYTHON
     ]
     if backend == "surreal" and python_on:
         raise SystemExit(
             f"[door] refusing to start: boring.json vector.backend=surreal but {', '.join(python_on)}=python "
-            "writes document/chunk straight to pg, which Surreal never sees. Set them to engine, "
+            "writes document/chunk/node/edge straight to pg, which Surreal never sees. Set them to engine, "
             "or roll back as a pair (vector.backend=pgvector + DOOR_*=python)."
         )
 
