@@ -704,10 +704,13 @@ async fn surreal_written_claims_survive_catch_up_and_pg_written_ones_arrive() {
     let e = emb();
     for i in 0..n {
         let path = format!("/v/w1-{i}.md");
+        let mut conn = routed.conn().await.expect("conn");
+        let tx = conn.transaction().await.expect("begin");
         routed
-            .upsert_document(&front(&path), "sha", micros(1))
+            .write_note_on(&tx, &front(&path), "sha", micros(1), Vec::new())
             .await
             .expect("document");
+        tx.commit().await.expect("commit");
         for (k, vf) in [
             (0_u64, 1_700_000_000_000_000_u64),
             (1, 1_700_000_100_000_000),

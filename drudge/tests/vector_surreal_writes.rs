@@ -772,7 +772,7 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
 
     let session = format!("s-dead-{nanos}");
     let err = store
-        .handover_in_tx(&session, "2026-10-30", std::slice::from_ref(&path))
+        .handover_in_tx(&session, "2026-10-30", &[])
         .await
         .expect_err("a graph-only write must not swallow a dead Surreal either");
     assert!(

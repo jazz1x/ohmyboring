@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use drudge::config::SurrealConfig;
 use drudge::frontmatter::FrontMatter;
-use drudge::store::{Doc, Store, SurrealClient, Swap, VectorRoute};
+use drudge::store::{Store, SurrealClient, Swap, VectorRoute};
 use drudge::vector::VectorIndex;
 use serde_json::json;
 use tokio_postgres::NoTls;
@@ -66,20 +66,19 @@ impl Fixture {
             title: Some("s3".to_string()),
             ..Default::default()
         };
+        let mut conn = self.store.conn().await.expect("conn");
+        let tx = conn.transaction().await.expect("begin");
         self.store
-            .upsert_document(&front, "sha", SystemTime::now())
+            .write_note_on(
+                &tx,
+                &front,
+                "sha",
+                SystemTime::now(),
+                vec![(format!("chunk of {path}"), vec_at(hot))],
+            )
             .await
-            .expect("document");
-        self.store
-            .upsert_chunk(&Doc {
-                id: format!("{path}#0"),
-                content: format!("chunk of {path}"),
-                embedding: vec_at(hot),
-                front,
-                chunk_idx: 0,
-            })
-            .await
-            .expect("chunk");
+            .expect("document and chunk");
+        tx.commit().await.expect("commit");
     }
 
     /// Index names of one table, as the server reports them.
