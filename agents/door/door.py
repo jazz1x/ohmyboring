@@ -191,12 +191,37 @@ _STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=_STREAM_WORKERS, thread_name_p
 _CONTRACT = Path(__file__).resolve().parents[2] / "data" / "contract" / "engine-contract.json"
 
 
+def _refuse_python_writers_on_surreal() -> None:
+    """backend=surreal 이면 document·chunk 의 쓰기 주인은 엔진 하나다. 문 안의 파이썬 쓰기 길은 pg 에 직접
+    써서 Surreal 에 닿지 않으니, 셋 중 하나라도 python 이면 이유를 찍고 뜨지 않는다. 기동에 한 번만 본다.
+    document·chunk 를 쓰는 파이썬 SQL 은 이 셋뿐이다: writer.py:97·115·121·125(REMEMBER_WRITER, SYNC_OWNER),
+    sync/run.py:44(SYNC_OWNER), door.py:1505(LINK_WRITER). 나머지 DOOR_* 는 읽기만 하거나 다른 표를 쓴다."""
+    # rollback = backend=pg + DOOR_*=python as a pair
+    backend = (boring_config.load().get("vector") or {}).get("backend")
+    python_on = [
+        name
+        for name, owner in (
+            (_REMEMBER_WRITER_ENV, _remember_writer()),
+            (_SYNC_OWNER_ENV, _sync_owner()),
+            (_LINK_WRITER_ENV, _link_writer()),
+        )
+        if owner == _WRITER_PYTHON
+    ]
+    if backend == "surreal" and python_on:
+        raise SystemExit(
+            f"[door] refusing to start: boring.json vector.backend=surreal but {', '.join(python_on)}=python "
+            "writes document/chunk straight to pg, which Surreal never sees. Set them to engine, "
+            "or roll back as a pair (vector.backend=pgvector + DOOR_*=python)."
+        )
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """기동 시 노트 색인을 백그라운드에서 미리 채운다(E3b-2) — 문은 자주 재기동하므로
     빈 색인으로 받은 첫 쓰기가 볼트 통째 파싱(수 초)을 그대로 낼 수 없다. 채우는 동안
     들어온 그림자 쓰기는 디스크 훑기로 떨어지고(sync() → None), 그 결정이 엔진과 같은
     결정이라는 계약은 그대로다. 응답은 채우기를 기다리지 않는다."""
+    _refuse_python_writers_on_surreal()
     index = remember_index.NoteIndex(
         remember_index.DiskSeams(
             vault_dir=_vault_dir(),
