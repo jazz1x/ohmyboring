@@ -1274,7 +1274,8 @@ async fn mcp_verdict(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
     } else {
         (&empty, &handed)
     };
-    let report = Store::record_consumption(
+    let report = Store::record_consumption_with(
+        store.doc_lookup(),
         &tx,
         session_id,
         &verdict_label(chrono::Utc::now()),
@@ -2230,7 +2231,7 @@ async fn index_in_tx(
     let (_, stats) = ingest::ingest_file_in_tx(store, &tx, &s.llm, &s.cfg, &front.source_path)
         .await
         .map_err(|e| (-32603_i32, format!("ingest: {e:#}")))?;
-    *refused = owner::refused_supersedes(&tx, job.standing, supersedes)
+    *refused = owner::refused_supersedes(store, &tx, job.standing, supersedes)
         .await
         .map_err(|e| (-32603_i32, format!("owner guard: {e:#}")))?;
     let pairs: Vec<[String; 2]> = supersedes
@@ -2241,7 +2242,7 @@ async fn index_in_tx(
     let report = if pairs.is_empty() {
         SupersedesReport::default()
     } else {
-        Store::remember_supersedes(&tx, &pairs, job.edge_judge.as_deref())
+        Store::remember_supersedes_with(store.doc_lookup(), &tx, &pairs, job.edge_judge.as_deref())
             .await
             .map_err(|e| (-32603_i32, format!("supersedes edges: {e:#}")))?
     };

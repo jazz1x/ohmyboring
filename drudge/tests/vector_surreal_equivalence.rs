@@ -2,6 +2,9 @@
 //! nearest-neighbour scan over the same rows. The oracle is plain cosine in Rust over what pgvector
 //! holds, so neither an index nor a SQL planner is trusted on its side.
 //!
+//! C0b1: pg is the seed here and `fill_from` (the switch-over tool) copies it into Surreal, so
+//! this test keeps its contract after document and chunk writes stop reaching pg.
+//!
 //! Needs a throwaway pgvector database (`BORING_TEST_DATABASE_URL`), a throwaway SurrealDB server
 //! (`BORING_TEST_SURREAL_URL`, password in `BORING_SURREAL_PASSWORD`), both holding fewer than the
 //! 40-candidate window so that an HNSW answer and an exact one must agree.

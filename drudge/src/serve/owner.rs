@@ -66,12 +66,13 @@ pub(crate) fn may_rewrite(standing: Standing, existing: &Author) -> bool {
 /// Read-only on the request's transaction handle `tx`. The event is not written here: the caller
 /// records it with `record_supersede_refusals` once `tx` is released, committed or rolled back.
 pub(crate) async fn refused_supersedes(
+    store: &Store,
     tx: &Transaction<'_>,
     standing: Standing,
     targets: &[String],
 ) -> anyhow::Result<Vec<String>> {
     match standing {
-        Standing::NotOwner => Store::owner_authored(tx, targets).await,
+        Standing::NotOwner => store.doc_lookup().owner_authored(tx, targets).await,
         Standing::Owner => Ok(Vec::new()),
     }
 }
@@ -88,7 +89,7 @@ pub(crate) async fn refused_supersedes_logged(
         Some(store) => {
             let mut conn = store.conn().await?;
             let tx = conn.transaction().await?;
-            let refused = refused_supersedes(&tx, standing, targets).await?;
+            let refused = refused_supersedes(store, &tx, standing, targets).await?;
             drop(tx);
             drop(conn);
             record_supersede_refusals(Some(store), &refused, door).await;

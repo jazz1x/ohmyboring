@@ -3,6 +3,9 @@
 //! slot, so a scope of 119 notes (one open claim each) already failed and left the chunks written
 //! and the claims not.
 //!
+//! C0b1 contract: document and chunk rows are written into Surreal directly (`write_note`); `mirror`
+//! copies the claims only, and a claim whose note has no Surreal document is not copied.
+//!
 //! Needs a throwaway pgvector (its document and claim tables are emptied on each run) and a
 //! throwaway SurrealDB. Run:
 //!   BORING_TEST_DATABASE_URL=postgresql://boring:boring@127.0.0.1:<pg-port>/boring \
@@ -14,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use drudge::config::SurrealConfig;
 use drudge::frontmatter::FrontMatter;
-use drudge::store::{Doc, Scope, Store, SurrealClient};
+use drudge::store::{NoteChunk, NoteWrite, Scope, Store, SurrealClient};
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
@@ -66,20 +69,33 @@ async fn mirror_scope(namespace: &str, n: usize) -> [(Vec<String>, Vec<String>);
     let mut paths = Vec::new();
     for i in 0..n {
         let path = format!("/vault/wiki/scope-{n}-{i:05}.md");
-        store
-            .upsert_document(&front(&path), "sha", SystemTime::now())
-            .await
-            .expect("document");
-        store
-            .upsert_chunk(&Doc {
-                id: format!("{path}#0"),
-                content: format!("chunk {i}"),
-                embedding: vec_at(i),
-                front: front(&path),
-                chunk_idx: 0,
+        // New contract (C0b1): the document and its chunk are written straight into Surreal;
+        // `mirror` copies claims (and graph) only, and needs the note's document there.
+        let f = front(&path);
+        let embedding = vec_at(i);
+        let chunk_id = format!("{path}#0");
+        let content = format!("chunk {i}");
+        let chunks = [NoteChunk {
+            id: &chunk_id,
+            content: &content,
+            embedding: &embedding,
+        }];
+        client
+            .write_note(&NoteWrite {
+                path: &path,
+                origin: &f.origin,
+                project: &f.project,
+                kind: &f.kind,
+                title: f.title.as_deref(),
+                tags: &f.tags,
+                sha: "sha",
+                author: "unknown",
+                updated_us: 1_700_000_000_000_000,
+                chunks: &chunks,
+                dim: DIM,
             })
             .await
-            .expect("chunk");
+            .expect("document and chunk");
         store
             .upsert_claim(
                 &format!("slot-{n}-{i:05}"),
@@ -101,17 +117,12 @@ async fn mirror_scope(namespace: &str, n: usize) -> [(Vec<String>, Vec<String>);
         .await
         .expect("mirror of the whole scope");
 
-    let pg_chunks: Vec<String> = db
-        .query("SELECT id, source_path, embedding::text FROM chunk", &[])
-        .await
-        .unwrap()
-        .iter()
-        .map(|r| {
-            row(
-                &r.get::<_, String>(0),
-                &r.get::<_, String>(1),
-                &parse(&r.get::<_, String>(2)),
-            )
+    // The chunks pg no longer holds: what was written, by key.
+    let pg_chunks: Vec<String> = (0..n)
+        .map(|i| {
+            let path = format!("/vault/wiki/scope-{n}-{i:05}.md");
+            let embedding: Vec<f64> = vec_at(i).iter().map(|x| f64::from(*x)).collect();
+            row(&format!("{path}#0"), &path, &embedding)
         })
         .collect();
     let pg_claims: Vec<String> = db

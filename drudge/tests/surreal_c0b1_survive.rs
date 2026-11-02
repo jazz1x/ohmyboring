@@ -56,9 +56,9 @@ fn floats() -> String {
     format!("[{}]", v.join(","))
 }
 
-#[tokio::test]
-#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn rows_written_only_to_surreal_survive_catch_up() {
+/// One row of `table` written only into Surreal, then one `catch_up`: the row must still be there.
+/// All four tables are written so that each test starts from the same Surreal state.
+async fn survive(table: &str) {
     let dsn = env("BORING_TEST_DATABASE_URL");
     let pg = Store::open(&dsn, DIM).await.expect("open store");
     let (db, conn) = tokio_postgres::connect(&dsn, NoTls).await.unwrap();
@@ -125,16 +125,35 @@ async fn rows_written_only_to_surreal_survive_catch_up() {
 
     routed.catch_up_surreal().await.expect("catch_up");
 
-    let mut lost = Vec::new();
-    for (table, cid) in &rows {
-        let after = count(&client, table, cid).await;
-        println!("C0b1 survive {table}: before 1, after {after}");
-        if after != 1 {
-            lost.push(*table);
-        }
-    }
-    assert!(
-        lost.is_empty(),
-        "catch_up deleted Surreal-only rows of {lost:?}"
-    );
+    let (_, cid) = rows.iter().find(|(t, _)| *t == table).expect("table");
+    let after = count(&client, table, cid).await;
+    println!("C0b1 survive {table}: before 1, after {after}");
+    assert_eq!(after, 1, "catch_up deleted the Surreal-only {table} row");
+}
+
+// Bundle 1 moves document and chunk: these two must be GREEN on head. node and edge are bundle 2:
+// they stay RED on head (catch_up still copies pg over them) until it lands.
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_document_written_only_to_surreal_survives_catch_up() {
+    survive("document").await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_chunk_written_only_to_surreal_survives_catch_up() {
+    survive("chunk").await;
+}
+
+#[tokio::test]
+#[ignore = "bundle 2 (node+edge): red until their writes go straight to Surreal; needs throwaway pg+surreal"]
+async fn a_node_written_only_to_surreal_survives_catch_up() {
+    survive("node").await;
+}
+
+#[tokio::test]
+#[ignore = "bundle 2 (node+edge): red until their writes go straight to Surreal; needs throwaway pg+surreal"]
+async fn an_edge_written_only_to_surreal_survives_catch_up() {
+    survive("edge").await;
 }

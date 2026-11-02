@@ -45,16 +45,19 @@ pub enum TxPlace {
     Slot,
     Note,
     Split,
+    /// C0b1: a note's `document` + `chunk` rows written by the engine (`doc_tx.rs`).
+    Doc,
 }
 
 impl TxPlace {
-    pub const ALL: [Self; 3] = [Self::Slot, Self::Note, Self::Split];
+    pub const ALL: [Self; 4] = [Self::Slot, Self::Note, Self::Split, Self::Doc];
 
     fn index(self) -> usize {
         match self {
             Self::Slot => 0,
             Self::Note => 1,
             Self::Split => 2,
+            Self::Doc => 3,
         }
     }
 
@@ -64,6 +67,7 @@ impl TxPlace {
             Self::Slot => "slot",
             Self::Note => "note",
             Self::Split => "split",
+            Self::Doc => "doc",
         }
     }
 }
@@ -79,7 +83,7 @@ struct Cell {
 /// Per place: transactions committed, conflicts seen, resends made, requests that gave up.
 #[derive(Debug, Default)]
 pub struct TxStats {
-    cells: [Cell; 3],
+    cells: [Cell; 4],
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,7 +94,7 @@ pub struct TxCount {
     pub exhausted: u64,
 }
 
-enum Attempt<T> {
+pub(super) enum Attempt<T> {
     Done(T),
     Conflict(String),
 }
@@ -465,7 +469,7 @@ impl SurrealClient {
 
     /// One `BEGIN; body COMMIT;` request. Every statement's answer comes back (BEGIN and COMMIT
     /// included); a conflict is `Attempt::Conflict`, any other failed statement an error.
-    async fn tx_once(&self, body: &str) -> Result<Attempt<Vec<Value>>> {
+    pub(super) async fn tx_once(&self, body: &str) -> Result<Attempt<Vec<Value>>> {
         let sql = format!("BEGIN; {body} COMMIT;");
         let request = json!({"id": 1, "method": "query", "params": [sql]});
         let (status, answer) = self.send_authed(&request).await?;
@@ -509,7 +513,7 @@ impl SurrealClient {
 
     /// Run `attempt` until it commits; a conflict is counted and sent again whole, up to
     /// `tx_retries` times, then returned as an error naming the count.
-    async fn retrying<T, F, Fut>(&self, place: TxPlace, attempt: F) -> Result<T>
+    pub(super) async fn retrying<T, F, Fut>(&self, place: TxPlace, attempt: F) -> Result<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<Attempt<T>>>,

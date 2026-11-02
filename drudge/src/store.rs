@@ -38,8 +38,9 @@ pub use code_copy_surreal::{CodeCheck, CodeCopy};
 pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
-    ClaimRowDiff, ClaimWrite, FillTable, KeySet, ProjectTable, ProjectTableError, RegisterAsk,
-    SURREAL_BEHIND, Scope, SplitStanding, SurrealClient, Swap, TX_RETRIES, TxCount, TxPlace,
+    ClaimRowDiff, ClaimWrite, FillTable, KeySet, NoteChunk, NoteWrite, ProjectTable,
+    ProjectTableError, RegisterAsk, SURREAL_BEHIND, Scope, SplitStanding, SurrealClient, Swap,
+    TX_RETRIES, TxCount, TxPlace,
 };
 
 /// Ingest input (one chunk).
@@ -510,6 +511,84 @@ pub fn wiki_path_spellings(path: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Where a write transaction reads the `document` rows its decisions depend on: pg's own table on
+/// pgvector, Surreal's on `backend=surreal` (C0b1 bundle 1: pg no longer receives a note's
+/// document row, so a pg read inside the transaction would not see a note written only in
+/// Surreal). One fold per read; the caller never branches on the backend itself.
+#[derive(Clone, Copy)]
+pub enum DocLookup<'a> {
+    Pg,
+    Surreal(&'a SurrealClient),
+}
+
+impl DocLookup<'_> {
+    /// `Store::get_doc_sha_on`.
+    pub async fn sha(self, c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+        match self {
+            Self::Pg => Store::get_doc_sha_on(c, path).await,
+            Self::Surreal(client) => client.get_doc_sha(path).await,
+        }
+    }
+
+    /// `Store::resolve_doc_path_on`: the spelling of `path` that has a `document` row.
+    pub async fn resolve_path(self, c: &impl GenericClient, path: &str) -> Result<Option<String>> {
+        for candidate in wiki_path_spellings(path) {
+            if self.sha(c, &candidate).await?.is_some() {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    /// `Store::doc_updated_at_on`.
+    pub async fn updated_at(self, c: &impl GenericClient, path: &str) -> Result<SystemTime> {
+        match self {
+            Self::Pg => Store::doc_updated_at_on(c, path).await,
+            Self::Surreal(client) => client.doc_updated_at(path).await,
+        }
+    }
+
+    /// `Store::owner_authored`.
+    pub async fn owner_authored(
+        self,
+        tx: &Transaction<'_>,
+        paths: &[String],
+    ) -> Result<Vec<String>> {
+        match self {
+            Self::Pg => Store::owner_authored(tx, paths).await,
+            Self::Surreal(client) => client.owner_authored(paths).await,
+        }
+    }
+
+    /// The paths among `paths` that have a `document` row.
+    pub async fn known(self, c: &impl GenericClient, paths: &[String]) -> Result<HashSet<String>> {
+        match self {
+            Self::Pg => Ok(c
+                .query(
+                    "SELECT source_path FROM document WHERE source_path = ANY($1);",
+                    &[&paths],
+                )
+                .await
+                .context("known documents")?
+                .iter()
+                .map(|r| r.get(0))
+                .collect()),
+            Self::Surreal(client) => client.known_paths(paths).await,
+        }
+    }
+}
+
+impl Store {
+    /// The document reader of the backend this process runs on.
+    #[must_use]
+    pub fn doc_lookup(&self) -> DocLookup<'_> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => DocLookup::Pg,
+            VectorRoute::Surreal(client) => DocLookup::Surreal(client),
+        }
+    }
 }
 
 /// chunk id ("path#idx") → graph document node id ("doc:path").
@@ -1341,7 +1420,7 @@ impl Store {
 
     /// Document mtime — the `valid_from` of a claim (temporal sort key). Falls back to now() if absent (graceful).
     pub async fn doc_updated_at(&self, path: &str) -> Result<SystemTime> {
-        Self::doc_updated_at_on(&self.db().await?, path).await
+        self.doc_lookup().updated_at(&self.db().await?, path).await
     }
 
     /// `doc_updated_at` on a caller-held connection or transaction handle.
@@ -1359,8 +1438,21 @@ impl Store {
 
     /// Move only the stored change-detection sha (old whole-file sha → content hash); nothing else is touched.
     pub async fn set_doc_sha(&self, path: &str, sha: &str) -> Result<()> {
-        Self::set_doc_sha_on(&self.db().await?, path, sha).await?;
-        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
+        self.set_doc_sha_via(&self.db().await?, path, sha).await
+    }
+
+    /// `set_doc_sha` where the backend holds the document: the caller's pg transaction on
+    /// pgvector, Surreal on `backend=surreal` (pg no longer receives the row).
+    pub async fn set_doc_sha_via(
+        &self,
+        c: &impl GenericClient,
+        path: &str,
+        sha: &str,
+    ) -> Result<()> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => Self::set_doc_sha_on(c, path, sha).await,
+            VectorRoute::Surreal(client) => client.set_doc_sha(path, sha).await,
+        }
     }
 
     /// `set_doc_sha` on a caller-held connection or transaction handle.
@@ -2487,7 +2579,17 @@ impl Store {
             )
             .await
             .context("upsert document")?;
+        Self::upsert_document_graph_on(c, front).await
+    }
 
+    /// The graph half of `upsert_document_on`: the note's project node and `in_project` edge, and
+    /// its `tagged` edges regenerated. Nodes and edges stay in pg until their bundle, so this runs
+    /// on the pg transaction whichever backend holds the document row.
+    pub async fn upsert_document_graph_on(
+        c: &impl GenericClient,
+        front: &FrontMatter,
+    ) -> Result<()> {
+        let path = &front.source_path;
         let doc_id = doc_node_id(path);
 
         // project node + in_project edge
@@ -2540,10 +2642,17 @@ impl Store {
 
     /// Remove (prune) document + chunks (CASCADE) + graph edges + claims (explicit; claim has no FK).
     pub async fn delete_document(&self, path: &str) -> Result<()> {
-        self.db()
-            .await?
-            .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
-            .await?;
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.db()
+                    .await?
+                    .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
+                    .await?;
+            }
+            // The document and every chunk of the note leave Surreal; the edges and claims below
+            // are still pg's until their bundle.
+            VectorRoute::Surreal(client) => client.delete_note(path).await?,
+        }
         let doc_id = doc_node_id(path);
         self.db()
             .await?
@@ -2591,6 +2700,83 @@ impl Store {
             .await
             .context("upsert chunk")?;
         Ok(())
+    }
+
+    /// A changed note's document row and its whole chunk set (`embedded` = chunk text and vector,
+    /// in order). On pgvector: the upsert-then-prune sequence on the caller's transaction. On
+    /// `backend=surreal`: one Surreal transaction for the document and chunk rows (`doc_tx.rs`),
+    /// then the graph half on the caller's pg transaction. Between the bundles a note therefore
+    /// commits in two places; a failure after the Surreal commit leaves the new sha without the
+    /// graph rows, and bundle 2 closes that.
+    ///
+    /// # Errors
+    /// The write failed, or a vector's length is not the configured dimension.
+    pub async fn write_note_on(
+        &self,
+        tx: &Transaction<'_>,
+        front: &FrontMatter,
+        sha: &str,
+        mtime: SystemTime,
+        embedded: Vec<(String, Vec<f32>)>,
+    ) -> Result<()> {
+        let path = &front.source_path;
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                Self::upsert_document_on(tx, front, sha, mtime).await?;
+                let count = embedded.len();
+                for (i, (content, embedding)) in embedded.into_iter().enumerate() {
+                    self.upsert_chunk_on(
+                        tx,
+                        &Doc {
+                            id: format!("{path}#{i}"),
+                            content,
+                            embedding,
+                            front: front.clone(),
+                            chunk_idx: i,
+                        },
+                    )
+                    .await?;
+                }
+                Self::prune_chunks_from_on(tx, path, count).await
+            }
+            VectorRoute::Surreal(client) => {
+                for (_, embedding) in &embedded {
+                    drop(self.checked_vector(embedding)?);
+                }
+                let ids: Vec<String> = (0..embedded.len()).map(|i| format!("{path}#{i}")).collect();
+                let chunks: Vec<NoteChunk<'_>> = ids
+                    .iter()
+                    .zip(&embedded)
+                    .map(|(id, (content, embedding))| NoteChunk {
+                        id,
+                        content,
+                        embedding,
+                    })
+                    .collect();
+                let since_epoch = mtime
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .context("note mtime is before 1970")?;
+                let updated_us =
+                    i64::try_from(since_epoch.as_micros()).context("note mtime overflows i64")?;
+                let author = String::from(front.author.clone());
+                client
+                    .write_note(&NoteWrite {
+                        path,
+                        origin: &front.origin,
+                        project: &front.project,
+                        kind: &front.kind,
+                        title: front.title.as_deref(),
+                        tags: &front.tags,
+                        sha,
+                        author: &author,
+                        updated_us,
+                        chunks: &chunks,
+                        dim: self.dim,
+                    })
+                    .await?;
+                Self::upsert_document_graph_on(tx, front).await
+            }
+        }
     }
 
     // ── retrieval ─────────────────────────────────────────────────────────────
@@ -3473,11 +3659,23 @@ impl Store {
         pairs: &[[String; 2]],
         judge: Option<&str>,
     ) -> Result<SupersedesReport> {
-        Self::record_supersedes_sealing(tx, pairs, judge, SealRule::WholeNote).await
+        Self::record_supersedes_with(DocLookup::Pg, tx, pairs, judge).await
+    }
+
+    /// `record_supersedes` with the backend's own `document` reader: the notes a pair names are
+    /// looked up where the note was written (`Store::doc_lookup`).
+    pub async fn record_supersedes_with(
+        lookup: DocLookup<'_>,
+        tx: &Transaction<'_>,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        Self::record_supersedes_sealing(lookup, tx, pairs, judge, SealRule::WholeNote).await
     }
 
     /// `record_supersedes` with the seal rule named by the caller.
     async fn record_supersedes_sealing(
+        lookup: DocLookup<'_>,
         tx: &Transaction<'_>,
         pairs: &[[String; 2]],
         judge: Option<&str>,
@@ -3494,12 +3692,12 @@ impl Store {
         // row locks in the same order, so opposite-order requests wait instead of deadlocking.
         let mut known = Vec::new();
         for pair in pairs {
-            if Self::get_doc_sha_on(tx, &pair[0]).await?.is_none() {
+            if lookup.sha(tx, &pair[0]).await?.is_none() {
                 report.unknown += 1;
                 report.unknown_paths.push(pair[0].clone());
                 continue;
             }
-            if Self::get_doc_sha_on(tx, &pair[1]).await?.is_none() {
+            if lookup.sha(tx, &pair[1]).await?.is_none() {
                 report.unknown += 1;
                 report.unknown_paths.push(pair[1].clone());
                 continue;
@@ -3767,12 +3965,37 @@ impl Store {
         supersedes: &[[String; 2]],
         judge: Option<&str>,
     ) -> Result<ConsumptionReport> {
+        Self::record_consumption_with(
+            DocLookup::Pg,
+            tx,
+            session_id,
+            observed_at,
+            used,
+            contested,
+            supersedes,
+            judge,
+        )
+        .await
+    }
+
+    /// `record_consumption` with the backend's own `document` reader (`Store::doc_lookup`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_consumption_with(
+        lookup: DocLookup<'_>,
+        tx: &Transaction<'_>,
+        session_id: &str,
+        observed_at: &str,
+        used: &[String],
+        contested: &[String],
+        supersedes: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<ConsumptionReport> {
         let session_node = format!("session:{session_id}");
         Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
 
         let mut report = ConsumptionReport::default();
         for path in used {
-            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
+            let Some(keyed) = lookup.resolve_path(tx, path).await? else {
                 report.unknown += 1;
                 continue;
             };
@@ -3780,7 +4003,7 @@ impl Store {
             report.used += 1;
         }
         for path in contested {
-            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
+            let Some(keyed) = lookup.resolve_path(tx, path).await? else {
                 report.unknown += 1;
                 continue;
             };
@@ -3788,7 +4011,7 @@ impl Store {
                 .await?;
             report.contested += 1;
         }
-        let supersedes_report = Self::record_supersedes(tx, supersedes, judge).await?;
+        let supersedes_report = Self::record_supersedes_with(lookup, tx, supersedes, judge).await?;
         report.supersedes += supersedes_report.supersedes;
         report.unknown += supersedes_report.unknown;
         Ok(report)
@@ -3808,12 +4031,23 @@ impl Store {
         observed_at: &str,
         paths: &[String],
     ) -> Result<HandoverReport> {
+        Self::record_handover_with(DocLookup::Pg, tx, session_id, observed_at, paths).await
+    }
+
+    /// `record_handover` with the backend's own `document` reader (`Store::doc_lookup`).
+    pub async fn record_handover_with(
+        lookup: DocLookup<'_>,
+        tx: &Transaction<'_>,
+        session_id: &str,
+        observed_at: &str,
+        paths: &[String],
+    ) -> Result<HandoverReport> {
         let session_node = format!("session:{session_id}");
         Self::upsert_node_on(tx, &session_node, "session", observed_at, None).await?;
 
         let mut report = HandoverReport::default();
         for path in paths {
-            let Some(keyed) = Self::resolve_doc_path_on(tx, path).await? else {
+            let Some(keyed) = lookup.resolve_path(tx, path).await? else {
                 report.unknown += 1;
                 continue;
             };
@@ -3835,7 +4069,9 @@ impl Store {
             .transaction()
             .await
             .context("begin handover transaction")?;
-        let report = Self::record_handover(&tx, session_id, observed_at, paths).await?;
+        let report =
+            Self::record_handover_with(self.doc_lookup(), &tx, session_id, observed_at, paths)
+                .await?;
         tx.commit().await.context("commit handover transaction")?;
         self.mirror_surreal(&Scope::graph([format!("session:{session_id}")]))
             .await?;
@@ -3858,16 +4094,7 @@ impl Store {
         Self::upsert_node_on(&tx, &gap, "gap", &args.query, Some(args.kind.as_str())).await?;
         Self::upsert_node_on(&tx, &session_node, "session", observed_at, None).await?;
         Self::upsert_edge_on(&tx, &session_node, &gap, "gap", None).await?;
-        let known: HashSet<String> = tx
-            .query(
-                "SELECT source_path FROM document WHERE source_path = ANY($1);",
-                &[&args.handed],
-            )
-            .await
-            .context("known handed documents")?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
+        let known: HashSet<String> = self.doc_lookup().known(&tx, &args.handed).await?;
         let handed: Vec<&String> = args.handed.iter().filter(|p| known.contains(*p)).collect();
         for path in &handed {
             Self::upsert_edge_on(&tx, &gap, &doc_node_id(path), "gap_handed", None).await?;
@@ -3894,7 +4121,7 @@ impl Store {
             .transaction()
             .await
             .context("begin supersedes transaction")?;
-        let report = Self::record_supersedes(&tx, pairs, judge).await?;
+        let report = Self::record_supersedes_with(self.doc_lookup(), &tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
         self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
             .await?;
@@ -3913,7 +4140,7 @@ impl Store {
             .transaction()
             .await
             .context("begin supersedes transaction")?;
-        let report = Self::remember_supersedes(&tx, pairs, judge).await?;
+        let report = Self::remember_supersedes_with(self.doc_lookup(), &tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
         self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
             .await?;
@@ -3927,7 +4154,17 @@ impl Store {
         pairs: &[[String; 2]],
         judge: Option<&str>,
     ) -> Result<SupersedesReport> {
-        Self::record_supersedes_sealing(tx, pairs, judge, SealRule::RestatedSlots).await
+        Self::remember_supersedes_with(DocLookup::Pg, tx, pairs, judge).await
+    }
+
+    /// `remember_supersedes` with the backend's own `document` reader (`Store::doc_lookup`).
+    pub async fn remember_supersedes_with(
+        lookup: DocLookup<'_>,
+        tx: &Transaction<'_>,
+        pairs: &[[String; 2]],
+        judge: Option<&str>,
+    ) -> Result<SupersedesReport> {
+        Self::record_supersedes_sealing(lookup, tx, pairs, judge, SealRule::RestatedSlots).await
     }
 
     /// Consumption counts (`used`/`contested` edges) per document — one query for all hits of a

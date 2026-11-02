@@ -45,6 +45,25 @@ async fn sixteen_dim_database() -> String {
     format!("{server}/{name}")
 }
 
+/// C0b1: a note's `document` row lives in Surreal (the engine writes it there), and the claim copy
+/// reads the note's origin and project from it. These tests seed pg, so the Surreal row is put by
+/// hand the way the engine's write puts it.
+async fn put_doc(client: &SurrealClient, fm: &FrontMatter) {
+    let q = |s: &str| serde_json::to_string(s).unwrap();
+    let p = q(&fm.source_path);
+    client
+        .run(&format!(
+            "UPSERT type::record('document', {p}) CONTENT {{cid: {p}, source_path: {p}, origin: {o}, \
+             project: {pr}, kind: {k}, tags: [], sha: 'sha', extracted_sha: '', \
+             updated_us: 1700000000000000, author: 'unknown', via: 'surreal'}};",
+            o = q(&fm.origin),
+            pr = q(&fm.project),
+            k = q(&fm.kind)
+        ))
+        .await
+        .expect("surreal document");
+}
+
 fn front(path: &str) -> FrontMatter {
     FrontMatter {
         origin: "personal".to_string(),
@@ -79,6 +98,7 @@ async fn a_seal_written_only_to_pg_is_repaired_and_the_register_agrees() {
         .upsert_document(&front(path), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(path)).await;
     let mut emb = vec![0.0; DIM];
     emb[0] = 1.0;
     for (i, predicate) in ["goal", "scope"].iter().enumerate() {
@@ -155,6 +175,7 @@ async fn catch_up_levels_the_vector_claim_and_chunk_tables() {
         .upsert_document(&front(kept), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(kept)).await;
     store
         .upsert_chunk(&Doc {
             id: format!("{kept}#0"),
@@ -184,8 +205,11 @@ async fn catch_up_levels_the_vector_claim_and_chunk_tables() {
         .mirror(&store, &Scope::notes([kept.to_owned()]))
         .await
         .expect("mirror");
+    // Document and chunk are not copied any more: only the claim tables are compared here.
     for t in client.compare(&store).await.expect("compare") {
-        assert!(t.same(), "baseline: {}", t.line());
+        if t.table.starts_with("claim") {
+            assert!(t.same(), "baseline: {}", t.line());
+        }
     }
 
     // What the Python door does: pg only, no Surreal write.
@@ -196,6 +220,7 @@ async fn catch_up_levels_the_vector_claim_and_chunk_tables() {
         .upsert_document(&front(added), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(added)).await;
     store
         .upsert_chunk(&Doc {
             id: format!("{added}#0"),
@@ -223,18 +248,21 @@ async fn catch_up_levels_the_vector_claim_and_chunk_tables() {
         .await
         .unwrap();
     let before = client.compare(&store).await.expect("compare");
-    for name in ["chunk", "claim(open)"] {
-        let t = before.iter().find(|t| t.table == name).expect("table");
-        assert!(
-            !t.same(),
-            "the write straight to pg must show: {}",
-            t.line()
-        );
-    }
+    let t = before
+        .iter()
+        .find(|t| t.table == "claim(open)")
+        .expect("table");
+    assert!(
+        !t.same(),
+        "the write straight to pg must show: {}",
+        t.line()
+    );
 
     client.catch_up(&store).await.expect("catch_up");
     for t in client.compare(&store).await.expect("compare") {
-        assert!(t.same(), "after catch_up: {}", t.line());
+        if t.table.starts_with("claim") {
+            assert!(t.same(), "after catch_up: {}", t.line());
+        }
     }
 }
 
@@ -265,6 +293,7 @@ async fn a_mass_delete_catch_up_rebuilds_the_claim_index_instead_of_deleting_thr
         .upsert_document(&front(path), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(path)).await;
     let mut emb = vec![0.0; DIM];
     emb[0] = 1.0;
     let (kept, total) = (50, 2_100);
@@ -356,6 +385,7 @@ async fn mass_delete_leaves_an_index(namespace: &str, total: i64, kept: i64) {
         .upsert_document(&front(path), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(path)).await;
     db.execute(
         "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
          SELECT 'claim-mass-' || lpad(i::text, 7, '0'), 'goal',
@@ -430,6 +460,7 @@ async fn three_hundred_open_claims(
         .upsert_document(&front(path), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(path)).await;
     db.execute(
         "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence)
          SELECT 'claim-stale-' || lpad(i::text, 4, '0'), 'goal',
@@ -518,6 +549,7 @@ async fn the_embedding_backfill_fills_from_pg_and_leaves_surreal_written_rows() 
         .upsert_document(&front(path), "sha", SystemTime::now())
         .await
         .expect("document");
+    put_doc(&client, &front(path)).await;
     let at = |us: u64| SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_000 + us);
     for (i, predicate) in ["goal", "scope", "owner", "mine"].iter().enumerate() {
         store

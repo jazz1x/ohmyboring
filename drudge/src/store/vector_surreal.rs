@@ -1087,7 +1087,9 @@ impl FillTable {
 mod claim_reads;
 mod claim_tx;
 mod doc_reads;
+mod doc_tx;
 pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
+pub use doc_tx::{NoteChunk, NoteWrite};
 mod reads;
 mod recurrences;
 
@@ -1274,6 +1276,13 @@ impl Scope {
 }
 
 #[derive(Deserialize)]
+struct DocOrigin {
+    source_path: String,
+    origin: String,
+    project: String,
+}
+
+#[derive(Deserialize)]
 struct Slot {
     subject: String,
     predicate: String,
@@ -1325,6 +1334,12 @@ fn chunk_literal(r: &Row) -> (String, String) {
 
 /// `(key, SurrealQL record literal)` of one `claim_select` row.
 fn claim_literal(r: &Row) -> (String, String) {
+    claim_literal_of(r, &r.get::<_, String>(4), &r.get::<_, String>(5))
+}
+
+/// `claim_literal` with the note's `origin` and `project` given, not read from the row: on
+/// `backend=surreal` they come from Surreal's `document` (`claim_select_bare`).
+fn claim_literal_of(r: &Row, origin: &str, project: &str) -> (String, String) {
     let subject: String = r.get(0);
     let predicate: String = r.get(1);
     let valid_from_us: i64 = r.get(2);
@@ -1344,12 +1359,49 @@ fn claim_literal(r: &Row) -> (String, String) {
         text(&subject),
         text(&predicate),
         text(&r.get::<_, String>(3)),
-        text(&r.get::<_, String>(4)),
-        text(&r.get::<_, String>(5)),
+        text(origin),
+        text(project),
         text(&r.get::<_, String>(6)),
         floats(embedding.as_slice())
     );
     (cid, literal)
+}
+
+/// `claim_select` without the pg `document` join: the same ten columns, `origin` and `project`
+/// left empty (columns 4 and 5) for the caller to fill from Surreal's `document`. pg no longer
+/// receives a note's document row on `backend=surreal`, so a join there would drop the claims of
+/// every note written since.
+fn claim_select_bare(tail: &str) -> String {
+    format!(
+        "SELECT c.subject, c.predicate, {valid}, c.source_path, ''::text, ''::text,
+                c.kind, c.anchor, {stale}, c.embedding
+           FROM claim c WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL {tail}",
+        valid = epoch_us("c.valid_from"),
+        stale = epoch_us("c.stale_at")
+    )
+}
+
+/// `origin` and `project` of notes as Surreal's `document` holds them, by `source_path`.
+type DocOrigins = HashMap<String, (String, String)>;
+
+/// A claim row's `origin` and `project` set from `docs`; a note with no document row leaves them
+/// unset, as pg's `LEFT JOIN document` did.
+fn with_doc_origin(mut row: Value, docs: &DocOrigins) -> Value {
+    let found = row
+        .get("source_path")
+        .and_then(Value::as_str)
+        .and_then(|p| docs.get(p))
+        .cloned();
+    if let Some(o) = row.as_object_mut() {
+        if let Some((origin, project)) = found {
+            o.insert("origin".into(), json!(origin));
+            o.insert("project".into(), json!(project));
+        } else {
+            o.remove("origin");
+            o.remove("project");
+        }
+    }
+    row
 }
 
 fn document_select(tail: &str) -> String {
@@ -1642,7 +1694,8 @@ const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD author ON document TYPE string;
          DEFINE FIELD via ON document TYPE option<string>;";
 
-/// pg's `(document, node, edge)` keys, in the shapes Surreal keys them by.
+/// pg's `(document, node, edge)` keys, in the shapes Surreal keys them by. The fill's compare
+/// reads all three; `catch_up` reads only `pg_node_edge_keys`.
 async fn pg_graph_keys(
     db: &tokio_postgres::Client,
 ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
@@ -1653,6 +1706,12 @@ async fn pg_graph_keys(
         .iter()
         .map(|r| r.get(0))
         .collect();
+    let (nodes, edges) = pg_node_edge_keys(db).await?;
+    Ok((documents, nodes, edges))
+}
+
+/// pg's `(node, edge)` keys, in the shapes Surreal keys them by.
+async fn pg_node_edge_keys(db: &tokio_postgres::Client) -> Result<(Vec<String>, Vec<String>)> {
     let nodes = db
         .query("SELECT id FROM node;", &[])
         .await
@@ -1673,7 +1732,7 @@ async fn pg_graph_keys(
             )
         })
         .collect();
-    Ok((documents, nodes, edges))
+    Ok((nodes, edges))
 }
 
 /// A `claim_row` as Surreal reads it back, without the record id, under its `cid`.
@@ -2230,29 +2289,6 @@ impl SurrealClient {
         }))
     }
 
-    /// A project table is only read when it exists, so it must be complete when it appears: define
-    /// it, then copy every chunk pg holds for the project.
-    async fn create_project_table(&self, store: &Store, table: &ProjectTable) -> Result<()> {
-        self.run(&chunk_ddl(table.name(), store.dim)).await?;
-        let mut after = String::new();
-        loop {
-            let rows = store
-                .db()
-                .await?
-                .query(
-                    &chunk_select("AND c.project = $1 AND c.id > $2 ORDER BY c.id LIMIT $3;"),
-                    &[&table.slug(), &after, &i64::try_from(FILL_BATCH)?],
-                )
-                .await
-                .context("read the project's chunks from pgvector")?;
-            let Some(last) = rows.last() else { break };
-            after = last.get(0);
-            let literals: Vec<String> = rows.iter().map(|r| chunk_literal(r).1).collect();
-            self.upsert_rows(table.name(), &literals).await?;
-        }
-        Ok(())
-    }
-
     async fn upsert_rows(&self, table: &str, literals: &[String]) -> Result<()> {
         for batch in literals.chunks(FILL_BATCH) {
             self.run(&format!(
@@ -2294,46 +2330,6 @@ impl SurrealClient {
         self.upsert_rows(table, &literals).await?;
         self.delete_rows(table, &stale).await?;
         self.bump_dirty(table, literals.len() + stale.len()).await
-    }
-
-    /// `reconcile` for a table with no HNSW index (`document`): there is no swap to schedule, so no
-    /// dirty count is kept for it.
-    async fn reconcile_documents(&self, store: &Store, paths: &[String]) -> Result<()> {
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let rows = store
-            .db()
-            .await?
-            .query(&document_select("WHERE d.source_path = ANY($1)"), &[&paths])
-            .await
-            .context("read the written notes' documents from pgvector")?;
-        let held_query = format!(
-            "SELECT VALUE cid FROM document WHERE via = 'surreal' AND source_path INSIDE {};",
-            texts(paths)
-        );
-        let held: Vec<String> =
-            first_statement(&held_query, self.rows::<String>(&held_query).await?)?;
-        let wanted: Vec<(String, String)> = rows
-            .iter()
-            .map(document_literal)
-            .filter(|(key, _)| !held.contains(key))
-            .collect();
-        let existing_query = format!(
-            "SELECT VALUE cid FROM document WHERE source_path INSIDE {};",
-            texts(paths)
-        );
-        let existing: Vec<String> =
-            first_statement(&existing_query, self.rows::<String>(&existing_query).await?)?;
-        let keep: std::collections::HashSet<&str> =
-            wanted.iter().map(|(k, _)| k.as_str()).collect();
-        let stale: Vec<String> = existing
-            .into_iter()
-            .filter(|k| !keep.contains(k.as_str()) && !held.contains(k))
-            .collect();
-        let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
-        self.upsert_rows("document", &literals).await?;
-        self.delete_rows("document", &stale).await
     }
 
     /// The graph around `ids`: every edge with one of them at an end, and the nodes at the ends of
@@ -2420,79 +2416,12 @@ impl SurrealClient {
         if scope.is_empty() {
             Ok(())
         } else {
-            self.reconcile_documents(store, &scope.paths).await?;
+            // C0b1 bundle 1: `document` and `chunk` rows are written by the engine straight into
+            // Surreal (`doc_tx.rs`), so this copy would only delete them. Graph and claims stay
+            // copied from pg until their bundle.
             self.reconcile_graph(store, &scope.graph_ids()).await?;
-            self.mirror_chunks(store, &scope.paths).await?;
             self.mirror_claims(store, scope).await
         }
-    }
-
-    async fn mirror_chunks(&self, store: &Store, paths: &[String]) -> Result<()> {
-        let rows = store
-            .db()
-            .await?
-            .query(&chunk_select("AND c.source_path = ANY($1)"), &[&paths])
-            .await
-            .context("read the written notes' chunks from pgvector")?;
-        let wanted: Vec<(String, String)> = rows.iter().map(chunk_literal).collect();
-        let placed = Placed::of(
-            rows.iter()
-                .map(|r| {
-                    let (key, literal) = chunk_literal(r);
-                    (r.get::<_, String>(2), key, literal)
-                })
-                .collect(),
-        );
-        self.reconcile_chunk_table("chunk", wanted, paths).await?;
-        self.mirror_project_tables(store, placed, paths).await
-    }
-
-    async fn reconcile_chunk_table(
-        &self,
-        table: &str,
-        wanted: Vec<(String, String)>,
-        paths: &[String],
-    ) -> Result<()> {
-        let existing_chunks = format!(
-            "SELECT VALUE cid FROM {} WHERE source_path INSIDE {};",
-            quote_ident(table),
-            texts(paths)
-        );
-        let existing: Vec<String> = first_statement(
-            &existing_chunks,
-            self.rows::<String>(&existing_chunks).await?,
-        )?;
-        self.reconcile(table, wanted, existing).await
-    }
-
-    /// Every project table that exists or is needed: a table the scope's rows now belong to is
-    /// created whole (see `create_project_table`) and reconciled; a table they left (the note's
-    /// project changed, the note was deleted) is reconciled to empty for these paths.
-    async fn mirror_project_tables(
-        &self,
-        store: &Store,
-        placed: Placed,
-        paths: &[String],
-    ) -> Result<()> {
-        placed.report();
-        let have = self.project_tables().await?;
-        for table in placed.by_table.keys() {
-            if !have.iter().any(|n| n == table.name()) {
-                self.create_project_table(store, table).await?;
-            }
-        }
-        let mut names: std::collections::BTreeSet<String> = have.into_iter().collect();
-        names.extend(placed.by_table.keys().map(|t| t.name().to_owned()));
-        for name in names {
-            let wanted = placed
-                .by_table
-                .iter()
-                .find(|(t, _)| t.name() == name)
-                .map(|(_, rows)| rows.clone())
-                .unwrap_or_default();
-            self.reconcile_chunk_table(&name, wanted, paths).await?;
-        }
-        Ok(())
     }
 
     async fn mirror_claims(&self, store: &Store, scope: &Scope) -> Result<()> {
@@ -2530,7 +2459,7 @@ impl SurrealClient {
         let predicates: Vec<String> = slots.iter().map(|s| s.1.clone()).collect();
         let rows = db
             .query(
-                &claim_select(
+                &claim_select_bare(
                     "AND (c.source_path = ANY($1) OR (c.subject, c.predicate) IN
                           (SELECT s, p FROM unnest($2::text[], $3::text[]) AS k(s, p)))",
                 ),
@@ -2538,11 +2467,17 @@ impl SurrealClient {
             )
             .await
             .context("read the written notes' open claims from pgvector")?;
+        let row_paths: Vec<String> = rows.iter().map(|r| r.get::<_, String>(3)).collect();
+        let docs = self.doc_origins(&row_paths).await?;
         let written = self.surreal_written().await?;
         let gone = self.surreal_gone().await?;
+        // A claim whose note has no document row in Surreal is not copied (pg's inner join).
         let wanted: Vec<(String, String)> = rows
             .iter()
-            .map(claim_literal)
+            .filter_map(|r| {
+                let (origin, project) = docs.get(&r.get::<_, String>(3))?;
+                Some(claim_literal_of(r, origin, project))
+            })
             .filter(|(cid, _)| !written.contains(cid) && !gone.contains(cid))
             .collect();
         // One membership test, not an `OR` chain: Surreal's parser refuses a chain of ~120 terms
@@ -2568,6 +2503,25 @@ impl SurrealClient {
         self.mirror_claim_rows(store, scope, &slots).await
     }
 
+    /// `origin` and `project` of these notes from Surreal's own `document` rows (C0b1: pg no longer
+    /// receives them, so the claim copy cannot join them there).
+    async fn doc_origins(&self, paths: &[String]) -> Result<DocOrigins> {
+        let mut unique: Vec<String> = paths.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        let mut found = DocOrigins::new();
+        for batch in unique.chunks(CATCH_UP_BATCH) {
+            let sql = format!(
+                "SELECT source_path, origin, project FROM document WHERE source_path INSIDE {};",
+                texts(batch)
+            );
+            for d in first_statement(&sql, self.rows::<DocOrigin>(&sql).await?)? {
+                found.insert(d.source_path, (d.origin, d.project));
+            }
+        }
+        Ok(found)
+    }
+
     /// The same notes and slots as the vector `claim` table, but every row pg holds there, sealed
     /// ones included: a seal or unseal that moved a row of another note in the slot is in `slots`.
     /// No dirty count: this table has no HNSW index to swap.
@@ -2591,13 +2545,15 @@ impl SurrealClient {
             )
             .await
             .context("read the written notes' claim rows from pgvector")?;
+        let row_paths: Vec<String> = rows.iter().map(|r| r.get::<_, String>(3)).collect();
+        let docs = self.doc_origins(&row_paths).await?;
         let written = self.surreal_written().await?;
         let gone = self.surreal_gone().await?;
         let wanted: Vec<(String, String)> = rows
             .iter()
             .map(|r| {
                 let (key, row) = claim_row_embedded_json(r);
-                (key, row.to_string())
+                (key, with_doc_origin(row, &docs).to_string())
             })
             .filter(|(key, _)| !written.contains(key) && !gone.contains(key))
             .collect();
@@ -2651,9 +2607,14 @@ impl SurrealClient {
                 break;
             }
             offset += i64::try_from(rows.len())?;
+            let row_paths: Vec<String> = rows.iter().map(|r| r.get::<_, String>(3)).collect();
+            let docs = self.doc_origins(&row_paths).await?;
             let pg: HashMap<String, Value> = rows
                 .iter()
-                .map(claim_row_json)
+                .map(|r| {
+                    let (key, row) = claim_row_json(r);
+                    (key, with_doc_origin(row, &docs))
+                })
                 .filter(|(key, _)| !gone.contains(key))
                 .collect();
             let keys: Vec<String> = pg.keys().cloned().collect();
@@ -2900,16 +2861,16 @@ impl SurrealClient {
     /// Surreal on the next sync. A key both sides hold is not re-read, except in `claim_row`,
     /// which is compared by value. Returns `(written, deleted)`.
     pub async fn catch_up(&self, store: &Store) -> Result<(usize, usize)> {
-        let (pg_documents, pg_nodes, pg_edges) = pg_graph_keys(&*store.db().await?).await?;
+        // `document` and `chunk` are not copied: the engine writes them straight into Surreal
+        // (C0b1 bundle 1), and a key pg lacks is the row, not a stale one.
+        let (pg_nodes, pg_edges) = pg_node_edge_keys(&*store.db().await?).await?;
         let mut written = 0;
         let mut deleted = 0;
         let mut stale_edges = Vec::new();
         let mut stale_nodes = Vec::new();
-        let mut stale_documents = Vec::new();
         for (table, pg_keys, stale) in [
             ("node", pg_nodes, &mut stale_nodes),
             ("edge", pg_edges, &mut stale_edges),
-            ("document", pg_documents, &mut stale_documents),
         ] {
             let have: std::collections::HashSet<String> =
                 self.table_keys(table).await?.into_iter().collect();
@@ -2927,11 +2888,7 @@ impl SurrealClient {
                 self.upsert_rows(table, &literals).await?;
             }
         }
-        for (table, keys) in [
-            ("edge", &stale_edges),
-            ("node", &stale_nodes),
-            ("document", &stale_documents),
-        ] {
+        for (table, keys) in [("edge", &stale_edges), ("node", &stale_nodes)] {
             deleted += keys.len();
             self.delete_rows(table, keys).await?;
         }
@@ -2973,70 +2930,21 @@ impl SurrealClient {
         result
     }
 
-    /// The same key level for the vector `chunk` and `claim` tables, through the write path a
-    /// mirrored write takes (`mirror_chunks`, `mirror_claims`: project tables, claim rows and the
-    /// dirty count that schedules the HNSW swap). A key on one side only names the note (chunk) or
-    /// the `(subject, predicate)` slot (claim) to re-mirror; the mirror reads pg for that scope
-    /// and writes what it holds. Without this a seal or an insert the Python door wrote straight
-    /// to pg leaves the vector tables off by exactly those keys until the next fill. Returns
-    /// `(written, deleted)`: keys pg had and Surreal lacked, keys the other way round.
-    #[allow(clippy::too_many_lines)] // the chunk half and the claim half read one pg connection
+    /// The same key level for the vector `claim` table, through the write path a mirrored write
+    /// takes (`mirror_claims`: claim rows and the dirty count that schedules the HNSW swap). A key
+    /// on one side only names the `(subject, predicate)` slot to re-mirror; the mirror reads pg
+    /// for that scope and writes what it holds. Without this a seal or an insert the Python door
+    /// wrote straight to pg leaves the vector table off by exactly those keys until the next
+    /// fill. The vector `chunk` tables are not compared (C0b1 bundle 1: written straight into
+    /// Surreal). Returns `(written, deleted)`: keys pg had and Surreal lacked, keys the other way
+    /// round.
     async fn catch_up_vectors(&self, store: &Store) -> Result<(usize, usize)> {
         let db = store.db().await?;
         let mut written = 0;
         let mut deleted = 0;
 
-        let pg_chunks = pg_chunk_keys(&db).await?;
-        let have: std::collections::HashSet<String> =
-            self.table_keys("chunk").await?.into_iter().collect();
-        let want: std::collections::HashSet<&str> = pg_chunks.iter().map(String::as_str).collect();
-        let stale: Vec<String> = have
-            .iter()
-            .filter(|k| !want.contains(k.as_str()))
-            .cloned()
-            .collect();
-        let missing: Vec<String> = pg_chunks
-            .iter()
-            .filter(|k| !have.contains(*k))
-            .cloned()
-            .collect();
-        written += missing.len();
-        deleted += stale.len();
-        let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for batch in missing.chunks(CATCH_UP_BATCH) {
-            let ids = batch.to_vec();
-            let rows = db
-                .query(
-                    "SELECT DISTINCT source_path FROM chunk WHERE id = ANY($1);",
-                    &[&ids],
-                )
-                .await
-                .context("read the notes of the chunks Surreal lacks from pgvector")?;
-            paths.extend(rows.iter().map(|r| r.get::<_, String>(0)));
-        }
-        for batch in stale.chunks(CATCH_UP_BATCH) {
-            let query = format!(
-                "SELECT VALUE source_path FROM chunk WHERE cid INSIDE {};",
-                texts(batch)
-            );
-            let found: Vec<String> = first_statement(&query, self.rows::<String>(&query).await?)?;
-            paths.extend(found);
-        }
-        let paths: Vec<String> = paths.into_iter().collect();
-        let mirror_chunks = || async {
-            for batch in paths.chunks(CATCH_UP_BATCH) {
-                self.mirror_chunks(store, batch).await?;
-            }
-            Ok(())
-        };
-        if stale.len() > MASS_DELETE {
-            let mut tables = vec!["chunk".to_owned()];
-            tables.extend(self.project_tables().await?);
-            self.without_hnsw(&tables, mirror_chunks).await?;
-        } else {
-            mirror_chunks().await?;
-        }
-
+        // The vector `chunk` tables are not compared with pg here: the engine writes them straight
+        // into Surreal (C0b1 bundle 1).
         let pg_claims = pg_claim_keys(&db).await?;
         let have: std::collections::HashSet<String> =
             self.table_keys("claim").await?.into_iter().collect();
@@ -3160,6 +3068,10 @@ impl SurrealClient {
 
     /// Replace Surreal's chunk and open-claim tables with pgvector's, then report row count and
     /// key-set hash per table from both sides. Idempotent: a re-run starts from empty tables.
+    ///
+    /// Z4: after bundle B pg does not receive Surreal writes (document, chunk), so the rehearsal
+    /// "all-table diff 0/N" is measured after this fill aligns them right before the switch-over.
+    /// It is the switch-over tool only: no normal path calls it (`main.rs` `VectorFill`).
     #[allow(clippy::too_many_lines)] // schema DDL + two paged copies + the readback: one linear procedure
     pub async fn fill_from(&self, store: &Store) -> Result<Vec<FillTable>> {
         let dim = store.dim;
