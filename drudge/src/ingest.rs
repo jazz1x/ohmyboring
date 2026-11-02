@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use crate::config;
 use crate::frontmatter::{self, FrontMatter};
 use crate::llm::Llm;
-use crate::store::{Doc, Store};
+use crate::store::Store;
 
 /// Max embedding requests in flight per file. Caps load on a local single-GPU LLM server
 /// (Ollama/LM Studio) — going wider stops helping once the server serializes internally, and
@@ -197,7 +197,7 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         // temporal-fact claims — (subject,predicate)→value, a new value supersedes the old.
         // valid_from = document mtime (chronological ordering). value embedding via bge-m3 (no generation).
         if !front.claims.is_empty() {
-            let valid_from = Store::doc_updated_at_on(tx, path).await?;
+            let valid_from = store.doc_lookup().updated_at(tx, path).await?;
             let note_anchors = if front.project.is_empty() {
                 Vec::new()
             } else {
@@ -637,12 +637,12 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
     let (front, body) = frontmatter::parse(&data, path, cfg)?;
 
     let sha = content_sha(&data);
-    let prev = Store::get_doc_sha_on(tx, path).await?;
+    let prev = store.doc_lookup().sha(tx, path).await?;
     let verdict = judge_sha(prev.as_deref(), &data);
     if let ShaVerdict::LegacySame(new_sha) = &verdict {
         // Transition: the stored sha is the old whole-file one and the file did not change.
         // Move the sha column only — no re-embed, no edge rewrite.
-        Store::set_doc_sha_on(tx, path, new_sha).await?;
+        store.set_doc_sha_via(tx, path, new_sha).await?;
         stats.unchanged += 1;
         return Ok(FileOutcome::ShaMoved);
     }
@@ -680,22 +680,9 @@ async fn ingest_steps<C: Chunker, G: GraphExtractor, E: Embed>(
     // DO UPDATE, so overwriting them in place keeps the document with a full chunk set throughout —
     // a concurrent ask/recall never sees an empty/half-deleted window during a re-ingest. The stale
     // tail (when the new version has fewer chunks) is pruned only AFTER the new chunks are in place.
-    Store::upsert_document_on(tx, &front, &sha, mtime).await?;
-    for (i, (content, embedding)) in embedded.into_iter().enumerate() {
-        store
-            .upsert_chunk_on(
-                tx,
-                &Doc {
-                    id: format!("{path}#{i}"),
-                    content,
-                    embedding,
-                    front: front.clone(),
-                    chunk_idx: i,
-                },
-            )
-            .await?;
-    }
-    Store::prune_chunks_from_on(tx, path, pieces.len()).await?;
+    store
+        .write_note_on(tx, &front, &sha, mtime, embedded)
+        .await?;
     stats.chunks += pieces.len();
 
     // deterministic semantic graph from frontmatter (no LLM extraction).

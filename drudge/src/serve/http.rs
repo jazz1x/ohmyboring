@@ -646,7 +646,7 @@ async fn consume_in_tx(
     let mut conn = store.conn().await?;
     let tx = conn.transaction().await?;
     let old_paths: Vec<String> = req.supersedes.iter().map(|[_, old]| old.clone()).collect();
-    *refused = owner::refused_supersedes(&tx, standing, &old_paths).await?;
+    *refused = owner::refused_supersedes(store, &tx, standing, &old_paths).await?;
     let kept_pairs: Vec<[String; 2]> = req
         .supersedes
         .iter()
@@ -665,7 +665,8 @@ async fn consume_in_tx(
             } else {
                 (&empty, &handed)
             };
-            Store::record_consumption(
+            Store::record_consumption_with(
+                store.doc_lookup(),
                 &tx,
                 &req.session_id,
                 &req.observed_at,
@@ -677,7 +678,8 @@ async fn consume_in_tx(
             .await?
         }
         None => {
-            Store::record_consumption(
+            Store::record_consumption_with(
+                store.doc_lookup(),
                 &tx,
                 &req.session_id,
                 &req.observed_at,

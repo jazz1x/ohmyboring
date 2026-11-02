@@ -595,6 +595,24 @@ impl SurrealClient {
             .collect())
     }
 
+    /// `Store::owner_authored`: which of `paths` the owner wrote, in path order.
+    pub async fn owner_authored(&self, paths: &[String]) -> Result<Vec<String>> {
+        let mut owned: Vec<String> = self
+            .authors_of(paths)
+            .await?
+            .into_iter()
+            .filter(|(_, a)| a.author == "owner")
+            .map(|(path, _)| path)
+            .collect();
+        owned.sort_by(|a, b| en_us_order(a, b));
+        Ok(owned)
+    }
+
+    /// The paths among `paths` that have a `document` row (`record_gap_in_tx`'s handed notes).
+    pub async fn known_paths(&self, paths: &[String]) -> Result<HashSet<String>> {
+        Ok(self.authors_of(paths).await?.into_keys().collect())
+    }
+
     async fn authors_of(&self, paths: &[String]) -> Result<HashMap<String, AuthorRow>> {
         let mut found = HashMap::new();
         for batch in paths.chunks(IN_BATCH) {

@@ -403,6 +403,22 @@ fn front(path: &str, project: &str, origin: &str) -> FrontMatter {
     }
 }
 
+/// The engine's note write on the Surreal route: document and chunks go into Surreal only.
+async fn put_note(
+    routed: &Store,
+    fm: &FrontMatter,
+    mtime: SystemTime,
+    chunks: Vec<(String, Vec<f32>)>,
+) {
+    let mut conn = routed.conn().await.unwrap();
+    let tx = conn.transaction().await.unwrap();
+    routed
+        .write_note_on(&tx, fm, "sha", mtime, chunks)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn chunk_and_claim_reads_equal_pg_over_the_same_rows() {
@@ -613,20 +629,13 @@ async fn a_claim_written_only_into_surreal_is_read_back_without_pg() {
     let path = format!("/vault/wiki/z2r-only-{n}.md");
     let fm = front(&path, "z2r-only", "personal");
     let emb = tilted(1, 0.95, 7);
-    routed
-        .upsert_document(&fm, "sha", SystemTime::now())
-        .await
-        .unwrap();
-    routed
-        .upsert_chunk(&Doc {
-            id: format!("{path}#0"),
-            content: "only in surreal".to_string(),
-            embedding: emb.clone(),
-            front: fm,
-            chunk_idx: 0,
-        })
-        .await
-        .unwrap();
+    put_note(
+        &routed,
+        &fm,
+        SystemTime::now(),
+        vec![("only in surreal".to_string(), emb.clone())],
+    )
+    .await;
     routed
         .upsert_claim_with_anchor(
             &format!("only-{n}"),
@@ -700,14 +709,13 @@ async fn stalled_and_north_star_reads_see_a_claim_only_surreal_holds() {
     .enumerate()
     {
         let path = format!("/vault/wiki/z2rb-only-{n}-{i}.md");
-        routed
-            .upsert_document(
-                &front(&path, &project, "personal"),
-                "sha",
-                SystemTime::now(),
-            )
-            .await
-            .unwrap();
+        put_note(
+            &routed,
+            &front(&path, &project, "personal"),
+            SystemTime::now(),
+            Vec::new(),
+        )
+        .await;
         routed
             .upsert_claim_with_anchor(
                 &subject,

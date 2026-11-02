@@ -8,11 +8,11 @@
 //!   cargo test --test vector_surreal_project_tables -- --ignored --nocapture --test-threads=1
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_lines)]
 
-use std::time::SystemTime;
-
 use drudge::config::SurrealConfig;
 use drudge::frontmatter::FrontMatter;
-use drudge::store::{Doc, ProjectTable, ProjectTableError, Store, SurrealClient, VectorRoute};
+use drudge::store::{
+    NoteChunk, NoteWrite, ProjectTable, ProjectTableError, Store, SurrealClient, VectorRoute,
+};
 use drudge::vector::VectorIndex;
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
@@ -39,7 +39,9 @@ fn front(path: &str, project: &str) -> FrontMatter {
 struct Fixture {
     store: Store,
     client: SurrealClient,
-    db: tokio_postgres::Client,
+    /// The notes written so far, path -> project: what the chunk tables must hold. (pg no longer
+    /// receives them: C0b1 writes document and chunk straight into Surreal.)
+    notes: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 async fn fixture(namespace: &str) -> Fixture {
@@ -59,27 +61,45 @@ async fn fixture(namespace: &str) -> Fixture {
     Fixture {
         store: pg.with_vector_route(VectorRoute::Surreal(client.clone())),
         client,
-        db,
+        notes: std::sync::Mutex::new(std::collections::BTreeMap::new()),
     }
 }
 
 impl Fixture {
     async fn note(&self, path: &str, project: &str, hot: usize) {
         let front = front(path, project);
-        self.store
-            .upsert_document(&front, "sha", SystemTime::now())
-            .await
-            .expect("document");
-        self.store
-            .upsert_chunk(&Doc {
-                id: format!("{path}#0"),
-                content: format!("chunk of {path}"),
-                embedding: vec_at(hot),
-                front,
-                chunk_idx: 0,
+        let id = format!("{path}#0");
+        let content = format!("chunk of {path}");
+        let embedding = vec_at(hot);
+        let chunks = [NoteChunk {
+            id: &id,
+            content: &content,
+            embedding: &embedding,
+        }];
+        self.client
+            .write_note(&NoteWrite {
+                path,
+                origin: &front.origin,
+                project: &front.project,
+                kind: &front.kind,
+                title: front.title.as_deref(),
+                tags: &front.tags,
+                sha: "sha",
+                author: "unknown",
+                updated_us: 1_700_000_000_000_000,
+                chunks: &chunks,
+                dim: DIM,
             })
             .await
-            .expect("chunk");
+            .expect("document and chunk");
+        self.notes
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), project.to_owned());
+    }
+
+    fn forget(&self, path: &str) {
+        self.notes.lock().unwrap().remove(path);
     }
 
     async fn cids(&self, sql: &str) -> Vec<String> {
@@ -93,17 +113,14 @@ impl Fixture {
         cids
     }
 
-    async fn pg_cids(&self, project: Option<&str>) -> Vec<String> {
+    fn expected_cids(&self, project: Option<&str>) -> Vec<String> {
         let mut cids: Vec<String> = self
-            .db
-            .query(
-                "SELECT id FROM chunk WHERE $1::text IS NULL OR project = $1",
-                &[&project],
-            )
-            .await
+            .notes
+            .lock()
             .unwrap()
             .iter()
-            .map(|r| r.get(0))
+            .filter(|(_, p)| project.is_none_or(|want| p.as_str() == want))
+            .map(|(path, _)| format!("{path}#0"))
             .collect();
         cids.sort();
         cids
@@ -149,30 +166,31 @@ async fn mirror_keeps_global_and_project_tables_equal() {
     println!(
         "global {}/{} alpha {}/{} beta {}/{}",
         global.len(),
-        f.pg_cids(None).await.len(),
+        f.expected_cids(None).len(),
         alpha.len(),
-        f.pg_cids(Some("alpha")).await.len(),
+        f.expected_cids(Some("alpha")).len(),
         beta.len(),
-        f.pg_cids(Some("beta")).await.len()
+        f.expected_cids(Some("beta")).len()
     );
-    assert_eq!(global, f.pg_cids(None).await);
-    assert_eq!(alpha, f.pg_cids(Some("alpha")).await);
-    assert_eq!(beta, f.pg_cids(Some("beta")).await);
+    assert_eq!(global, f.expected_cids(None));
+    assert_eq!(alpha, f.expected_cids(Some("alpha")));
+    assert_eq!(beta, f.expected_cids(Some("beta")));
 
     // A note changes project and another is deleted: reconcile reaches the project tables.
     f.note("/v/a2.md", "beta", 2).await;
     f.store.delete_document("/v/a1.md").await.expect("delete");
+    f.forget("/v/a1.md");
     assert_eq!(
         f.cids("SELECT cid FROM chunk_p_alpha;").await,
-        f.pg_cids(Some("alpha")).await
+        f.expected_cids(Some("alpha"))
     );
     assert_eq!(
         f.cids("SELECT cid FROM chunk_p_beta;").await,
-        f.pg_cids(Some("beta")).await
+        f.expected_cids(Some("beta"))
     );
     assert_eq!(
         f.cids("SELECT cid FROM chunk;").await,
-        f.pg_cids(None).await
+        f.expected_cids(None)
     );
 
     // A project whose table appears after its notes were written is created whole.
@@ -183,7 +201,7 @@ async fn mirror_keeps_global_and_project_tables_equal() {
     f.note("/v/b2.md", "beta", 5).await;
     assert_eq!(
         f.cids("SELECT cid FROM chunk_p_beta;").await,
-        f.pg_cids(Some("beta")).await,
+        f.expected_cids(Some("beta")),
         "a recreated project table holds every chunk of the project, not only the new one"
     );
 }

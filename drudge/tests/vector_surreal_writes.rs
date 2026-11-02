@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use drudge::config::{BoringConfig, SurrealConfig};
 use drudge::frontmatter::FrontMatter;
 use drudge::ingest::{DefaultChunker, Embed, FrontmatterGraphExtractor, ingest_file_with};
-use drudge::store::{Doc, Scope, Store, SurrealClient, VectorRoute};
+use drudge::store::{Doc, NoteChunk, NoteWrite, Scope, Store, SurrealClient, VectorRoute};
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
@@ -56,7 +56,13 @@ struct Fixture {
     client: SurrealClient,
     db: tokio_postgres::Client,
     nanos: u128,
+    /// path -> (front matter, sha, chunk indexes): what each note holds, so every write can send
+    /// Surreal the note's whole set (`write_note`). pg gets the same rows through `pg_store`, which
+    /// stays the oracle the comparisons read.
+    notes: std::sync::Mutex<std::collections::BTreeMap<String, HeldNote>>,
 }
+
+type HeldNote = (FrontMatter, String, Vec<usize>);
 
 /// Empty pg, empty Surreal tables (one fill of nothing defines them), a store routed to Surreal.
 async fn fixture(namespace: &str) -> Fixture {
@@ -82,6 +88,7 @@ async fn fixture(namespace: &str) -> Fixture {
         client,
         db,
         nanos,
+        notes: std::sync::Mutex::new(std::collections::BTreeMap::new()),
     }
 }
 
@@ -97,15 +104,67 @@ fn front(path: &str) -> FrontMatter {
 }
 
 impl Fixture {
-    async fn doc(&self, path: &str) {
-        self.store
-            .upsert_document(&front(path), "sha", SystemTime::now())
+    /// Send Surreal the note as the fixture holds it (document + all its chunks, one transaction),
+    /// then copy the graph and claims pg holds for it.
+    async fn put(&self, path: &str) {
+        let (fm, sha, positions) = self.notes.lock().unwrap().get(path).cloned().unwrap();
+        let ids: Vec<String> = positions.iter().map(|i| format!("{path}#{i}")).collect();
+        let contents: Vec<String> = positions.iter().map(|i| format!("chunk {i}")).collect();
+        let embeddings: Vec<Vec<f32>> = positions.iter().map(|i| vec_at(i + 1)).collect();
+        let chunks: Vec<NoteChunk<'_>> = (0..positions.len())
+            .map(|k| NoteChunk {
+                id: &ids[k],
+                content: &contents[k],
+                embedding: &embeddings[k],
+            })
+            .collect();
+        let author = String::from(fm.author.clone());
+        self.client
+            .write_note(&NoteWrite {
+                path,
+                origin: &fm.origin,
+                project: &fm.project,
+                kind: &fm.kind,
+                title: fm.title.as_deref(),
+                tags: &fm.tags,
+                sha: &sha,
+                author: &author,
+                updated_us: 1_700_000_000_000_000,
+                chunks: &chunks,
+                dim: DIM,
+            })
             .await
-            .expect("document");
+            .expect("surreal document and chunks");
+        self.store
+            .mirror_surreal(&Scope::notes([path.to_owned()]))
+            .await
+            .expect("mirror graph and claims");
+    }
+
+    async fn doc(&self, path: &str) {
+        self.doc_fm(&front(path), "sha").await;
+    }
+
+    async fn doc_fm(&self, fm: &FrontMatter, sha: &str) {
+        self.pg_store
+            .upsert_document(fm, sha, SystemTime::now())
+            .await
+            .expect("pg document");
+        let path = fm.source_path.clone();
+        self.notes
+            .lock()
+            .unwrap()
+            .entry(path.clone())
+            .and_modify(|n| {
+                n.0 = fm.clone();
+                sha.clone_into(&mut n.1);
+            })
+            .or_insert((fm.clone(), sha.to_owned(), Vec::new()));
+        self.put(&path).await;
     }
 
     async fn chunk(&self, path: &str, idx: usize) {
-        self.store
+        self.pg_store
             .upsert_chunk(&Doc {
                 id: format!("{path}#{idx}"),
                 content: format!("chunk {idx}"),
@@ -114,7 +173,70 @@ impl Fixture {
                 chunk_idx: idx,
             })
             .await
-            .expect("chunk");
+            .expect("pg chunk");
+        self.notes
+            .lock()
+            .unwrap()
+            .get_mut(path)
+            .unwrap()
+            .2
+            .push(idx);
+        self.put(path).await;
+    }
+
+    async fn set_sha(&self, path: &str, sha: &str) {
+        self.pg_store.set_doc_sha(path, sha).await.expect("pg sha");
+        self.store
+            .set_doc_sha(path, sha)
+            .await
+            .expect("surreal sha");
+        sha.clone_into(&mut self.notes.lock().unwrap().get_mut(path).unwrap().1);
+    }
+
+    async fn prune(&self, path: &str, from: usize) {
+        self.pg_store
+            .prune_chunks_from(path, from)
+            .await
+            .expect("pg prune");
+        self.notes
+            .lock()
+            .unwrap()
+            .get_mut(path)
+            .unwrap()
+            .2
+            .retain(|i| *i < from);
+        self.put(path).await;
+    }
+
+    async fn set_legacy_sha(&self, path: &str, sha: &str) {
+        self.store
+            .set_doc_sha(path, sha)
+            .await
+            .expect("surreal sha");
+    }
+
+    async fn surreal_sha(&self, path: &str) -> String {
+        let rows = self
+            .client
+            .run(&format!(
+                "SELECT VALUE sha FROM document WHERE source_path = \"{path}\";"
+            ))
+            .await
+            .unwrap();
+        let rows: Vec<Vec<Value>> = serde_json::from_value(Value::Array(rows)).unwrap();
+        rows[0][0].as_str().unwrap().to_owned()
+    }
+
+    async fn delete(&self, path: &str) {
+        self.pg_store
+            .delete_document(path)
+            .await
+            .expect("pg delete");
+        self.store
+            .delete_document(path)
+            .await
+            .expect("surreal delete");
+        self.notes.lock().unwrap().remove(path);
     }
 
     async fn claim(&self, path: &str, subject: &str, kind: &str, hours_ago: u64) {
@@ -307,7 +429,7 @@ async fn upsert_supersede_and_delete_leave_the_two_stores_with_the_same_ids() {
     f.assert_same("after upsert", 2, 2).await;
 
     // the sha-only move (legacy sha -> content hash) reaches the Surreal document too
-    f.store.set_doc_sha(&a, "sha-moved").await.expect("sha");
+    f.set_sha(&a, "sha-moved").await;
     f.assert_same("after set_doc_sha", 2, 2).await;
 
     // supersede by a later fact in the same slot, from another note: pg seals a's fact
@@ -325,12 +447,12 @@ async fn upsert_supersede_and_delete_leave_the_two_stores_with_the_same_ids() {
     f.assert_same("after b superseded a", 3, 1).await;
 
     // delete: a chunk tail, then a document (its chunks go by CASCADE, its claims explicitly)
-    f.store.prune_chunks_from(&a, 1).await.expect("prune tail");
+    f.prune(&a, 1).await;
     f.assert_same("after pruning a#1", 2, 1).await;
-    f.store.delete_document(&a).await.expect("delete a");
+    f.delete(&a).await;
     f.assert_same("after deleting a (CASCADE chunks)", 1, 1)
         .await;
-    f.store.delete_document(&b).await.expect("delete b");
+    f.delete(&b).await;
     f.assert_same("after deleting b", 0, 0).await;
 }
 
@@ -357,7 +479,24 @@ async fn sync_of_a_note_file_writes_surreal_too() {
     )
     .await
     .expect("ingest");
-    f.assert_same("after sync of one note", 1, 1).await;
+    // New contract (C0b1): the engine wrote the note's document and chunk into Surreal only; pg
+    // holds neither, and the claim (copied from pg) is in both.
+    let [(pg_chunks, s_chunks), (pg_claims, s_claims)] = f.id_sets().await;
+    assert!(
+        pg_chunks.is_empty(),
+        "pg must not receive the chunk: {pg_chunks:?}"
+    );
+    assert_eq!(s_chunks.len(), 1, "Surreal holds the chunk: {s_chunks:?}");
+    assert_eq!(pg_claims, s_claims, "open claim ids differ");
+    assert_eq!(pg_claims.len(), 1);
+    let pg_docs: i64 =
+        f.db.query_one("SELECT count(*) FROM document", &[])
+            .await
+            .unwrap()
+            .get(0);
+    assert_eq!(pg_docs, 0, "pg must not receive the document row");
+    let (_, surreal_docs) = f.document_rows().await;
+    assert_eq!(surreal_docs.len(), 1, "Surreal holds the document row");
 }
 
 impl Fixture {
@@ -437,18 +576,12 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
     // document: project node + in_project edge, topic nodes + tagged edges
     let mut fm = front(&a);
     fm.tags = vec!["t1".to_string(), "t2".to_string()];
-    f.store
-        .upsert_document(&fm, "sha", SystemTime::now())
-        .await
-        .expect("document with tags");
+    f.doc_fm(&fm, "sha").await;
     f.assert_graph_same("after a tagged document", 3, 3).await;
 
     // a re-written document with one tag fewer: the dropped tagged edge leaves Surreal too
     fm.tags = vec!["t1".to_string()];
-    f.store
-        .upsert_document(&fm, "sha2", SystemTime::now())
-        .await
-        .expect("document with fewer tags");
+    f.doc_fm(&fm, "sha2").await;
     f.assert_graph_same("after a tag was dropped", 3, 2).await;
 
     // semantic entities
@@ -517,8 +650,8 @@ async fn node_and_edge_writes_leave_the_two_stores_with_the_same_rows() {
     assert!(s_nodes.iter().any(|n| n.starts_with("gap:")), "{s_nodes:?}");
 
     // delete + GC: the note's edges leave, then the orphans nobody points at leave
-    f.store.delete_document(&a).await.expect("delete a");
-    f.store.delete_document(&b).await.expect("delete b");
+    f.delete(&a).await;
+    f.delete(&b).await;
     f.store.gc_orphans().await.expect("gc");
     let [(pg_nodes, s_nodes), (pg_edges, s_edges)] = f.graph_rows().await;
     assert_eq!(pg_nodes, s_nodes, "after gc: node rows differ");
@@ -546,34 +679,17 @@ async fn a_legacy_sha_move_reaches_the_surreal_document() {
     let (first, _) = ingest().await.expect("first ingest");
     assert_eq!(first, FileOutcome::New);
 
-    // The old stored sha: the whole file's hash. pg and Surreal both hold it before the move.
+    // The old stored sha: the whole file's hash, put into the Surreal document (pg has no row).
     let legacy = hex::encode(sha2::Sha256::digest(text.as_bytes()));
-    f.db.execute(
-        "UPDATE document SET sha = $2 WHERE source_path = $1",
-        &[&path_s, &legacy],
-    )
-    .await
-    .unwrap();
-    f.store
-        .mirror_surreal(&drudge::store::Scope::notes([path_s.clone()]))
-        .await
-        .expect("mirror the legacy sha");
-    f.assert_same("legacy sha in both stores", 1, 0).await;
+    f.set_legacy_sha(&path_s, &legacy).await;
+    assert_eq!(f.surreal_sha(&path_s).await, legacy);
 
     let (second, _) = ingest().await.expect("second ingest");
     assert_eq!(second, FileOutcome::ShaMoved);
-    f.assert_same("after the sha move", 1, 0).await;
-    let moved: String =
-        f.db.query_one(
-            "SELECT sha FROM document WHERE source_path = $1",
-            &[&path_s],
-        )
-        .await
-        .unwrap()
-        .get(0);
+    let moved = f.surreal_sha(&path_s).await;
     assert_ne!(
         moved, legacy,
-        "pg sha must have moved off the whole-file hash"
+        "the Surreal sha must have moved off the whole-file hash"
     );
 }
 
@@ -591,10 +707,10 @@ async fn rows_written_straight_to_pg_reach_surreal_on_catch_up() {
         .await
         .expect("fill of an empty graph");
     let path = format!("/vault/wiki/py-{}.md", f.nanos);
+    // C0b1: node and edge are still copied; document and chunk are not (the engine writes those
+    // into Surreal), so no document row is inserted here.
     f.db.batch_execute(&format!(
-        "INSERT INTO document (source_path, origin, project, kind, title, tags, sha, updated_at, author)
-           VALUES ('{path}', 'personal', 'writes', 'note', 'py', '{{}}', 'sha', now(), 'inferred');
-         INSERT INTO node (id, kind, label, outcome) VALUES ('gap:py-{n}', 'gap', 'q', 'missing'),
+        "INSERT INTO node (id, kind, label, outcome) VALUES ('gap:py-{n}', 'gap', 'q', 'missing'),
                                                             ('session:py-{n}', 'session', 't', NULL);
          INSERT INTO edge (src, dst, kind, judge) VALUES ('session:py-{n}', 'gap:py-{n}', 'gap', NULL),
                                                          ('gap:py-{n}', 'doc:{path}', 'gap_handed', 'owner');",
@@ -603,11 +719,9 @@ async fn rows_written_straight_to_pg_reach_surreal_on_catch_up() {
     .await
     .unwrap();
     let (written, deleted) = f.store.catch_up_surreal().await.expect("catch up");
-    assert_eq!((written, deleted), (5, 0));
+    assert_eq!((written, deleted), (4, 0));
     f.assert_graph_same("after catch-up of python-door rows", 2, 2)
         .await;
-    let (pg_docs, surreal_docs) = f.document_rows().await;
-    assert_eq!(pg_docs, surreal_docs, "document rows differ");
 
     // a row only Surreal holds leaves on the next catch-up
     f.db.batch_execute("DELETE FROM edge; DELETE FROM node;")
@@ -658,7 +772,7 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
 
     let session = format!("s-dead-{nanos}");
     let err = store
-        .handover_in_tx(&session, "2026-10-30", std::slice::from_ref(&path))
+        .handover_in_tx(&session, "2026-10-30", &[])
         .await
         .expect_err("a graph-only write must not swallow a dead Surreal either");
     assert!(
@@ -714,9 +828,11 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
     )
     .await
     .expect_err("sync result must carry the Surreal failure");
+    // New contract (C0b1): the document and chunks are written to Surreal before the pg
+    // transaction commits, so a dead Surreal fails the note with nothing committed in pg.
     assert!(
-        err.to_string().contains(BEHIND),
-        "sync error must carry the 2b-2 sentence, got: {err:#}"
+        !err.to_string().contains(BEHIND),
+        "pg holds nothing, so the sentence must not say it does: {err:#}"
     );
     let note_rows: i64 = db
         .query_one(
@@ -726,5 +842,5 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(note_rows, 1, "pg committed the note before Surreal failed");
+    assert_eq!(note_rows, 0, "pg must hold no document row of the note");
 }

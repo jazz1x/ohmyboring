@@ -363,20 +363,19 @@ async fn main() -> Result<()> {
                     source_path: (*id).to_owned(),
                     ..Default::default()
                 };
-                // chunk.source_path REFERENCES document(source_path) — call upsert_document
-                // first to guarantee the parent record so the FK is satisfied.
+                // The ingest write path, so backend=surreal stores where vector_search reads.
+                let mut conn = store.conn().await?;
+                let tx = conn.transaction().await.context("begin selftest write")?;
                 store
-                    .upsert_document(&front, "selftest", std::time::SystemTime::now())
+                    .write_note_on(
+                        &tx,
+                        &front,
+                        "selftest",
+                        std::time::SystemTime::now(),
+                        vec![((*text).to_owned(), emb)],
+                    )
                     .await?;
-                store
-                    .upsert_chunk(&store::Doc {
-                        id: (*id).into(),
-                        content: (*text).into(),
-                        embedding: emb,
-                        front,
-                        chunk_idx: 0,
-                    })
-                    .await?;
+                tx.commit().await.context("commit selftest write")?;
             }
 
             let query = "how to use vectors and graphs in a database";
@@ -390,7 +389,7 @@ async fn main() -> Result<()> {
             }
             // GOAL check: the 'db' document must rank first (semantically closest to the query)
             match hits.first() {
-                Some(h) if h.id == "doc:db" => {
+                Some(h) if h.id == "doc:db#0" => {
                     println!("✅ ranking correct (doc:db #1) — vector search OK");
                 }
                 Some(h) => println!("⚠️ #1 is not doc:db: {} — check embedding/distance", h.id),
