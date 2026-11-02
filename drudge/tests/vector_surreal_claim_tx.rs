@@ -14,12 +14,15 @@
     clippy::unwrap_used,
     clippy::many_single_char_names,
     clippy::too_many_lines,
-    clippy::cast_possible_wrap
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
 )]
 
 use drudge::config::SurrealConfig;
 use drudge::split_subjects::Merged;
-use drudge::store::{ClaimWrite, SplitStanding, Store, SurrealClient, TxPlace};
+use drudge::store::{ClaimWrite, SplitStanding, Store, SurrealClient, TxPlace, VectorRoute};
+use drudge::vector::VectorIndex;
 use serde_json::{Value, json};
 
 const DIM: usize = 1024;
@@ -1091,4 +1094,101 @@ async fn a_seal_replans_when_a_spelling_of_its_group_is_swapped_under_it() {
         failures.len(),
         failures.first()
     );
+}
+
+/// A vector no two values of `seed` share: the promoted row must come back with its own floats,
+/// not with the fixed `emb()` every other fixture writes.
+fn emb_of(seed: f32) -> Vec<f32> {
+    (0..DIM).map(|i| ((i as f32) * 0.37 + seed).sin()).collect()
+}
+
+async fn put_with(
+    c: &SurrealClient,
+    subject: &str,
+    path: &str,
+    vf: i64,
+    e: &[f32],
+) -> anyhow::Result<()> {
+    c.claim_slot_upsert(&ClaimWrite {
+        subject,
+        predicate: "goal",
+        value: "a long enough value to count as a statement",
+        source_path: path,
+        valid_from_us: vf,
+        embedding: e,
+        kind: "fact",
+        confidence: "certain",
+        anchor: None,
+        anchor_hash: None,
+        anchor_symbol: None,
+    })
+    .await
+}
+
+/// Z2② (a)(b): a row sealed by a newer note comes back when that note is retired, with the
+/// embedding it was written with, and the claim vector search finds it. pg keeps the embedding on
+/// the sealed row (`store.rs` claim table), so promotion there only clears `superseded_at`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_sealed_row_promoted_again_is_in_the_vector_claim_search() {
+    let c = client("z2b_promote").await;
+    let tag = "z2b-promote";
+    let (a, b, third) = (
+        format!("/v/a-{tag}.md"),
+        format!("/v/b-{tag}.md"),
+        format!("/v/c-{tag}.md"),
+    );
+    for p in [&a, &b, &third] {
+        doc(&c, p, "agent").await;
+    }
+    let (ea, eb) = (emb_of(1.0), emb_of(2.0));
+    put_with(&c, tag, &a, 100, &ea).await.unwrap();
+    put_with(&c, tag, &b, 200, &eb).await.unwrap();
+    let sealed = shape(&c, tag).await;
+    assert_eq!(sealed[0].3, Some(200), "older row sealed by the newer one");
+    assert_eq!(
+        open_vector_claims(&c, tag).await,
+        1,
+        "only the newer row is open"
+    );
+
+    supersedes(&c, &third, &b).await;
+    c.seal_note(&third, &b).await.unwrap();
+    let after = shape(&c, tag).await;
+    assert_eq!(after[0].3, None, "older row promoted");
+    assert!(after[1].3.is_some(), "retired note's row sealed");
+
+    let store = Store::open(&env("BORING_TEST_DATABASE_URL"), DIM)
+        .await
+        .expect("open store")
+        .with_vector_route(VectorRoute::Surreal(c.clone()));
+    let hits = store
+        .current_claims(&ea, 50, &[], None, None, None, false)
+        .await
+        .unwrap();
+    let ours: Vec<_> = hits
+        .iter()
+        .filter(|h| h.claim.subject == tag)
+        .map(|h| (h.claim.predicate.clone(), h.claim.value.clone()))
+        .collect();
+    assert_eq!(
+        ours.len(),
+        1,
+        "claim vector search returns the promoted row: {ours:?}"
+    );
+
+    let answer = c
+        .run(&format!(
+            "SELECT VALUE embedding FROM claim WHERE subject = {} AND valid_from_us = 100;",
+            json!(tag)
+        ))
+        .await
+        .unwrap();
+    let got: Vec<f32> = answer[0]
+        .get(0)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|v| v.as_f64().unwrap() as f32).collect())
+        .unwrap_or_default();
+    println!("Z2b promoted_embedding_equal={}/1", usize::from(got == ea));
+    assert_eq!(got, ea, "promoted embedding equals the one written");
 }

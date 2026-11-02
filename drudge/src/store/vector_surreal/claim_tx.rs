@@ -184,6 +184,17 @@ LET $src_docs = SELECT VALUE source_path FROM document WHERE source_path INSIDE 
 LET $owners = SELECT VALUE source_path FROM document WHERE author = 'owner' AND source_path INSIDE array::union($paths, $srcs);
 LET $retired = SELECT VALUE string::slice(dst, 4) FROM edge WHERE kind = 'supersedes' AND dst INSIDE $dsts AND string::slice(src, 4) INSIDE $src_docs AND (string::slice(src, 4) INSIDE $owners OR !(string::slice(dst, 4) INSIDE $owners));";
 
+/// Open rows of `$slots` missing from `claim` are put back from `claim_row` with their stored
+/// embedding: pg keeps it on a sealed row, so a promoted row returns with its own floats.
+/// `$force` is the row written now, put in even if present (its embedding may be new).
+const OPEN_ROWS_TO_CLAIM: &str = "\
+LET $have = SELECT VALUE cid FROM claim WHERE [subject, predicate] INSIDE $slots;
+FOR $r IN (SELECT * FROM claim_row WHERE [subject, predicate] INSIDE $slots AND superseded_us = NONE AND embedding != NONE AND origin != NONE AND project != NONE AND (cid = $force OR !(cid INSIDE $have))) {
+    UPSERT type::record('claim', $r.cid) CONTENT {cid: $r.cid, subject: $r.subject, predicate: $r.predicate,
+        valid_from_us: $r.valid_from_us, source_path: $r.source_path, origin: $r.origin, project: $r.project,
+        kind: $r.kind, anchor: $r.anchor, stale_us: $r.stale_us, embedding: $r.embedding};
+};";
+
 fn slot_sql(w: &ClaimWrite<'_>) -> String {
     let cid = text(&claim_key(w.subject, w.predicate, w.valid_from_us));
     let (s, p, sp) = (text(w.subject), text(w.predicate), text(w.source_path));
@@ -212,27 +223,21 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
              }};"
         )
     };
-    let vector_anchor = w
-        .anchor
-        .map_or_else(String::new, |a| format!("anchor: {},", text(a)));
     format!(
         "{guards}
+         LET $force = {cid};
          {BUMP_GUARDS}
          {slots}
          LET $d = (SELECT origin, project FROM document WHERE source_path = {sp})[0];
          UPSERT type::record('claim_row', {cid}) SET cid = {cid}, subject = {s}, predicate = {p},
              value = {value}, source_path = {sp}, valid_from_us = {vf}, kind = {kind},
              confidence = {conf}, anchor = {anchor}, anchor_hash = {ah}, anchor_symbol = {asym},
-             era = {era}, origin = $d.origin, project = $d.project, via = 'surreal';
+             era = {era}, origin = $d.origin, project = $d.project, via = 'surreal',
+             embedding = {emb};
          {RETIRED_LETS}
          {seal}
          DELETE claim WHERE subject = {s} AND predicate = {p} AND cid INSIDE (SELECT VALUE cid FROM claim_row WHERE subject = {s} AND predicate = {p} AND superseded_us != NONE);
-         IF $d != NONE AND (SELECT VALUE superseded_us FROM ONLY type::record('claim_row', {cid})) = NONE {{
-             LET $row = SELECT * FROM ONLY type::record('claim_row', {cid});
-             UPSERT type::record('claim', {cid}) CONTENT {{cid: {cid}, subject: {s}, predicate: {p},
-                 valid_from_us: {vf}, source_path: {sp}, origin: $d.origin, project: $d.project,
-                 kind: {kind}, {vector_anchor} stale_us: $row.stale_us, embedding: {emb}}};
-         }};",
+         {OPEN_ROWS_TO_CLAIM}",
         value = text(w.value),
         vf = w.valid_from_us,
         kind = text(w.kind),
@@ -345,6 +350,8 @@ fn note_sql(newer: &str, older: &str, plan: &NotePlan) -> String {
                  UPDATE claim_row SET superseded_us = NONE, via = 'surreal' WHERE [subject, predicate] INSIDE $g.o AND kind = 'fact' AND superseded_us != NONE AND valid_from_us = $lo[0];
              }};
          }};
+         LET $force = NONE;
+         {OPEN_ROWS_TO_CLAIM}
          RETURN array::len($sealed);",
         stale = text(SPLIT_STALE),
     )
@@ -426,6 +433,7 @@ impl SurrealClient {
             .get_or_try_init(|| async {
                 self.run(
                     "DEFINE FIELD IF NOT EXISTS via ON claim_row TYPE option<string>;
+                     DEFINE FIELD IF NOT EXISTS embedding ON claim_row TYPE option<array<float>>;
                      DEFINE FIELD IF NOT EXISTS via ON document TYPE option<string>;
                      DEFINE TABLE IF NOT EXISTS claim_gone SCHEMALESS;",
                 )

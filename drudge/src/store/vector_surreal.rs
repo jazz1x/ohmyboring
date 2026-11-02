@@ -1384,20 +1384,41 @@ fn document_literal(r: &Row) -> (String, String) {
 
 /// Every pg `claim` row, sealed ones included, with the origin and project of its note. The
 /// `claim` table above holds only open, embedded claims for the vector search; this one is the
-/// copy the registers read, so it keeps `superseded_at` and drops the embedding. A separate table,
+/// copy the registers read, so it keeps `superseded_at`. Its embedding is read by
+/// `claim_row_embedded_select` only: the whole-table compare (`claim_row_diff`) must not page
+/// 4 KB of floats per row. A separate table,
 /// so `swap_if_changed` (a fixed list of HNSW tables) never sees it and its index is untouched.
 /// A claim whose note has no `document` row keeps `origin`/`project` unset: the register join
 /// would drop it, and the register query here requires `origin` to exist.
 fn claim_row_select(tail: &str) -> String {
+    claim_row_select_with("", tail)
+}
+
+/// `claim_row_select` plus `c.embedding` as column 17: pg keeps the embedding on sealed rows too,
+/// and a sealed row promoted again in Surreal needs it to re-enter the vector `claim` table.
+fn claim_row_embedded_select(tail: &str) -> String {
+    claim_row_select_with(", c.embedding", tail)
+}
+
+fn claim_row_select_with(extra: &str, tail: &str) -> String {
     format!(
         "SELECT c.subject, c.predicate, c.value, c.source_path, {valid}, {sealed}, c.kind,
                 c.confidence, c.anchor, {stale}, c.stale_reason, c.era, c.anchor_hash,
-                c.anchor_symbol, c.said_by, d.origin, d.project
+                c.anchor_symbol, c.said_by, d.origin, d.project{extra}
            FROM claim c LEFT JOIN document d ON d.source_path = c.source_path {tail}",
         valid = epoch_us("c.valid_from"),
         sealed = epoch_us("c.superseded_at"),
         stale = epoch_us("c.stale_at"),
     )
+}
+
+/// `claim_row_json` of a `claim_row_embedded_select` row, with `embedding` when pg holds one.
+fn claim_row_embedded_json(r: &Row) -> (String, Value) {
+    let (key, mut row) = claim_row_json(r);
+    if let Some(e) = r.get::<_, Option<Vector>>(17) {
+        row["embedding"] = json!(e.as_slice());
+    }
+    (key, row)
 }
 
 /// `(key, row)` of one `claim_row_select` row; a NULL column is left out of the object, which is
@@ -1461,6 +1482,7 @@ const CLAIM_ROW_DDL: &str = "DEFINE TABLE claim_row SCHEMAFULL;
          DEFINE FIELD origin ON claim_row TYPE option<string>;
          DEFINE FIELD project ON claim_row TYPE option<string>;
          DEFINE FIELD via ON claim_row TYPE option<string>;
+         DEFINE FIELD embedding ON claim_row TYPE option<array<float>>;
          DEFINE INDEX claim_row_path ON claim_row FIELDS source_path;
          DEFINE INDEX claim_row_slot ON claim_row FIELDS subject, predicate;";
 
@@ -2560,7 +2582,7 @@ impl SurrealClient {
             .db()
             .await?
             .query(
-                &claim_row_select(
+                &claim_row_embedded_select(
                     "WHERE c.source_path = ANY($1) OR (c.subject, c.predicate) IN
                           (SELECT s, p FROM unnest($2::text[], $3::text[]) AS k(s, p))",
                 ),
@@ -2573,7 +2595,7 @@ impl SurrealClient {
         let wanted: Vec<(String, String)> = rows
             .iter()
             .map(|r| {
-                let (key, row) = claim_row_json(r);
+                let (key, row) = claim_row_embedded_json(r);
                 (key, row.to_string())
             })
             .filter(|(key, _)| !written.contains(key) && !gone.contains(key))
@@ -2636,7 +2658,16 @@ impl SurrealClient {
             let keys: Vec<String> = pg.keys().cloned().collect();
             let query = format!("SELECT * FROM claim_row WHERE cid INSIDE {};", texts(&keys));
             let found: Vec<Value> = first_statement(&query, self.rows::<Value>(&query).await?)?;
-            let surreal: HashMap<String, Value> = found.into_iter().map(without_id).collect();
+            let surreal: HashMap<String, Value> = found
+                .into_iter()
+                .map(without_id)
+                .map(|(key, mut row)| {
+                    if let Some(o) = row.as_object_mut() {
+                        o.remove("embedding");
+                    }
+                    (key, row)
+                })
+                .collect();
             let page = ClaimRowDiff::of(&pg, &surreal);
             diff.pg_rows += pg.len();
             diff.missing.extend(page.missing);
@@ -2686,7 +2717,65 @@ impl SurrealClient {
         self.upsert_rows("claim_row", &diff.redo).await?;
         self.delete_rows("claim_row", &diff.extra).await?;
         self.drop_moot_tombstones(store).await?;
-        Ok((diff.redo.len(), diff.extra.len()))
+        let filled = self.backfill_claim_embeddings(store).await?;
+        Ok((diff.redo.len() + filled, diff.extra.len()))
+    }
+
+    /// Fill `claim_row.embedding` from pg's `claim.embedding` where Surreal's row has none. This
+    /// is the backfill for rows copied before the column existed: it is a catch-up pass, not a
+    /// rebuild, so it only sets a missing field and never deletes a row. A row a Surreal write
+    /// made or moved (`via = 'surreal'`) is left alone, as in every other copy from pg.
+    /// Returns the rows filled.
+    async fn backfill_claim_embeddings(&self, store: &Store) -> Result<usize> {
+        let db = store.db().await?;
+        let mut offset = 0_i64;
+        let mut filled = 0;
+        loop {
+            let rows = db
+                .query(
+                    &format!(
+                        "SELECT c.subject, c.predicate, {valid}, c.embedding FROM claim c
+                          WHERE c.embedding IS NOT NULL
+                          ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
+                        valid = epoch_us("c.valid_from")
+                    ),
+                    &[&i64::try_from(CLAIM_ROW_PAGE)?, &offset],
+                )
+                .await
+                .context("read a page of claim embeddings from pgvector")?;
+            if rows.is_empty() {
+                break;
+            }
+            offset += i64::try_from(rows.len())?;
+            let pg: HashMap<String, Vec<f32>> = rows
+                .iter()
+                .map(|r| {
+                    let key = claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2));
+                    (key, r.get::<_, Vector>(3).to_vec())
+                })
+                .collect();
+            let keys: Vec<String> = pg.keys().cloned().collect();
+            let query = format!(
+                "SELECT VALUE cid FROM claim_row WHERE cid INSIDE {} AND embedding = NONE \
+                 AND via != 'surreal';",
+                texts(&keys)
+            );
+            let lacking: Vec<String> = first_statement(&query, self.rows::<String>(&query).await?)?;
+            filled += lacking.len();
+            for batch in lacking.chunks(FILL_BATCH) {
+                let pairs: Vec<String> = batch
+                    .iter()
+                    .map(|k| format!("[{}, {}]", text(k), floats(&pg[k])))
+                    .collect();
+                self.run(&format!(
+                    "FOR $p IN [{}] {{ UPDATE type::record('claim_row', $p[0]) \
+                     SET embedding = $p[1] WHERE embedding = NONE AND via != 'surreal'; }};",
+                    pairs.join(",")
+                ))
+                .await?;
+            }
+        }
+        Ok(filled)
     }
 
     /// A tombstone holds a key back only while pg still holds the row; once pg lacks it the
@@ -3266,7 +3355,7 @@ impl SurrealClient {
                 .db()
                 .await?
                 .query(
-                    &claim_row_select(
+                    &claim_row_embedded_select(
                         "ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
                     ),
                     &[&i64::try_from(FILL_BATCH)?, &offset],
@@ -3280,7 +3369,7 @@ impl SurrealClient {
             let (keys, literals): (Vec<String>, Vec<String>) = rows
                 .iter()
                 .map(|r| {
-                    let (key, row) = claim_row_json(r);
+                    let (key, row) = claim_row_embedded_json(r);
                     (key, row.to_string())
                 })
                 .unzip();
