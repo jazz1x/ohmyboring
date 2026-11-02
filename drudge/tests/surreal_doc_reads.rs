@@ -179,7 +179,7 @@ async fn seed(pg: &Store, db: &tokio_postgres::Client) {
     ];
     for (id, kind, label) in graph_nodes {
         db.execute(
-            "INSERT INTO node (id, kind, label) VALUES ($1, $2, $3)",
+            "INSERT INTO node (id, kind, label) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
             &[&id, &kind, &label],
         )
         .await
@@ -233,7 +233,7 @@ async fn seed(pg: &Store, db: &tokio_postgres::Client) {
     }
     for (src, dst, kind, judge) in edges {
         db.execute(
-            "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
             &[&src, &dst, &kind, &judge],
         )
         .await
