@@ -18,12 +18,14 @@
 //! table (open claims with an embedding), `document` and `edge`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::claim_reads::epoch_micros;
+use super::reads::en_us_order;
 use super::{KEY_SEP, RpcReply, SurrealClient, claim_key, floats, rejection, text, texts};
 use crate::ingest::canon;
 use crate::split_subjects::{Merged, find_group};
@@ -199,6 +201,13 @@ FOR $r IN (SELECT * FROM claim_row WHERE [subject, predicate] INSIDE $slots AND 
         kind: $r.kind, anchor: $r.anchor, stale_us: $r.stale_us, embedding: $r.embedding};
 };";
 
+/// The rows a transaction wrote to or took out of the vector `claim` table, added to
+/// `vector_meta:claim.dirty` (what `swap_if_changed` reads). Since C0b1 bundle 3 no copy from pg
+/// bumps it, so each write transaction does; `n` is a SurrealQL integer expression.
+fn claim_dirty_bump(n: &str) -> String {
+    format!("UPSERT type::record('vector_meta', 'claim') SET dirty = (dirty ?? 0) + {n};")
+}
+
 fn slot_sql(w: &ClaimWrite<'_>) -> String {
     let cid = text(&claim_key(w.subject, w.predicate, w.valid_from_us));
     let (s, p, sp) = (text(w.subject), text(w.predicate), text(w.source_path));
@@ -241,7 +250,9 @@ fn slot_sql(w: &ClaimWrite<'_>) -> String {
          {RETIRED_LETS}
          {seal}
          DELETE claim WHERE subject = {s} AND predicate = {p} AND cid INSIDE (SELECT VALUE cid FROM claim_row WHERE subject = {s} AND predicate = {p} AND superseded_us != NONE);
-         {OPEN_ROWS_TO_CLAIM}",
+         {OPEN_ROWS_TO_CLAIM}
+         {bump}",
+        bump = claim_dirty_bump("1"),
         value = text(w.value),
         vf = w.valid_from_us,
         kind = text(w.kind),
@@ -356,8 +367,47 @@ fn note_sql(newer: &str, older: &str, plan: &NotePlan) -> String {
          }};
          LET $force = NONE;
          {OPEN_ROWS_TO_CLAIM}
+         {bump}
          RETURN array::len($sealed);",
+        bump = claim_dirty_bump("array::len($sealed)"),
         stale = text(SPLIT_STALE),
+    )
+}
+
+/// `Store::seal_restated_slots` on Surreal: close the rows of `older` in the slots `newer`
+/// re-states, stamped with `newer`'s latest `valid_from`. The slots (and so the guards) are the
+/// ones `planned` names, read before the transaction and checked again inside it. Nothing is
+/// handed on to a next-latest row, and the owner rule is `RETIRED_LETS`.
+fn restated_sql(newer: &str, older: &str, planned: &[(String, String)]) -> String {
+    let (n, o) = (text(newer), text(older));
+    let guards = guards_let(planned.iter().map(|(s, p)| (s.as_str(), p.as_str())));
+    format!(
+        "{guards}
+         LET $planned = {planned};
+         LET $slots = array::distinct(SELECT VALUE [subject, predicate] FROM claim_row WHERE source_path = {n});
+         {SLOTS_UNCHANGED}
+         {BUMP_GUARDS}
+         {RETIRED_LETS}
+         LET $newest = (SELECT VALUE valid_from_us FROM claim_row WHERE source_path = {n} ORDER BY valid_from_us DESC LIMIT 1)[0];
+         LET $stamp = $newest ?? time::micros(time::now());
+         LET $sealed = UPDATE claim_row SET superseded_us = $stamp, via = 'surreal' WHERE source_path = {o} AND superseded_us = NONE AND {o} INSIDE $retired AND [subject, predicate] INSIDE $slots RETURN VALUE cid;
+         DELETE claim WHERE source_path = {o} AND cid INSIDE $sealed;
+         {bump}
+         RETURN array::len($sealed);",
+        planned = pairs_literal(planned),
+        bump = claim_dirty_bump("array::len($sealed)"),
+    )
+}
+
+/// The `claim_row` and `claim` rows of one note leave with its `document` (`delete_sql`).
+pub(super) fn delete_claims_sql(path: &str) -> String {
+    let p = text(path);
+    format!(
+        "LET $claims_gone = (SELECT VALUE cid FROM claim WHERE source_path = {p});
+         DELETE claim_row WHERE source_path = {p};
+         DELETE claim WHERE source_path = {p};
+         {bump}",
+        bump = claim_dirty_bump("array::len($claims_gone)")
     )
 }
 
@@ -428,8 +478,9 @@ struct PairRow {
 }
 
 impl SurrealClient {
-    /// `claim_row.via` marks a row a Surreal write made or moved (`'surreal'`): `catch_up` and the
-    /// mirror copy pg's rows over Surreal's but leave a marked row as it is, and never delete it.
+    /// `claim_row.via` marks a row a Surreal write made or moved (`'surreal'`); `claim_row_diff`
+    /// (the Z4 compare against pg) skips marked rows. Since C0b1 bundle 3 no pass copies pg's
+    /// rows over Surreal's, so the mark no longer protects a row from anything.
     /// A table laid down by `fill_from` has the field; one made before it gets it here, once per
     /// client (a DDL statement inside a racing transaction would itself conflict).
     pub(super) async fn ensure_via_field(&self) -> Result<()> {
@@ -686,4 +737,194 @@ impl SurrealClient {
             }
         }
     }
+
+    /// `Store::claim_is_unchanged_on`: does the note's own latest row of this slot already say
+    /// exactly this? Read on `claim_row`, sealed rows included, as pg reads `claim`.
+    ///
+    /// # Errors
+    /// The read failed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_is_unchanged(
+        &self,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+    ) -> Result<bool> {
+        let query = format!(
+            "SELECT * FROM claim_row \
+             WHERE subject = {} AND predicate = {} AND source_path = {} \
+             ORDER BY valid_from_us DESC LIMIT 1;",
+            text(subject),
+            text(predicate),
+            text(source_path)
+        );
+        let latest: Vec<LatestClaim> =
+            super::first_statement(&query, self.rows::<LatestClaim>(&query).await?)?;
+        Ok(latest.first().is_some_and(|l| {
+            l.value == value
+                && l.kind == kind
+                && l.confidence == confidence
+                && l.anchor.as_deref() == anchor
+        }))
+    }
+
+    /// `Store::mirror_claim_said_by_on`: the note's `said_by` on its own latest row of the slot,
+    /// changed only when it differs. Inside the slot's guard, so it cannot meet a newer row of
+    /// the same note being written.
+    ///
+    /// # Errors
+    /// A statement failed, or the slot stayed in conflict for more than `tx_retries` resends.
+    pub async fn claim_said_by(
+        &self,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        said_by: Option<&str>,
+    ) -> Result<()> {
+        self.ensure_via_field().await?;
+        let (s, p, sp, by) = (
+            text(subject),
+            text(predicate),
+            text(source_path),
+            opt(said_by),
+        );
+        let sql = format!(
+            "{guards}
+             {BUMP_GUARDS}
+             LET $mx = (SELECT VALUE valid_from_us FROM claim_row WHERE subject = {s} AND predicate = {p} AND source_path = {sp} ORDER BY valid_from_us DESC LIMIT 1)[0];
+             UPDATE claim_row SET said_by = {by}, via = 'surreal' WHERE subject = {s} AND predicate = {p} AND source_path = {sp} AND valid_from_us = $mx AND said_by != {by};",
+            guards = guards_let([(subject, predicate)]),
+        );
+        self.write_retrying(TxPlace::Slot, &sql).await
+    }
+
+    /// `Store::repin_claim`: move the anchor of one live row (not stale) in `claim_row` and in
+    /// the vector `claim` table.
+    ///
+    /// # Errors
+    /// A statement failed, or the rows stayed in conflict for more than `tx_retries` resends.
+    pub async fn repin_claim(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        anchor: &str,
+    ) -> Result<()> {
+        self.ensure_via_field().await?;
+        let cid = text(&claim_key(subject, predicate, epoch_micros(valid_from)?));
+        let anchor = text(anchor);
+        let sql = format!(
+            "UPDATE claim_row SET anchor = {anchor}, via = 'surreal' WHERE cid = {cid} AND stale_us = NONE;
+             UPDATE claim SET anchor = {anchor} WHERE cid = {cid} AND stale_us = NONE;"
+        );
+        self.write_retrying(TxPlace::Slot, &sql).await
+    }
+
+    /// `Store::mark_claim_stale`: stamp one live row stale, now, in `claim_row` and in the vector
+    /// `claim` table (the embedding stays, so the HNSW index is untouched).
+    ///
+    /// # Errors
+    /// A statement failed, or the rows stayed in conflict for more than `tx_retries` resends.
+    pub async fn mark_claim_stale(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        reason: &str,
+    ) -> Result<()> {
+        self.ensure_via_field().await?;
+        let cid = text(&claim_key(subject, predicate, epoch_micros(valid_from)?));
+        let reason = text(reason);
+        let sql = format!(
+            "LET $at = time::micros(time::now());
+             UPDATE claim_row SET stale_us = $at, stale_reason = {reason}, via = 'surreal' WHERE cid = {cid} AND stale_us = NONE;
+             UPDATE claim SET stale_us = $at WHERE cid = {cid} AND stale_us = NONE;"
+        );
+        self.write_retrying(TxPlace::Slot, &sql).await
+    }
+
+    /// `Store::seal_restated_slots`: close `older`'s rows in the slots `newer` re-states and hand
+    /// nothing on. Returns the rows closed.
+    ///
+    /// # Errors
+    /// A statement failed, or a slot stayed in conflict for more than `tx_retries` resends.
+    pub async fn seal_restated(&self, newer: &str, older: &str) -> Result<usize> {
+        self.ensure_via_field().await?;
+        self.retrying(TxPlace::Note, || async {
+            let query = format!(
+                "SELECT subject, predicate FROM claim_row WHERE source_path = {};",
+                text(newer)
+            );
+            let held: Vec<PairRow> =
+                super::first_statement(&query, self.rows::<PairRow>(&query).await?)?;
+            let planned: Vec<(String, String)> =
+                held.into_iter().map(|r| (r.subject, r.predicate)).collect();
+            let sql = restated_sql(newer, older, &planned);
+            Ok(match self.tx_once(&sql).await? {
+                Attempt::Done(answers) => {
+                    let n = answers
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .and_then(Value::as_u64)
+                        .context("restated seal answered no count")?;
+                    Attempt::Done(usize::try_from(n)?)
+                }
+                Attempt::Conflict(m) => Attempt::Conflict(m),
+            })
+        })
+        .await
+    }
+
+    /// `Store::note_retired_slots`: the slots of `older` that carry `newer`'s latest `valid_from`
+    /// as their seal, in subject, predicate order. A `newer` with no row seals nothing, so the
+    /// answer is empty.
+    ///
+    /// # Errors
+    /// A read failed.
+    pub async fn retired_slots(&self, newer: &str, older: &str) -> Result<Vec<(String, String)>> {
+        let query = format!(
+            "SELECT VALUE valid_from_us FROM claim_row WHERE source_path = {} \
+             ORDER BY valid_from_us DESC LIMIT 1;",
+            text(newer)
+        );
+        let newest: Vec<i64> = super::first_statement(&query, self.rows::<i64>(&query).await?)?;
+        let Some(stamp) = newest.first() else {
+            return Ok(Vec::new());
+        };
+        let query = format!(
+            "SELECT subject, predicate FROM claim_row WHERE source_path = {} AND superseded_us = {stamp};",
+            text(older)
+        );
+        let mut rows: Vec<PairRow> =
+            super::first_statement(&query, self.rows::<PairRow>(&query).await?)?;
+        rows.sort_by(|a, b| {
+            en_us_order(&a.subject, &b.subject)
+                .then_with(|| en_us_order(&a.predicate, &b.predicate))
+        });
+        Ok(rows.into_iter().map(|r| (r.subject, r.predicate)).collect())
+    }
+
+    /// One write transaction made of `sql` alone, sent again on a conflict.
+    async fn write_retrying(&self, place: TxPlace, sql: &str) -> Result<()> {
+        self.retrying(place, || async {
+            Ok(match self.tx_once(sql).await? {
+                Attempt::Done(_) => Attempt::Done(()),
+                Attempt::Conflict(m) => Attempt::Conflict(m),
+            })
+        })
+        .await
+    }
+}
+
+#[derive(Deserialize)]
+struct LatestClaim {
+    value: String,
+    kind: String,
+    confidence: String,
+    anchor: Option<String>,
 }

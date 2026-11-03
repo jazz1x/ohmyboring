@@ -3,7 +3,7 @@
 //!
 //! (m) the same inputs into the pg path and the Surreal path give the same answer, both sides of
 //!     each branch (present / absent, owner / not owner), printed as `C0b1 (m) <read>: same n/N`.
-//! (o1) the claim copy fills a Surreal-only note's origin and project.
+//! (o1) the claim write fills a Surreal-only note's origin and project.
 //! (o2) the `valid_from` source (`doc_updated_at`) is the Surreal document's `updated_at`, not now().
 //! (o3) `record_gap_in_tx` picks a Surreal-only note as a handed note.
 //! Each of (o1)-(o3) uses one document that exists in Surreal only, written with plain SurrealQL so
@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::config::SurrealConfig;
 use drudge::frontmatter::{Author, FrontMatter};
-use drudge::store::{DocLookup, Scope, Store, SurrealClient, VectorRoute};
+use drudge::store::{DocLookup, Store, SurrealClient, VectorRoute};
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
@@ -210,28 +210,25 @@ async fn the_branches_answer_the_same_on_the_pg_path_and_the_surreal_path() {
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn o1_the_claim_copy_fills_origin_and_project_of_a_surreal_only_note() {
-    let (pg, routed, client, _db) = setup("c0b1_o1").await;
+async fn o1_the_claim_write_fills_origin_and_project_of_a_surreal_only_note() {
+    let (_pg, routed, client, _db) = setup("c0b1_o1").await;
     let path = format!("/vault/wiki/o1-{}.md", nanos());
     surreal_only_note(&client, &path, "unknown", SURREAL_ONLY_US).await;
     let mut emb = vec![0.0_f32; DIM];
     emb[0] = 1.0;
-    pg.upsert_claim(
-        "c0b1-o1-subject",
-        "goal",
-        "a long enough value to count as a statement",
-        &path,
-        SystemTime::now() - Duration::from_hours(1),
-        &emb,
-        "decision",
-        "certain",
-    )
-    .await
-    .expect("claim");
     routed
-        .mirror_surreal(&Scope::notes([path.clone()]))
+        .upsert_claim(
+            "c0b1-o1-subject",
+            "goal",
+            "a long enough value to count as a statement",
+            &path,
+            SystemTime::now() - Duration::from_hours(1),
+            &emb,
+            "decision",
+            "certain",
+        )
         .await
-        .expect("mirror");
+        .expect("claim");
 
     let rows = client
         .run(&format!(

@@ -169,8 +169,8 @@ async fn surreal_last_stage(store: &Store) -> Result<()> {
     log_copy.map(|_| ())
 }
 
-/// Rows the Python door wrote straight to pg never went through a mirror: level Surreal's
-/// document/node/edge with pg's by key (no-op on pgvector). A failure fails the sync.
+/// Define the HNSW index of any Surreal vector table that lacks one; no row is copied from pg
+/// (C0b1: the engine writes every table into Surreal). No-op on pgvector. A failure fails the sync.
 async fn surreal_catch_up(store: &Store) -> Result<()> {
     let (written, deleted) = store.catch_up_surreal().await?;
     if written + deleted > 0 {

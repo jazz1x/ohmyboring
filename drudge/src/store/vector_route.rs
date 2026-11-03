@@ -4,11 +4,11 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use super::LogCopy;
 use super::vector_pg::Pg;
-use super::vector_surreal::{SURREAL_BEHIND, Scope, SurrealClient, SurrealView, Swap};
+use super::vector_surreal::{SurrealClient, SurrealView, Swap};
 use super::{
     AnchorCheckRow, AnchorCheckWatermark, AnchoredClaim, ClaimEraCounts, ConsumptionCounts,
     ContestedBy, EventLogFilter, EventLogRow, GraphStats, Hit, Meta, QueryLogRow, RankFacts,
@@ -36,21 +36,6 @@ impl VectorRoute {
         match self {
             Self::Pgvector => RoutedView::Pg(Pg(store)),
             Self::Surreal(client) => RoutedView::Surreal(SurrealView { client }),
-        }
-    }
-}
-
-impl Store {
-    /// After pg committed a chunk or claim change: on `backend=surreal`, write the same change
-    /// into Surreal (pg's state of `scope`, see `SurrealClient::mirror`); on pgvector there is
-    /// nothing to write. A Surreal failure is an error that says pg already has the change.
-    pub async fn mirror_surreal(&self, scope: &Scope) -> Result<()> {
-        match &self.vector_route {
-            VectorRoute::Pgvector => Ok(()),
-            VectorRoute::Surreal(client) => client
-                .mirror(self, scope)
-                .await
-                .map_err(|e| anyhow!("{SURREAL_BEHIND} (surreal: {e:#})")),
         }
     }
 }
@@ -434,12 +419,12 @@ impl Store {
 }
 
 impl Store {
-    /// On `backend=surreal`: write the `document`, `node` and `edge` rows pg holds and Surreal
-    /// lacks, delete the ones only Surreal holds (`SurrealClient::catch_up`) — the rows the
-    /// Python door wrote straight to pg. Pgvector: nothing to do. Returns `(written, deleted)`.
+    /// On `backend=surreal`: define the HNSW indexes a table lacks (`SurrealClient::catch_up`);
+    /// no row is copied from pg (C0b1 bundle 3). Pgvector: nothing to do. Returns
+    /// `(written, deleted)`.
     ///
     /// # Errors
-    /// A pg or Surreal read or write failed.
+    /// A Surreal read or write failed.
     pub async fn catch_up_surreal(&self) -> Result<(usize, usize)> {
         match &self.vector_route {
             VectorRoute::Pgvector => Ok((0, 0)),

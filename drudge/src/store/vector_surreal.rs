@@ -63,11 +63,8 @@ const INDEX_BUILD_POLL: Duration = Duration::from_millis(500);
 const KEY_SEP: char = '\u{1f}';
 /// Keys per Surreal answer when a whole table's keys are read (`table_keys`).
 const KEY_PAGE: usize = 20_000;
-/// Rows per pg read when `catch_up` fetches the rows Surreal lacks.
+/// Notes per Surreal read when `claim_row_diff` looks up their `document` rows.
 const CATCH_UP_BATCH: usize = 500;
-/// Rows a catch-up deletes from one HNSW table before the index is removed for the delete and
-/// rebuilt after (`without_hnsw`): below it the index keeps up with the deletes.
-const MASS_DELETE: usize = 2_000;
 /// Prefix of a per-project chunk table. The global `chunk` table keeps every chunk; a project table
 /// keeps that project's chunks only, so a project-filtered KNN scans the project's graph instead of
 /// filtering inside the global one (measured p95 120-150 ms for the in-KNN filter).
@@ -255,27 +252,6 @@ impl ChunkSource {
 /// holds `[a-z0-9_-]` (`ProjectTable::parse`), so nothing can close the quote.
 fn quote_ident(name: &str) -> String {
     format!("`{name}`")
-}
-
-/// Both step results when all succeeded; else the first failure with the later ones in its
-/// message, so a step that ran after another failed is never silent.
-fn first_failure<A, B>(
-    others: [Option<anyhow::Error>; 2],
-    a: Result<A>,
-    b: Result<B>,
-) -> Result<(A, B)> {
-    match (a, b) {
-        (Ok(a), Ok(b)) if others.iter().all(Option::is_none) => Ok((a, b)),
-        (a, b) => {
-            let mut failures: Vec<anyhow::Error> = a.err().into_iter().chain(b.err()).collect();
-            failures.extend(others.into_iter().flatten());
-            let mut all = failures.into_iter();
-            let head = all
-                .next()
-                .unwrap_or_else(|| anyhow!("first_failure called with no failure"));
-            Err(all.fold(head, |e, next| e.context(format!("그리고: {next:#}"))))
-        }
-    }
 }
 
 /// `chunk_embedding` -> `chunk_embedding_g1` -> `chunk_embedding_g2`: the next name is derived from
@@ -1205,72 +1181,10 @@ fn epoch_us(col: &str) -> String {
     EPOCH_US.replace("{col}", col)
 }
 
-/// Why a Surreal write that follows a committed pg write is an error and not a retry: pg already
-/// holds the change, so repeating the request would duplicate it (a second note, a second
-/// supersede). The one recovery is the fill, which rebuilds Surreal from pg.
-pub const SURREAL_BEHIND: &str =
-    "pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것";
-
-/// Why a failed graph (`node`/`edge`) write is not `SURREAL_BEHIND`: since C0b1 bundle 2 those rows
+/// Why a failed graph (`node`/`edge`) write has no recovery by fill: since C0b1 bundle 2 those rows
 /// exist only in Surreal, so pg holds no copy of them to fill from. What pg already committed in
 /// the same request (a document row, for one) stays; the graph rows of the request do not exist.
 pub const SURREAL_GRAPH_FAILED: &str = "Surreal 그래프(node·edge) 쓰기 실패. 그래프 행은 pg 에 없음, 같은 요청에서 pg 가 이미 커밋한 행(문서 등)만 남아 있음";
-
-/// What a committed pg write touched, in the terms Surreal's rows are keyed by: the notes whose
-/// chunks and claims were written, and the `(subject, predicate)` slots whose current row may
-/// have moved.
-#[derive(Debug, Clone, Default)]
-pub struct Scope {
-    paths: Vec<String>,
-    slots: Vec<(String, String)>,
-    nodes: Vec<String>,
-}
-
-impl Scope {
-    /// Every chunk and claim row of these notes, plus the slots those claims sit in (a fact slot
-    /// is sealed across notes, so another note's row can stop being current).
-    #[must_use]
-    pub fn notes<I: IntoIterator<Item = String>>(paths: I) -> Self {
-        let mut paths: Vec<String> = paths.into_iter().collect();
-        paths.sort_unstable();
-        paths.dedup();
-        Self {
-            paths,
-            slots: Vec::new(),
-            nodes: Vec::new(),
-        }
-    }
-
-    /// Graph nodes written or deleted by id (`session:`, `gap:`, an orphan the GC removed), with
-    /// every edge that has one of them at an end.
-    #[must_use]
-    pub fn graph<I: IntoIterator<Item = String>>(ids: I) -> Self {
-        Self::default().with_nodes(ids)
-    }
-
-    /// Add graph node ids to a scope.
-    #[must_use]
-    pub fn with_nodes<I: IntoIterator<Item = String>>(mut self, ids: I) -> Self {
-        self.nodes.extend(ids);
-        self.nodes.sort_unstable();
-        self.nodes.dedup();
-        self
-    }
-
-    /// One slot, for a write that names claim rows by key and not by note.
-    #[must_use]
-    pub fn slot(subject: &str, predicate: &str) -> Self {
-        Self {
-            paths: Vec::new(),
-            slots: vec![(subject.to_owned(), predicate.to_owned())],
-            nodes: Vec::new(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.paths.is_empty() && self.slots.is_empty() && self.nodes.is_empty()
-    }
-}
 
 #[derive(Deserialize)]
 struct DocOrigin {
@@ -1279,14 +1193,8 @@ struct DocOrigin {
     project: String,
 }
 
-#[derive(Deserialize)]
-struct Slot {
-    subject: String,
-    predicate: String,
-}
-
 /// Surreal answers one statement per statement sent; none at all is a broken reply, and reading it
-/// as "no rows" would make `mirror` skip the deletes of stale keys.
+/// as "no rows" would hide a failed statement.
 pub(super) fn first_statement<T>(query: &str, statements: Vec<Vec<T>>) -> Result<Vec<T>> {
     statements
         .into_iter()
@@ -1362,20 +1270,6 @@ fn claim_literal_of(r: &Row, origin: &str, project: &str) -> (String, String) {
         floats(embedding.as_slice())
     );
     (cid, literal)
-}
-
-/// `claim_select` without the pg `document` join: the same ten columns, `origin` and `project`
-/// left empty (columns 4 and 5) for the caller to fill from Surreal's `document`. pg no longer
-/// receives a note's document row on `backend=surreal`, so a join there would drop the claims of
-/// every note written since.
-fn claim_select_bare(tail: &str) -> String {
-    format!(
-        "SELECT c.subject, c.predicate, {valid}, c.source_path, ''::text, ''::text,
-                c.kind, c.anchor, {stale}, c.embedding
-           FROM claim c WHERE c.superseded_at IS NULL AND c.embedding IS NOT NULL {tail}",
-        valid = epoch_us("c.valid_from"),
-        stale = epoch_us("c.stale_at")
-    )
 }
 
 /// `origin` and `project` of notes as Surreal's `document` holds them, by `source_path`.
@@ -1910,7 +1804,7 @@ impl SurrealClient {
     /// ready. One failed table does not stop the others; each result is a `Swap`.
     ///
     /// "Rows changed since the last swap" lives in Surreal itself, as `vector_meta:<table>.dirty`
-    /// (`bump_dirty`, written by `reconcile`): the counter sits in the same store as the index it
+    /// (bumped inside each write transaction, `dirty_bump` in `doc_tx.rs` and `claim_tx.rs`): the counter sits in the same store as the index it
     /// describes, so it survives an engine restart and `fill_from` (which rebuilds the tables)
     /// resets it. A file or an in-process counter would drift from the index it is about.
     pub async fn swap_if_changed(&self) -> Result<Vec<Swap>> {
@@ -1933,18 +1827,6 @@ impl SurrealClient {
             });
         }
         Ok(out)
-    }
-
-    async fn bump_dirty(&self, table: &str, changed: usize) -> Result<()> {
-        if changed == 0 {
-            Ok(())
-        } else {
-            self.run(&format!(
-                "UPSERT type::record('vector_meta', '{table}') SET dirty = (dirty ?? 0) + {changed};"
-            ))
-            .await
-            .map(|_| ())
-        }
     }
 
     async fn dirty(&self, table: &str) -> Result<u64> {
@@ -2110,93 +1992,6 @@ impl SurrealClient {
         })
     }
 
-    /// Run `work` (a mass delete) with the HNSW index of each table removed, then define a new
-    /// generation of it and wait until it is `ready`. Measured on v3.3.5 with 14k claim deletes
-    /// (r3-mem-s1): every delete the index sees keeps ~85 KB in the server for good (container
-    /// 2.9 -> 4.5 GiB in 6.1k deletes, not given back when idle), whatever the request size; the
-    /// same 3,000 deletes with the index removed moved it by -17 MiB and the rebuild by +28 MiB.
-    /// While the index is gone a KNN read on the table is an error, never a pg fallback, so this
-    /// is for a mass delete only (`MASS_DELETE`). The index is rebuilt whether `work` succeeded or
-    /// not; either failure is returned.
-    async fn without_hnsw<F, Fut>(&self, tables: &[String], work: F) -> Result<()>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
-    {
-        let mut removed: Vec<((String, String, String), std::time::Instant)> = Vec::new();
-        let mut dropped: Result<()> = Ok(());
-        for table in tables {
-            match self.remove_hnsw(table).await {
-                Ok(gone) => removed.push((gone, std::time::Instant::now())),
-                Err(e) => {
-                    dropped = Err(e);
-                    break;
-                }
-            }
-        }
-        let worked = match dropped {
-            Ok(()) => work().await,
-            Err(e) => Err(e),
-        };
-        let mut rebuilt: Result<()> = Ok(());
-        for ((table, old, def), since) in &removed {
-            // The new index is built from every row `work` wrote, so the swap that follows the
-            // sync has nothing left to rebuild for them (a second build measured +0.67 GiB).
-            let step = match self.dirty(table).await {
-                Ok(changed) => self
-                    .define_next_generation(table, old, def)
-                    .await
-                    .map(|_| changed),
-                Err(e) => Err(e),
-            };
-            let window = since.elapsed().as_secs_f64();
-            let settled = match step {
-                Ok(changed) => {
-                    eprintln!(
-                        "[vector] {table}: HNSW 인덱스 없던 시간 {window:.1}s (제거 → ready)"
-                    );
-                    self.settle_dirty(table, changed).await
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[vector] {table}: HNSW 인덱스 없음, 제거 후 {window:.1}s 째 — 다시 만들지 못함"
-                    );
-                    Err(e)
-                }
-            };
-            if let Err(e) = settled {
-                rebuilt = rebuilt.and(Err(e));
-            }
-        }
-        match (worked, rebuilt) {
-            (Ok(()), rebuilt) => rebuilt,
-            (Err(e), Ok(())) => Err(e),
-            (Err(e), Err(r)) => Err(e.context(format!("the HNSW rebuild failed too: {r:#}"))),
-        }
-    }
-
-    /// Take `changed` rows off the table's dirty count, never below zero (rows mirrored while an
-    /// index build ran stay counted for the next swap).
-    async fn settle_dirty(&self, table: &str, changed: u64) -> Result<()> {
-        self.run(&format!(
-            "UPSERT type::record('vector_meta', '{table}') SET dirty = math::max([(dirty ?? 0) - {changed}, 0]);"
-        ))
-        .await
-        .map(|_| ())
-    }
-
-    /// `(table, index name, DEFINE INDEX text)` of the index just removed.
-    async fn remove_hnsw(&self, table: &str) -> Result<(String, String, String)> {
-        let (old, def) = self.hnsw_index(table).await?;
-        self.run(&format!(
-            "REMOVE INDEX {} ON {};",
-            quote_ident(&old),
-            quote_ident(table)
-        ))
-        .await?;
-        Ok((table.to_owned(), old, def))
-    }
-
     /// Define the next generation of an HNSW index from the old one's definition text and wait
     /// until it is `ready`; a build that does not get there is removed and is the error.
     async fn define_next_generation(&self, table: &str, old: &str, def: &str) -> Result<Value> {
@@ -2267,124 +2062,8 @@ impl SurrealClient {
         Ok(())
     }
 
-    /// Make Surreal's rows in one scope equal pg's: upsert the ones pg has, then delete the keys
-    /// pg no longer has. Upsert first so a failure half way leaves Surreal with more rows, never
-    /// fewer; no transaction, because pg is the original and a re-run converges.
-    async fn reconcile(
-        &self,
-        table: &str,
-        wanted: Vec<(String, String)>,
-        existing: Vec<String>,
-    ) -> Result<()> {
-        let keep: std::collections::HashSet<&str> =
-            wanted.iter().map(|(k, _)| k.as_str()).collect();
-        let stale: Vec<String> = existing
-            .into_iter()
-            .filter(|k| !keep.contains(k.as_str()))
-            .collect();
-        let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
-        self.upsert_rows(table, &literals).await?;
-        self.delete_rows(table, &stale).await?;
-        self.bump_dirty(table, literals.len() + stale.len()).await
-    }
-
-    /// Write-through: after pg committed a change, copy pg's state of everything it touched into
-    /// Surreal. pg is the original, so Surreal is rebuilt from what pg holds now, never from what
-    /// the request carried. Covers an upsert (new rows and changed columns), a supersede or
-    /// unseal (a claim that stopped being open leaves Surreal, one that became open enters), and
-    /// a delete (a key pg lacks leaves Surreal).
-    pub async fn mirror(&self, store: &Store, scope: &Scope) -> Result<()> {
-        if scope.is_empty() {
-            Ok(())
-        } else {
-            // C0b1 bundles 1 and 2: `document`, `chunk`, `node` and `edge` rows are written by the
-            // engine straight into Surreal (`doc_tx.rs`, `graph_tx.rs`), so a copy from pg would
-            // only delete them. Claims stay copied from pg until bundle 3.
-            self.mirror_claims(store, scope).await
-        }
-    }
-
-    async fn mirror_claims(&self, store: &Store, scope: &Scope) -> Result<()> {
-        let db = store.db().await?;
-        let pg_slots = db
-            .query(
-                "SELECT DISTINCT subject, predicate FROM claim WHERE source_path = ANY($1);",
-                &[&scope.paths],
-            )
-            .await
-            .context("read the written notes' claim slots from pgvector")?;
-        let slots_query = format!(
-            "SELECT subject, predicate FROM claim WHERE source_path INSIDE {};",
-            texts(&scope.paths)
-        );
-        let surreal_slots: Vec<Slot> =
-            first_statement(&slots_query, self.rows::<Slot>(&slots_query).await?)?;
-        let row_slots_query = format!(
-            "SELECT subject, predicate FROM claim_row WHERE source_path INSIDE {};",
-            texts(&scope.paths)
-        );
-        let surreal_row_slots: Vec<Slot> =
-            first_statement(&row_slots_query, self.rows::<Slot>(&row_slots_query).await?)?;
-        let mut slots: Vec<(String, String)> = scope.slots.clone();
-        slots.extend(pg_slots.iter().map(|r| (r.get(0), r.get(1))));
-        slots.extend(surreal_slots.into_iter().map(|s| (s.subject, s.predicate)));
-        slots.extend(
-            surreal_row_slots
-                .into_iter()
-                .map(|s| (s.subject, s.predicate)),
-        );
-        slots.sort_unstable();
-        slots.dedup();
-        let subjects: Vec<String> = slots.iter().map(|s| s.0.clone()).collect();
-        let predicates: Vec<String> = slots.iter().map(|s| s.1.clone()).collect();
-        let rows = db
-            .query(
-                &claim_select_bare(
-                    "AND (c.source_path = ANY($1) OR (c.subject, c.predicate) IN
-                          (SELECT s, p FROM unnest($2::text[], $3::text[]) AS k(s, p)))",
-                ),
-                &[&scope.paths, &subjects, &predicates],
-            )
-            .await
-            .context("read the written notes' open claims from pgvector")?;
-        let row_paths: Vec<String> = rows.iter().map(|r| r.get::<_, String>(3)).collect();
-        let docs = self.doc_origins(&row_paths).await?;
-        let written = self.surreal_written().await?;
-        let gone = self.surreal_gone().await?;
-        // A claim whose note has no document row in Surreal is not copied (pg's inner join).
-        let wanted: Vec<(String, String)> = rows
-            .iter()
-            .filter_map(|r| {
-                let (origin, project) = docs.get(&r.get::<_, String>(3))?;
-                Some(claim_literal_of(r, origin, project))
-            })
-            .filter(|(cid, _)| !written.contains(cid) && !gone.contains(cid))
-            .collect();
-        // One membership test, not an `OR` chain: Surreal's parser refuses a chain of ~120 terms
-        // ("nests or chains operators too deeply"), and a 1,280-note scope has more slots than that.
-        let slot_pairs: Vec<String> = slots
-            .iter()
-            .map(|(s, p)| format!("[{},{}]", text(s), text(p)))
-            .collect();
-        let existing_claims = format!(
-            "SELECT VALUE cid FROM claim WHERE source_path INSIDE {} \
-             OR [subject, predicate] INSIDE [{}];",
-            texts(&scope.paths),
-            slot_pairs.join(",")
-        );
-        let existing: Vec<String> = first_statement(
-            &existing_claims,
-            self.rows::<String>(&existing_claims).await?,
-        )?
-        .into_iter()
-        .filter(|cid| !written.contains(cid))
-        .collect();
-        self.reconcile("claim", wanted, existing).await?;
-        self.mirror_claim_rows(store, scope, &slots).await
-    }
-
     /// `origin` and `project` of these notes from Surreal's own `document` rows (C0b1: pg no longer
-    /// receives them, so the claim copy cannot join them there).
+    /// receives them, so the `claim_row_diff` against pg cannot join them there).
     async fn doc_origins(&self, paths: &[String]) -> Result<DocOrigins> {
         let mut unique: Vec<String> = paths.to_vec();
         unique.sort_unstable();
@@ -2402,67 +2081,9 @@ impl SurrealClient {
         Ok(found)
     }
 
-    /// The same notes and slots as the vector `claim` table, but every row pg holds there, sealed
-    /// ones included: a seal or unseal that moved a row of another note in the slot is in `slots`.
-    /// No dirty count: this table has no HNSW index to swap.
-    async fn mirror_claim_rows(
-        &self,
-        store: &Store,
-        scope: &Scope,
-        slots: &[(String, String)],
-    ) -> Result<()> {
-        let subjects: Vec<String> = slots.iter().map(|s| s.0.clone()).collect();
-        let predicates: Vec<String> = slots.iter().map(|s| s.1.clone()).collect();
-        let rows = store
-            .db()
-            .await?
-            .query(
-                &claim_row_embedded_select(
-                    "WHERE c.source_path = ANY($1) OR (c.subject, c.predicate) IN
-                          (SELECT s, p FROM unnest($2::text[], $3::text[]) AS k(s, p))",
-                ),
-                &[&scope.paths, &subjects, &predicates],
-            )
-            .await
-            .context("read the written notes' claim rows from pgvector")?;
-        let row_paths: Vec<String> = rows.iter().map(|r| r.get::<_, String>(3)).collect();
-        let docs = self.doc_origins(&row_paths).await?;
-        let written = self.surreal_written().await?;
-        let gone = self.surreal_gone().await?;
-        let wanted: Vec<(String, String)> = rows
-            .iter()
-            .map(|r| {
-                let (key, row) = claim_row_embedded_json(r);
-                (key, with_doc_origin(row, &docs).to_string())
-            })
-            .filter(|(key, _)| !written.contains(key) && !gone.contains(key))
-            .collect();
-        let slot_pairs: Vec<String> = slots
-            .iter()
-            .map(|(s, p)| format!("[{},{}]", text(s), text(p)))
-            .collect();
-        let existing_query = format!(
-            "SELECT VALUE cid FROM claim_row WHERE source_path INSIDE {} \
-             OR [subject, predicate] INSIDE [{}];",
-            texts(&scope.paths),
-            slot_pairs.join(",")
-        );
-        let existing: Vec<String> =
-            first_statement(&existing_query, self.rows::<String>(&existing_query).await?)?;
-        let keep: std::collections::HashSet<&str> =
-            wanted.iter().map(|(k, _)| k.as_str()).collect();
-        let stale: Vec<String> = existing
-            .into_iter()
-            .filter(|k| !keep.contains(k.as_str()) && !written.contains(k))
-            .collect();
-        let literals: Vec<String> = wanted.into_iter().map(|(_, l)| l).collect();
-        self.upsert_rows("claim_row", &literals).await?;
-        self.delete_rows("claim_row", &stale).await
-    }
-
     /// Every claim row on both sides, compared by key and by value (all columns, `superseded_us`
-    /// included). `catch_up` compares keys only, so a seal the Python door wrote straight to pg
-    /// changes a row whose key both sides hold; this is the pass that sees it.
+    /// included). Only meaningful right after `fill_from` (Z4): from C0b1 bundle 3 on the engine
+    /// writes `claim_row` straight into Surreal, so pg's copy goes stale by design.
     ///
     /// Two paged passes, so memory holds one page of rows and not the table (measured on 66.8k
     /// rows: the two whole-table maps were +300 MB of a 477 MB sync, 130 MB of it the pg side):
@@ -2552,99 +2173,6 @@ impl SurrealClient {
         Ok(diff)
     }
 
-    /// Make Surreal's `claim_row` equal pg's: write the rows it lacks and the rows whose value
-    /// differs, delete the keys pg lacks. Returns `(written, deleted)`.
-    async fn repair_claim_rows(&self, store: &Store) -> Result<(usize, usize)> {
-        let diff = self.claim_row_diff(store).await?;
-        self.upsert_rows("claim_row", &diff.redo).await?;
-        self.delete_rows("claim_row", &diff.extra).await?;
-        self.drop_moot_tombstones(store).await?;
-        let filled = self.backfill_claim_embeddings(store).await?;
-        Ok((diff.redo.len() + filled, diff.extra.len()))
-    }
-
-    /// Fill `claim_row.embedding` from pg's `claim.embedding` where Surreal's row has none. This
-    /// is the backfill for rows copied before the column existed: it is a catch-up pass, not a
-    /// rebuild, so it only sets a missing field and never deletes a row. A row a Surreal write
-    /// made or moved (`via = 'surreal'`) is left alone, as in every other copy from pg.
-    /// Returns the rows filled.
-    async fn backfill_claim_embeddings(&self, store: &Store) -> Result<usize> {
-        let db = store.db().await?;
-        let mut offset = 0_i64;
-        let mut filled = 0;
-        loop {
-            let rows = db
-                .query(
-                    &format!(
-                        "SELECT c.subject, c.predicate, {valid}, c.embedding FROM claim c
-                          WHERE c.embedding IS NOT NULL
-                          ORDER BY c.subject, c.predicate, c.valid_from LIMIT $1 OFFSET $2;",
-                        valid = epoch_us("c.valid_from")
-                    ),
-                    &[&i64::try_from(CLAIM_ROW_PAGE)?, &offset],
-                )
-                .await
-                .context("read a page of claim embeddings from pgvector")?;
-            if rows.is_empty() {
-                break;
-            }
-            offset += i64::try_from(rows.len())?;
-            let pg: HashMap<String, Vec<f32>> = rows
-                .iter()
-                .map(|r| {
-                    let key = claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2));
-                    (key, r.get::<_, Vector>(3).to_vec())
-                })
-                .collect();
-            let keys: Vec<String> = pg.keys().cloned().collect();
-            let query = format!(
-                "SELECT VALUE cid FROM claim_row WHERE cid INSIDE {} AND embedding = NONE \
-                 AND via != 'surreal';",
-                texts(&keys)
-            );
-            let lacking: Vec<String> = first_statement(&query, self.rows::<String>(&query).await?)?;
-            filled += lacking.len();
-            for batch in lacking.chunks(FILL_BATCH) {
-                let pairs: Vec<String> = batch
-                    .iter()
-                    .map(|k| format!("[{}, {}]", text(k), floats(&pg[k])))
-                    .collect();
-                self.run(&format!(
-                    "FOR $p IN [{}] {{ UPDATE type::record('claim_row', $p[0]) \
-                     SET embedding = $p[1] WHERE embedding = NONE AND via != 'surreal'; }};",
-                    pairs.join(",")
-                ))
-                .await?;
-            }
-        }
-        Ok(filled)
-    }
-
-    /// A tombstone holds a key back only while pg still holds the row; once pg lacks it the
-    /// tombstone has nothing left to stop and goes, so a key pg writes again later is copied.
-    async fn drop_moot_tombstones(&self, store: &Store) -> Result<()> {
-        let gone: Vec<String> = self.surreal_gone().await?.into_iter().collect();
-        let held: std::collections::HashSet<String> = store
-            .db()
-            .await?
-            .query(
-                &format!(
-                    "SELECT c.subject || chr(31) || c.predicate || chr(31) || {valid} \
-                     FROM claim c WHERE c.subject || chr(31) || c.predicate || chr(31) || \
-                     {valid} = ANY($1);",
-                    valid = epoch_us("c.valid_from")
-                ),
-                &[&gone],
-            )
-            .await
-            .context("look up the tombstoned claim keys in pgvector")?
-            .iter()
-            .map(|r| r.get::<_, String>(0))
-            .collect();
-        let moot: Vec<String> = gone.into_iter().filter(|k| !held.contains(k)).collect();
-        self.delete_rows("claim_gone", &moot).await
-    }
-
     /// Every `cid` of one table, a page at a time in the table's own key order: one answer
     /// carrying the 272k edge keys at once is what a 8GB Surreal VM could not hold.
     async fn table_keys(&self, table: &str) -> Result<Vec<String>> {
@@ -2681,40 +2209,9 @@ impl SurrealClient {
         }
     }
 
-    /// Set `stale_us` on claims Surreal already holds under the same key; the HNSW index is not
-    /// touched (the embedding stays).
-    async fn set_stale(&self, changed: &[(String, Option<i64>)]) -> Result<()> {
-        for batch in changed.chunks(FILL_BATCH) {
-            let rows: Vec<String> = batch
-                .iter()
-                .map(|(cid, stale)| {
-                    let value = stale.map_or_else(|| "NONE".to_owned(), |us| us.to_string());
-                    format!("{{cid: {}, s: {value}}}", text(cid))
-                })
-                .collect();
-            self.run(&format!(
-                "FOR $r IN [{}] {{ UPDATE type::record('claim', $r.cid) SET stale_us = $r.s; }};",
-                rows.join(",")
-            ))
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// The keys of the claim rows a Surreal write made or moved (`claim_row.via`, see
-    /// `ensure_via_field`). pg does not hold them, or holds an older value: the copies from pg
-    /// (`catch_up`, the mirror, `claim_row_diff`) skip these keys in both tables, so a claim
-    /// written on Surreal is never deleted or put back by a pass that reads pg.
-    pub(super) async fn surreal_written(&self) -> Result<std::collections::HashSet<String>> {
-        let query = "SELECT VALUE cid FROM claim_row WHERE via = 'surreal';";
-        Ok(first_statement(query, self.rows::<String>(query).await?)?
-            .into_iter()
-            .collect())
-    }
-
     /// The keys of the claim rows a Surreal write deleted (`claim_gone`, written by the split
-    /// merge) while pg still holds them. The copies from pg skip these keys, so a deleted row is
-    /// not put back by the next `catch_up` or mirror. A table nobody wrote reads as empty.
+    /// merge) while pg still holds them. `claim_row_diff` skips these keys. A table nobody wrote
+    /// reads as empty.
     pub(super) async fn surreal_gone(&self) -> Result<std::collections::HashSet<String>> {
         self.ensure_via_field().await?;
         let query = "SELECT VALUE cid FROM claim_gone;";
@@ -2735,29 +2232,12 @@ impl SurrealClient {
         })
     }
 
-    /// Bring Surreal's vector `claim` and `claim_row` rows level with pg's by key: rows pg has
-    /// and Surreal lacks are written, rows Surreal has and pg lacks are deleted. This is how rows
-    /// the Python door wrote straight to pg (no mirror there) reach Surreal on the next sync. A
-    /// key both sides hold is not re-read, except in `claim_row`, which is compared by value.
-    /// Returns `(written, deleted)`.
+    /// Only the HNSW indexes are checked: every table (C0b1 bundles 1-3) is written straight into
+    /// Surreal, so a key pg lacks is the row, not a stale one. `fill_from` is the one copy left.
+    /// Returns `(written, deleted)`, always `(0, 0)`.
     pub async fn catch_up(&self, store: &Store) -> Result<(usize, usize)> {
-        // `document`, `chunk`, `node` and `edge` are not copied: the engine writes them straight
-        // into Surreal (C0b1 bundles 1 and 2), and a key pg lacks is the row, not a stale one.
-        // `fill_from` still copies all of them (the Z4 level-up tool).
-        // The one table whose rows change value under a key both sides hold (a seal, an unseal, a
-        // stale mark written straight to pg), so it is compared by value, not by key.
-        // A mass-delete rebuild that failed leaves a table without an index; the claim_row repair
-        // does not need one, so every step runs and the failures are returned together.
-        let before = self.ensure_all_hnsw(store).await;
-        let vectors = self.catch_up_vectors(store).await;
-        let rows = self.repair_claim_rows(store).await;
-        let after = self.ensure_all_hnsw(store).await;
-        let ((vectors_written, vectors_deleted), (rows_written, rows_deleted)) =
-            first_failure([before.err(), after.err()], vectors, rows)?;
-        Ok((
-            vectors_written + rows_written,
-            vectors_deleted + rows_deleted,
-        ))
+        self.ensure_all_hnsw(store).await?;
+        Ok((0, 0))
     }
 
     /// `ensure_hnsw` on every vector table; each table that had none is logged with the time the
@@ -2780,76 +2260,6 @@ impl SurrealClient {
             }
         }
         result
-    }
-
-    /// The same key level for the vector `claim` table, through the write path a mirrored write
-    /// takes (`mirror_claims`: claim rows and the dirty count that schedules the HNSW swap). A key
-    /// on one side only names the `(subject, predicate)` slot to re-mirror; the mirror reads pg
-    /// for that scope and writes what it holds. Without this a seal or an insert the Python door
-    /// wrote straight to pg leaves the vector table off by exactly those keys until the next
-    /// fill. The vector `chunk` tables are not compared (C0b1 bundle 1: written straight into
-    /// Surreal). Returns `(written, deleted)`: keys pg had and Surreal lacked, keys the other way
-    /// round.
-    async fn catch_up_vectors(&self, store: &Store) -> Result<(usize, usize)> {
-        let db = store.db().await?;
-        let mut written = 0;
-        let mut deleted = 0;
-
-        // The vector `chunk` tables are not compared with pg here: the engine writes them straight
-        // into Surreal (C0b1 bundle 1).
-        let pg_claims = pg_claim_keys(&db).await?;
-        let have: std::collections::HashSet<String> =
-            self.table_keys("claim").await?.into_iter().collect();
-        let want: std::collections::HashSet<&str> = pg_claims.iter().map(String::as_str).collect();
-        let on_surreal = self.surreal_written().await?;
-        let gone = self.surreal_gone().await?;
-        let stale: Vec<&String> = have
-            .iter()
-            .filter(|k| !want.contains(k.as_str()) && !on_surreal.contains(*k))
-            .collect();
-        let missing: Vec<&String> = pg_claims
-            .iter()
-            .filter(|k| !have.contains(*k) && !on_surreal.contains(*k) && !gone.contains(*k))
-            .collect();
-        let stale_claims = stale.len();
-        let surreal_stales = self.surreal_claim_stales().await?;
-        let moved: Vec<(String, Option<i64>)> = pg_claim_stales(&db)
-            .await?
-            .into_iter()
-            .filter(|(key, us)| surreal_stales.get(key).is_some_and(|held| held != us))
-            .collect();
-        self.set_stale(&moved).await?;
-        written += moved.len();
-        written += missing.len();
-        deleted += stale.len();
-        let slots: Vec<(String, String)> = missing
-            .iter()
-            .chain(stale.iter())
-            .filter_map(|k| {
-                let mut parts = k.split(KEY_SEP);
-                Some((parts.next()?.to_owned(), parts.next()?.to_owned()))
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let mirror_slots = || async {
-            for batch in slots.chunks(CATCH_UP_BATCH) {
-                let scope = Scope {
-                    paths: Vec::new(),
-                    slots: batch.to_vec(),
-                    nodes: Vec::new(),
-                };
-                self.mirror_claims(store, &scope).await?;
-            }
-            Ok(())
-        };
-        if stale_claims > MASS_DELETE {
-            self.without_hnsw(&["claim".to_owned()], mirror_slots)
-                .await?;
-        } else {
-            mirror_slots().await?;
-        }
-        Ok((written, deleted))
     }
 
     /// `Store::recent_register_rows` / `recent_claims` against the `claim_row` copy: the same

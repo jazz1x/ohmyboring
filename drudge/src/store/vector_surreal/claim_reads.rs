@@ -62,6 +62,13 @@ impl NoteClaim {
 }
 
 #[derive(Deserialize)]
+struct KindedSlot {
+    subject: String,
+    predicate: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
 struct SourceRow {
     subject: String,
     value: String,
@@ -538,6 +545,17 @@ impl SurrealClient {
         Ok(usize::try_from(rows.first().map_or(0, |c| c.n)).unwrap_or(0))
     }
 
+    /// `(subject, predicate, kind)` of every `claim_row`, sealed ones included: the keys a claim
+    /// node (`claim:<s>:<p>`, `<kind>:<s>:<p>`) may still be named after (`gc_orphans`).
+    pub async fn claim_node_keys(&self) -> Result<Vec<(String, String, String)>> {
+        let sql = "SELECT subject, predicate, kind FROM claim_row;";
+        let rows: Vec<KindedSlot> = first_statement(sql, self.rows::<KindedSlot>(sql).await?)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.subject, r.predicate, r.kind))
+            .collect())
+    }
+
     /// `Store::claims_due_for_anchor_check`: pinned, not stale, past the watermark, oldest first.
     pub async fn claims_due_for_anchor_check(
         &self,
@@ -600,11 +618,11 @@ impl SurrealClient {
     }
 }
 
-fn epoch_micros(t: SystemTime) -> Result<i64> {
+pub(super) fn epoch_micros(t: SystemTime) -> Result<i64> {
     let since = t
         .duration_since(SystemTime::UNIX_EPOCH)
-        .context("watermark before 1970")?;
-    i64::try_from(since.as_micros()).context("watermark micros overflow")
+        .context("time before 1970")?;
+    i64::try_from(since.as_micros()).context("micros overflow")
 }
 
 fn claim_row_of(r: SourceRow, authors: &HashMap<String, String>) -> Result<ClaimRow> {

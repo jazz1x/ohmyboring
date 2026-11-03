@@ -199,7 +199,9 @@ def _refuse_python_writers_on_surreal() -> None:
     (REMEMBER_WRITER), sync/run.py:55-59 gc (SYNC_OWNER, COMPACT_OWNER 는 compact/run.py:166 gc_apply),
     gap/pg.py:39-58 (LINK_WRITER), search/pg.py:485·496 write_handover (VERDICT_WRITER verdict/run.py:151,
     RECALL_READER door.py:1205, SEARCH_READER door.py:2259). 나머지(EVENTS_OWNER=event_log, BRIEF_OWNER=볼트 md,
-    MEMORY_READER·REGISTER_READER=읽기) 는 node·edge 를 쓰지 않는다."""
+    MEMORY_READER·REGISTER_READER=읽기) 는 node·edge 를 쓰지 않는다. claim 을 쓰는 파이썬 SQL(묶음3)도 같은
+    스위치 뒤에 있다: writer.py:139-181 (REMEMBER_WRITER), compact/run.py:47·53 (COMPACT_OWNER),
+    door.py:1537 split 삭제 (LINK_WRITER=python 일 때만)."""
     # rollback = backend=pg + DOOR_*=python as a pair
     backend = (boring_config.load().get("vector") or {}).get("backend")
     python_on = [
@@ -218,7 +220,7 @@ def _refuse_python_writers_on_surreal() -> None:
     if backend == "surreal" and python_on:
         raise SystemExit(
             f"[door] refusing to start: boring.json vector.backend=surreal but {', '.join(python_on)}=python "
-            "writes document/chunk/node/edge straight to pg, which Surreal never sees. Set them to engine, "
+            "writes document/chunk/node/edge/claim straight to pg, which Surreal never sees. Set them to engine, "
             "or roll back as a pair (vector.backend=pgvector + DOOR_*=python)."
         )
 
