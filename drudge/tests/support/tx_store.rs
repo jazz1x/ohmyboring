@@ -77,7 +77,7 @@ impl StoreTx for Store {
     async fn handed_paths(&self, session_id: &str) -> Result<Vec<String>> {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
-        let paths = Store::handed_paths(&tx, session_id).await?;
+        let paths = Store::handed_paths(self.doc_lookup(), &tx, session_id).await?;
         tx.commit().await?;
         Ok(paths)
     }

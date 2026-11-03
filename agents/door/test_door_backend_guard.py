@@ -18,6 +18,8 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 door = importlib.import_module("agents.door.door")
 
 _PYTHON_WRITERS = ("DOOR_REMEMBER_WRITER", "DOOR_SYNC_OWNER", "DOOR_LINK_WRITER")
+# 묶음2: node·edge 를 pg 에 쓰는 길 — verdict/run.py:151, door.py:1205·2259 (search/pg.py write_handover), compact → sync/run.py gc_apply
+_GRAPH_WRITERS = ("DOOR_VERDICT_WRITER", "DOOR_RECALL_READER", "DOOR_SEARCH_READER", "DOOR_COMPACT_OWNER")
 
 
 def _start(backend: str, env: dict[str, str]) -> None:
@@ -48,6 +50,18 @@ class BackendGuard(unittest.TestCase):
 
     def test_pgvector_with_python_writers_starts(self) -> None:
         _start("pgvector", {name: "python" for name in _PYTHON_WRITERS})
+
+    def test_surreal_with_a_python_graph_writer_refuses_to_start(self) -> None:
+        for name in _GRAPH_WRITERS:
+            with self.subTest(switch=name), self.assertRaises(SystemExit) as stopped:
+                _start("surreal", {name: "python"})
+            self.assertIn(name, str(stopped.exception))
+
+    def test_surreal_with_every_graph_writer_on_engine_starts(self) -> None:
+        _start("surreal", {name: "engine" for name in _GRAPH_WRITERS})
+
+    def test_pgvector_with_python_graph_writers_starts(self) -> None:
+        _start("pgvector", {name: "python" for name in _GRAPH_WRITERS})
 
 
 if __name__ == "__main__":

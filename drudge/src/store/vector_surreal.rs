@@ -1088,8 +1088,10 @@ mod claim_reads;
 mod claim_tx;
 mod doc_reads;
 mod doc_tx;
+mod graph_tx;
 pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
 pub use doc_tx::{NoteChunk, NoteWrite};
+pub use graph_tx::GraphOp;
 mod reads;
 mod recurrences;
 
@@ -1209,6 +1211,11 @@ fn epoch_us(col: &str) -> String {
 pub const SURREAL_BEHIND: &str =
     "pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것";
 
+/// Why a failed graph (`node`/`edge`) write is not `SURREAL_BEHIND`: since C0b1 bundle 2 those rows
+/// exist only in Surreal, so pg holds no copy of them to fill from. What pg already committed in
+/// the same request (a document row, for one) stays; the graph rows of the request do not exist.
+pub const SURREAL_GRAPH_FAILED: &str = "Surreal 그래프(node·edge) 쓰기 실패. 그래프 행은 pg 에 없음, 같은 요청에서 pg 가 이미 커밋한 행(문서 등)만 남아 있음";
+
 /// What a committed pg write touched, in the terms Surreal's rows are keyed by: the notes whose
 /// chunks and claims were written, and the `(subject, predicate)` slots whose current row may
 /// have moved.
@@ -1262,16 +1269,6 @@ impl Scope {
 
     fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.slots.is_empty() && self.nodes.is_empty()
-    }
-
-    /// The graph ids this scope names: each note's `doc:<path>` (the graph has edges to a note but
-    /// no node row for it) and the nodes named directly.
-    fn graph_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.paths.iter().map(|p| format!("doc:{p}")).collect();
-        ids.extend(self.nodes.iter().cloned());
-        ids.sort_unstable();
-        ids.dedup();
-        ids
     }
 }
 
@@ -1695,7 +1692,7 @@ const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD via ON document TYPE option<string>;";
 
 /// pg's `(document, node, edge)` keys, in the shapes Surreal keys them by. The fill's compare
-/// reads all three; `catch_up` reads only `pg_node_edge_keys`.
+/// reads all three (`catch_up` no longer reads any: C0b1 copy off).
 async fn pg_graph_keys(
     db: &tokio_postgres::Client,
 ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
@@ -1773,47 +1770,6 @@ async fn pg_claim_keys(db: &tokio_postgres::Client) -> Result<Vec<String>> {
         .context("read open claim keys from pgvector")?
         .iter()
         .map(|r| claim_key(&r.get::<_, String>(0), &r.get::<_, String>(1), r.get(2)))
-        .collect())
-}
-
-/// The record literals of the pg rows named by `keys` (`document`, `node` or `edge`).
-async fn pg_literals(store: &Store, table: &str, keys: &[String]) -> Result<Vec<String>> {
-    let db = store.db().await?;
-    let rows = match table {
-        "document" => {
-            db.query(&document_select("WHERE d.source_path = ANY($1)"), &[&keys])
-                .await
-        }
-        "node" => {
-            db.query(&node_select("WHERE n.id = ANY($1)"), &[&keys])
-                .await
-        }
-        _ => {
-            let parts: Vec<Vec<&str>> = keys.iter().map(|k| k.split(KEY_SEP).collect()).collect();
-            let column = |i: usize| -> Vec<&str> {
-                parts
-                    .iter()
-                    .map(|p| p.get(i).copied().unwrap_or(""))
-                    .collect()
-            };
-            db.query(
-                &edge_select(
-                    "WHERE (e.src, e.dst, e.kind) IN \
-                     (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]))",
-                ),
-                &[&column(0), &column(1), &column(2)],
-            )
-            .await
-        }
-    }
-    .with_context(|| format!("read the {table} rows Surreal lacks from pgvector"))?;
-    Ok(rows
-        .iter()
-        .map(|r| match table {
-            "document" => document_literal(r).1,
-            "node" => node_literal(r).1,
-            _ => edge_literal(r).1,
-        })
         .collect())
 }
 
@@ -2332,81 +2288,6 @@ impl SurrealClient {
         self.bump_dirty(table, literals.len() + stale.len()).await
     }
 
-    /// The graph around `ids`: every edge with one of them at an end, and the nodes at the ends of
-    /// those edges. A claim node found at an end brings its own edges too (`is_a`,
-    /// `claim_of_project`, `said`), since a claim write puts them beside the `claims` edge.
-    /// Surreal's copy of that neighbourhood is made equal to pg's: nodes and edges pg holds are
-    /// upserted first, then the edges and nodes pg lacks leave, so a failure half way leaves
-    /// Surreal with more rows, never fewer.
-    async fn reconcile_graph(&self, store: &Store, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let db = store.db().await?;
-        let by_ends = edge_select("WHERE e.src = ANY($1) OR e.dst = ANY($1)");
-        let mut edges = db
-            .query(&by_ends, &[&ids])
-            .await
-            .context("read the written graph's edges from pgvector")?;
-        let claim_ends: Vec<String> = edges
-            .iter()
-            .flat_map(|r| [r.get::<_, String>(0), r.get::<_, String>(1)])
-            .filter(|id| id.starts_with("claim:") && !ids.contains(id))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if !claim_ends.is_empty() {
-            let more = db
-                .query(&by_ends, &[&claim_ends])
-                .await
-                .context("read the written claims' edges from pgvector")?;
-            edges.extend(more);
-        }
-        let scope: Vec<String> = ids.iter().chain(claim_ends.iter()).cloned().collect();
-        let wanted_edges: std::collections::BTreeMap<String, String> =
-            edges.iter().map(edge_literal).collect();
-        let ends: Vec<String> = edges
-            .iter()
-            .flat_map(|r| [r.get::<_, String>(0), r.get::<_, String>(1)])
-            .chain(scope.iter().cloned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let node_rows = db
-            .query(&node_select("WHERE n.id = ANY($1)"), &[&ends])
-            .await
-            .context("read the written graph's nodes from pgvector")?;
-        let wanted_nodes: Vec<(String, String)> = node_rows.iter().map(node_literal).collect();
-
-        let edge_query = format!(
-            "SELECT VALUE cid FROM edge WHERE src INSIDE {s} OR dst INSIDE {s};",
-            s = texts(&scope)
-        );
-        let existing_edges = first_statement(&edge_query, self.rows::<String>(&edge_query).await?)?;
-        let node_query = format!(
-            "SELECT VALUE cid FROM node WHERE cid INSIDE {};",
-            texts(&scope)
-        );
-        let existing_nodes = first_statement(&node_query, self.rows::<String>(&node_query).await?)?;
-
-        let node_keep: std::collections::HashSet<&str> =
-            wanted_nodes.iter().map(|(k, _)| k.as_str()).collect();
-        let stale_nodes: Vec<String> = existing_nodes
-            .into_iter()
-            .filter(|k| !node_keep.contains(k.as_str()))
-            .collect();
-        let stale_edges: Vec<String> = existing_edges
-            .into_iter()
-            .filter(|k| !wanted_edges.contains_key(k))
-            .collect();
-        let node_literals: Vec<String> = wanted_nodes.into_iter().map(|(_, l)| l).collect();
-        let edge_literals: Vec<String> = wanted_edges.into_values().collect();
-        self.upsert_rows("node", &node_literals).await?;
-        self.upsert_rows("edge", &edge_literals).await?;
-        self.delete_rows("edge", &stale_edges).await?;
-        self.delete_rows("node", &stale_nodes).await
-    }
-
     /// Write-through: after pg committed a change, copy pg's state of everything it touched into
     /// Surreal. pg is the original, so Surreal is rebuilt from what pg holds now, never from what
     /// the request carried. Covers an upsert (new rows and changed columns), a supersede or
@@ -2416,10 +2297,9 @@ impl SurrealClient {
         if scope.is_empty() {
             Ok(())
         } else {
-            // C0b1 bundle 1: `document` and `chunk` rows are written by the engine straight into
-            // Surreal (`doc_tx.rs`), so this copy would only delete them. Graph and claims stay
-            // copied from pg until their bundle.
-            self.reconcile_graph(store, &scope.graph_ids()).await?;
+            // C0b1 bundles 1 and 2: `document`, `chunk`, `node` and `edge` rows are written by the
+            // engine straight into Surreal (`doc_tx.rs`, `graph_tx.rs`), so a copy from pg would
+            // only delete them. Claims stay copied from pg until bundle 3.
             self.mirror_claims(store, scope).await
         }
     }
@@ -2855,43 +2735,15 @@ impl SurrealClient {
         })
     }
 
-    /// Bring Surreal's `document`, `node`, `edge`, vector `chunk` and vector `claim` rows level
-    /// with pg's by key: rows pg has and Surreal lacks are written, rows Surreal has and pg lacks
-    /// are deleted. This is how rows the Python door wrote straight to pg (no mirror there) reach
-    /// Surreal on the next sync. A key both sides hold is not re-read, except in `claim_row`,
-    /// which is compared by value. Returns `(written, deleted)`.
+    /// Bring Surreal's vector `claim` and `claim_row` rows level with pg's by key: rows pg has
+    /// and Surreal lacks are written, rows Surreal has and pg lacks are deleted. This is how rows
+    /// the Python door wrote straight to pg (no mirror there) reach Surreal on the next sync. A
+    /// key both sides hold is not re-read, except in `claim_row`, which is compared by value.
+    /// Returns `(written, deleted)`.
     pub async fn catch_up(&self, store: &Store) -> Result<(usize, usize)> {
-        // `document` and `chunk` are not copied: the engine writes them straight into Surreal
-        // (C0b1 bundle 1), and a key pg lacks is the row, not a stale one.
-        let (pg_nodes, pg_edges) = pg_node_edge_keys(&*store.db().await?).await?;
-        let mut written = 0;
-        let mut deleted = 0;
-        let mut stale_edges = Vec::new();
-        let mut stale_nodes = Vec::new();
-        for (table, pg_keys, stale) in [
-            ("node", pg_nodes, &mut stale_nodes),
-            ("edge", pg_edges, &mut stale_edges),
-        ] {
-            let have: std::collections::HashSet<String> =
-                self.table_keys(table).await?.into_iter().collect();
-            let want: std::collections::HashSet<&str> =
-                pg_keys.iter().map(String::as_str).collect();
-            *stale = have
-                .iter()
-                .filter(|k| !want.contains(k.as_str()))
-                .cloned()
-                .collect();
-            let missing: Vec<String> = pg_keys.into_iter().filter(|k| !have.contains(k)).collect();
-            for batch in missing.chunks(CATCH_UP_BATCH) {
-                let literals = pg_literals(store, table, batch).await?;
-                written += literals.len();
-                self.upsert_rows(table, &literals).await?;
-            }
-        }
-        for (table, keys) in [("edge", &stale_edges), ("node", &stale_nodes)] {
-            deleted += keys.len();
-            self.delete_rows(table, keys).await?;
-        }
+        // `document`, `chunk`, `node` and `edge` are not copied: the engine writes them straight
+        // into Surreal (C0b1 bundles 1 and 2), and a key pg lacks is the row, not a stale one.
+        // `fill_from` still copies all of them (the Z4 level-up tool).
         // The one table whose rows change value under a key both sides hold (a seal, an unseal, a
         // stale mark written straight to pg), so it is compared by value, not by key.
         // A mass-delete rebuild that failed leaves a table without an index; the claim_row repair
@@ -2903,8 +2755,8 @@ impl SurrealClient {
         let ((vectors_written, vectors_deleted), (rows_written, rows_deleted)) =
             first_failure([before.err(), after.err()], vectors, rows)?;
         Ok((
-            written + vectors_written + rows_written,
-            deleted + vectors_deleted + rows_deleted,
+            vectors_written + rows_written,
+            vectors_deleted + rows_deleted,
         ))
     }
 

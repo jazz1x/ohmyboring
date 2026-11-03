@@ -328,7 +328,8 @@ async fn a_mass_delete_catch_up_rebuilds_the_claim_index_instead_of_deleting_thr
     };
     let before = index_names(client.run("INFO FOR TABLE claim;").await.expect("info"));
 
-    // The Python door's kind of write: pg only, past the mass-delete line.
+    // The Python door's kind of write: a claim delete in pg, past the mass-delete line, that only
+    // `catch_up` carries to Surreal.
     db.execute(
         "DELETE FROM claim WHERE subject > $1",
         &[&format!("claim-mass-{:04}", kept - 1)],
@@ -337,8 +338,13 @@ async fn a_mass_delete_catch_up_rebuilds_the_claim_index_instead_of_deleting_thr
     .unwrap();
     client.catch_up(&store).await.expect("catch_up");
 
+    // `catch_up` levels only the claim tables (C0b1 bundle 2: node and edge are written straight
+    // into Surreal, and `upsert_claim` above made its nodes in pg only); node and edge writes are
+    // checked in vector_surreal_writes.
     for t in client.compare(&store).await.expect("compare") {
-        assert!(t.same(), "after the mass delete: {}", t.line());
+        if t.table.starts_with("claim") {
+            assert!(t.same(), "after the mass delete: {}", t.line());
+        }
     }
     let after = index_names(client.run("INFO FOR TABLE claim;").await.expect("info"));
     assert_ne!(

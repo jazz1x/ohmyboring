@@ -658,7 +658,7 @@ async fn consume_in_tx(
     // nothing: empty verdict list, normal response — not an error.
     let report = match req.verdict() {
         Some(verdict) => {
-            let handed = Store::handed_paths(&tx, &req.session_id).await?;
+            let handed = Store::handed_paths(store.doc_lookup(), &tx, &req.session_id).await?;
             let empty: Vec<String> = Vec::new();
             let (used, contested) = if verdict == "used" {
                 (&handed, &empty)

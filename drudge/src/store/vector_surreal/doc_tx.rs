@@ -17,8 +17,8 @@
 //! Z4: after B, pg does not receive Surreal writes. The Z4 rehearsal "all-table diff 0/N" is
 //! measured after `fill_from` aligns pg and Surreal right before the switch-over; no
 //! `backend=surreal` live, Z4 rehearsal or live-copy measurement until every table bundle is
-//! closed (ingest is two transactions between the bundles: Surreal for document+chunk, pg for
-//! the graph).
+//! closed (ingest is three commits between the bundles: Surreal for document+chunk, Surreal for
+//! the graph (`graph_tx.rs`), pg for claims).
 
 use std::time::SystemTime;
 

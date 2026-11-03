@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use super::pg_failure_tests::{admin, fresh_store, unique};
 use super::split_tests::{call, state_with};
 use crate::serve::build_router;
-use crate::store::{SURREAL_BEHIND, SurrealClient, VectorRoute};
+use crate::store::{SURREAL_GRAPH_FAILED, SurrealClient, VectorRoute};
 
 fn dead_surreal() -> SurrealClient {
     let config: crate::config::SurrealConfig = serde_json::from_value(
@@ -42,7 +42,7 @@ async fn drop_database(admin_dsn: &str, name: &str) {
 }
 
 #[tokio::test]
-async fn consumption_with_a_dead_surreal_says_pg_has_the_session() {
+async fn consumption_with_a_dead_surreal_says_the_graph_write_failed() {
     let Some(admin_dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
@@ -67,13 +67,13 @@ async fn consumption_with_a_dead_surreal_says_pg_has_the_session() {
         StatusCode::OK,
         "a dead Surreal was swallowed: {body}"
     );
-    assert!(body.contains(SURREAL_BEHIND), "answer was {body}");
-    assert_eq!(session_nodes_in_pg(&dsn, "s-c").await, 1);
+    assert!(body.contains(SURREAL_GRAPH_FAILED), "answer was {body}");
+    assert_eq!(session_nodes_in_pg(&dsn, "s-c").await, 0);
     drop_database(&admin_dsn, &name).await;
 }
 
 #[tokio::test]
-async fn verdict_with_a_dead_surreal_says_pg_has_the_session() {
+async fn verdict_with_a_dead_surreal_fails_at_the_handed_read() {
     let Some(admin_dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
         return;
@@ -93,7 +93,7 @@ async fn verdict_with_a_dead_surreal_says_pg_has_the_session() {
     )
     .await;
     let body = String::from_utf8_lossy(&body).into_owned();
-    assert!(body.contains(SURREAL_BEHIND), "answer was {body}");
-    assert_eq!(session_nodes_in_pg(&dsn, "s-v").await, 1);
+    assert!(body.contains("handed paths"), "answer was {body}");
+    assert_eq!(session_nodes_in_pg(&dsn, "s-v").await, 0);
     drop_database(&admin_dsn, &name).await;
 }
