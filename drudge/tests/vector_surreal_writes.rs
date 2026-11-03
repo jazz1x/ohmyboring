@@ -1,6 +1,7 @@
-//! C-VECADAPT2 2b: on `backend=surreal` every write that changes a chunk or an open claim in pg is
-//! written into SurrealDB too, and a Surreal failure is an error that says pg already holds the
-//! change.
+//! C-VECADAPT2 2b, as C0b1 bundles 1-3 left it: on `backend=surreal` document, chunk, node, edge,
+//! claim and claim_row writes go straight into SurrealDB and pg receives none of them. Each test
+//! writes the same thing through a pgvector store (the oracle) and the Surreal-routed store, then
+//! compares the two.
 //!
 //! Needs a throwaway pgvector (its document and claim tables are emptied on each run) and a
 //! throwaway SurrealDB. Run:
@@ -14,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use drudge::config::{BoringConfig, SurrealConfig};
 use drudge::frontmatter::FrontMatter;
 use drudge::ingest::{DefaultChunker, Embed, FrontmatterGraphExtractor, ingest_file_with};
-use drudge::store::{Doc, NoteChunk, NoteWrite, Scope, Store, SurrealClient, VectorRoute};
+use drudge::store::{Doc, NoteChunk, NoteWrite, Store, SurrealClient, VectorRoute};
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
@@ -52,9 +53,8 @@ fn client_at(url: &str, namespace: &str) -> SurrealClient {
 
 struct Fixture {
     store: Store,
-    /// The same pg without the Surreal route: what the ingest writes a claim through (inside a pg
-    /// transaction), after which the mirror copies it. A claim written through `store` goes to
-    /// Surreal only (Z1), so the pg-versus-Surreal comparisons here write through this one.
+    /// The same pg without the Surreal route: the oracle. Whatever a test writes through `store`
+    /// (Surreal only) it writes through this one too, so the two can be compared.
     pg_store: Store,
     client: SurrealClient,
     db: tokio_postgres::Client,
@@ -108,7 +108,7 @@ fn front(path: &str) -> FrontMatter {
 
 impl Fixture {
     /// Send Surreal the note as the fixture holds it (document + all its chunks, one transaction),
-    /// then copy the graph and claims pg holds for it.
+    /// then its graph half.
     async fn put(&self, path: &str) {
         let (fm, sha, positions) = self.notes.lock().unwrap().get(path).cloned().unwrap();
         let ids: Vec<String> = positions.iter().map(|i| format!("{path}#{i}")).collect();
@@ -146,10 +146,6 @@ impl Fixture {
         )
         .await
         .expect("surreal graph");
-        self.store
-            .mirror_surreal(&Scope::notes([path.to_owned()]))
-            .await
-            .expect("mirror graph and claims");
     }
 
     async fn doc(&self, path: &str) {
@@ -250,24 +246,24 @@ impl Fixture {
         self.notes.lock().unwrap().remove(path);
     }
 
+    /// The same claim through both routes (C0b1 bundle 3): `pg_store` writes pg, the oracle;
+    /// `store` writes Surreal directly. Nothing copies one to the other.
     async fn claim(&self, path: &str, subject: &str, kind: &str, hours_ago: u64) {
-        self.pg_store
-            .upsert_claim(
+        let valid_from = SystemTime::now() - Duration::from_hours(hours_ago);
+        for s in [&self.pg_store, &self.store] {
+            s.upsert_claim(
                 subject,
                 "observed",
                 &format!("a long enough value from {path}"),
                 path,
-                SystemTime::now() - Duration::from_hours(hours_ago),
+                valid_from,
                 &vec_at(7),
                 kind,
                 "certain",
             )
             .await
             .expect("claim");
-        self.store
-            .mirror_surreal(&Scope::notes([path.to_owned()]))
-            .await
-            .expect("mirror");
+        }
     }
 
     /// (pg ids, Surreal ids) of chunks, then of open claims — each side sorted, as the strings the
@@ -415,19 +411,11 @@ impl Fixture {
         assert_eq!(pg_docs, surreal_docs, "{step}: document rows differ");
         let (pg_text, surreal_text) = self.chunk_text_rows().await;
         assert_eq!(pg_text, surreal_text, "{step}: chunk content/origin differ");
-        // supersedes edges live only in Surreal: the edge table holds exactly those extra rows
-        let extra = self.client.supersedes_edges().await.unwrap().len();
+        // Every write above went through both routes, so the compare is pg oracle against Surreal
+        // for every table, claims included.
         let tables = self.client.compare(&self.store).await.unwrap();
         for t in &tables {
-            if t.table == "edge" && extra > 0 {
-                assert_eq!(
-                    t.surreal.rows,
-                    t.pg.rows + extra,
-                    "{step}: edge rows {tables:?}"
-                );
-            } else {
-                assert!(t.same(), "{step}: compare says different: {tables:?}");
-            }
+            assert!(t.same(), "{step}: compare says different: {tables:?}");
         }
     }
 }
@@ -460,17 +448,12 @@ async fn upsert_supersede_and_delete_leave_the_two_stores_with_the_same_ids() {
         .await;
 
     // supersede by an edge: b retires a, which seals a's remaining open claim
-    f.store
-        .supersedes_in_tx(&[[b.clone(), a.clone()]], None)
-        .await
-        .expect("supersedes");
-    // b-seal: the edge exists only in Surreal, yet the claim gets sealed.
-    let pg_edges: i64 =
-        f.db.query_one("SELECT count(*) FROM edge WHERE kind = 'supersedes'", &[])
+    for s in [&f.pg_store, &f.store] {
+        s.supersedes_in_tx(&[[b.clone(), a.clone()]], None)
             .await
-            .unwrap()
-            .get(0);
-    assert_eq!(pg_edges, 0, "the supersedes edge must not be in pg");
+            .expect("supersedes");
+    }
+    // b-seal: the edge and the seal run in Surreal on the Surreal route, in pg on the oracle.
     assert!(
         f.client
             .supersedes_edges()
@@ -514,16 +497,19 @@ async fn sync_of_a_note_file_writes_surreal_too() {
     )
     .await
     .expect("ingest");
-    // New contract (C0b1): the engine wrote the note's document and chunk into Surreal only; pg
-    // holds neither, and the claim (copied from pg) is in both.
+    // New contract (C0b1 bundles 1-3): the engine wrote the note's document, chunk and claim into
+    // Surreal only; pg holds none of them.
     let [(pg_chunks, s_chunks), (pg_claims, s_claims)] = f.id_sets().await;
     assert!(
         pg_chunks.is_empty(),
         "pg must not receive the chunk: {pg_chunks:?}"
     );
     assert_eq!(s_chunks.len(), 1, "Surreal holds the chunk: {s_chunks:?}");
-    assert_eq!(pg_claims, s_claims, "open claim ids differ");
-    assert_eq!(pg_claims.len(), 1);
+    assert!(
+        pg_claims.is_empty(),
+        "pg must not receive the claim: {pg_claims:?}"
+    );
+    assert_eq!(s_claims.len(), 1, "Surreal holds the claim: {s_claims:?}");
     let pg_docs: i64 =
         f.db.query_one("SELECT count(*) FROM document", &[])
             .await
@@ -787,7 +773,7 @@ async fn node_and_edge_rows_written_straight_to_pg_are_not_copied_by_catch_up() 
 
 #[tokio::test]
 #[ignore = "needs throwaway pg: see the run command in this file's header"]
-async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
+async fn a_dead_surreal_is_an_error_that_does_not_say_pg_has_it() {
     let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
     // Nothing listens on port 1: every Surreal request fails after pg has committed.
     let dead = client_at("http://127.0.0.1:1", "w_dead");
@@ -854,29 +840,34 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         "node rows are Surreal-only, pg must hold none"
     );
 
+    // A claim goes to Surreal only (bundle 3), so a dead Surreal fails it and pg holds no row.
+    let slot = format!("dead-{nanos}");
     let err = store
-        .upsert_chunk(&Doc {
-            id: format!("{path}#0"),
-            content: "chunk".to_string(),
-            embedding: vec_at(1),
-            front: front(&path),
-            chunk_idx: 0,
-        })
-        .await
-        .expect_err("a dead Surreal must be an error, not a silent pg-only write");
-    assert!(
-        err.to_string().contains(BEHIND),
-        "error must carry the 2b-2 sentence, got: {err:#}"
-    );
-    let in_pg: i64 = db
-        .query_one(
-            "SELECT count(*) FROM chunk WHERE id = $1",
-            &[&format!("{path}#0")],
+        .upsert_claim(
+            &slot,
+            "observed",
+            "a long enough value",
+            &path,
+            SystemTime::now(),
+            &vec_at(7),
+            "fact",
+            "certain",
         )
+        .await
+        .expect_err("a dead Surreal must be an error on the claim write");
+    assert!(
+        !err.to_string().contains(BEHIND),
+        "pg holds no claim, so the fill-again sentence is false: {err:#}"
+    );
+    let claim_in_pg: i64 = db
+        .query_one("SELECT count(*) FROM claim WHERE subject = $1", &[&slot])
         .await
         .unwrap()
         .get(0);
-    assert_eq!(in_pg, 1, "the sentence says pg has it, so pg must have it");
+    assert_eq!(
+        claim_in_pg, 0,
+        "claim rows are Surreal-only, pg must hold none"
+    );
 
     // The same on the sync path: the file's result carries the error, pg holds the note.
     let dir = tempfile::tempdir().unwrap();

@@ -1,9 +1,6 @@
-//! C-SURALL2 C0b1 (j): a row written only into Surreal (document / chunk / node / edge) must still
-//! be there after the sync's `catch_up_surreal`. On trunk 9967ec6 it is gone: `catch_up` deletes
-//! every Surreal key pg lacks -- node/edge/document at `vector_surreal.rs:2925-2950` (`delete_rows`
-//! of `stale_*`), chunk at `:3000-3030` (stale chunk keys re-mirrored from pg's empty scope by
-//! `mirror_chunks`). The same loss comes from `SurrealClient::mirror` (`:2419`, `reconcile`
-//! deletes what pg lacks in the scope).
+//! C-SURALL2 C0b1 (j): a row written only into Surreal (document / chunk / node / edge / claim_row /
+//! claim) must still be there after the sync's `catch_up_surreal`. Before each bundle `catch_up`
+//! deleted every Surreal key pg lacks in that table.
 //!
 //! Prints `C0b1 survive <table>: before 1, after N`. Needs a throwaway pgvector and SurrealDB:
 //!   BORING_TEST_DATABASE_URL=postgresql://boring:boring@127.0.0.1:<pg-port>/boring \
@@ -108,8 +105,13 @@ async fn survive(table: &str) {
              CREATE node:`concept:c0b1` CONTENT {{cid: 'concept:c0b1', kind: 'concept', label: 'c0b1'}};
              CREATE edge:`e1` CONTENT {{cid: 'e1', src: 'doc:{path}', dst: 'concept:c0b1', kind: 'about'}};
              CREATE chunk:`{path}#0` CONTENT {{cid: '{path}#0', source_path: '{path}', project: 'c0b1', \
-             doc_updated_us: 1, content: 'surreal only', origin: 'personal', embedding: {}}};",
-            floats()
+             doc_updated_us: 1, content: 'surreal only', origin: 'personal', embedding: {emb}}};
+             CREATE claim_row:`c1` CONTENT {{cid: 'c1', subject: 'c0b1', predicate: 'p', value: 'v', \
+             source_path: '{path}', valid_from_us: 1, kind: 'fact', confidence: 'certain', \
+             era: 'unanchored', origin: 'personal', project: 'c0b1', via: 'surreal', embedding: {emb}}};
+             CREATE claim:`c1` CONTENT {{cid: 'c1', subject: 'c0b1', predicate: 'p', valid_from_us: 1, \
+             source_path: '{path}', origin: 'personal', project: 'c0b1', kind: 'fact', embedding: {emb}}};",
+            emb = floats()
         ))
         .await
         .unwrap();
@@ -118,6 +120,8 @@ async fn survive(table: &str) {
         ("node", "concept:c0b1".to_owned()),
         ("edge", "e1".to_owned()),
         ("chunk", format!("{path}#0")),
+        ("claim_row", "c1".to_owned()),
+        ("claim", "c1".to_owned()),
     ];
     for (table, cid) in &rows {
         assert_eq!(count(&client, table, cid).await, 1, "{table} written");
@@ -131,8 +135,9 @@ async fn survive(table: &str) {
     assert_eq!(after, 1, "catch_up deleted the Surreal-only {table} row");
 }
 
-// Bundle 1 moved document and chunk, bundle 2 moves node and edge: all four are GREEN on head
-// (RED on df2eba4 for node and edge, where catch_up still copied pg over them).
+// Bundle 1 moved document and chunk, bundle 2 node and edge, bundle 3 claim_row and claim: all six
+// are GREEN on head (RED on f46a994 for the two claim tables, where catch_up still copied pg over
+// them).
 
 #[tokio::test]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
@@ -156,4 +161,16 @@ async fn a_node_written_only_to_surreal_survives_catch_up() {
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn an_edge_written_only_to_surreal_survives_catch_up() {
     survive("edge").await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_claim_row_written_only_to_surreal_survives_catch_up() {
+    survive("claim_row").await;
+}
+
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_vector_claim_written_only_to_surreal_survives_catch_up() {
+    survive("claim").await;
 }

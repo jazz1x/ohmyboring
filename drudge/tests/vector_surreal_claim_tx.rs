@@ -552,9 +552,10 @@ async fn two_spellings_of_one_slot_meet_on_one_guard() {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
-/// A split merge on Surreal deletes rows pg still holds. A tombstone keeps `catch_up` (which copies
-/// pg's rows over Surreal's) from putting them back, and the blanked `document.sha` from being
-/// copied over again. Rows come from pg first, so they are the ones the merge must keep deleted.
+/// A split merge on Surreal deletes rows pg still holds (here seeded into Surreal by the fill).
+/// `catch_up` copies nothing from pg any more, so the rows stay deleted and the blanked
+/// `document.sha` stays blank. (C0b1 bundle 3 turned the copy off; the tombstone this guarded
+/// against is no longer read by any copy.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
 async fn a_split_merge_is_not_undone_by_catch_up() {
@@ -589,7 +590,7 @@ async fn a_split_merge_is_not_undone_by_catch_up() {
             .expect("pg claim");
         }
     }
-    c.catch_up(&pg).await.expect("first copy from pg");
+    c.fill_from(&pg).await.expect("first copy from pg");
     let rows = "SELECT VALUE count() FROM claim_row WHERE string::starts_with(string::lowercase(subject), 'z1') AND string::contains(string::lowercase(subject), 'gone') GROUP ALL;";
     let vectors = "SELECT VALUE count() FROM claim WHERE string::contains(string::lowercase(subject), 'gone') GROUP ALL;";
     let shas = "SELECT VALUE count() FROM document WHERE string::starts_with(source_path, '/v/gone-') AND sha != '' GROUP ALL;";
@@ -613,20 +614,6 @@ async fn a_split_merge_is_not_undone_by_catch_up() {
             3 * n
         );
     }
-    // The mirror of a pg write to these notes reads pg's rows and documents too.
-    let paths: Vec<String> = (0..n)
-        .flat_map(|i| (0..3).map(move |k| format!("/v/gone-{i}-{k}.md")))
-        .collect();
-    c.mirror(&pg, &drudge::store::Scope::notes(paths))
-        .await
-        .expect("mirror");
-    println!(
-        "Z1 tombstone after_mirror resurrected_rows={}/{merged} resurrected_vectors={} resurrected_sha={}/{}",
-        count(&c, rows).await,
-        count(&c, vectors).await,
-        count(&c, shas).await,
-        3 * n
-    );
     let in_pg: i64 = {
         let (db, conn) =
             tokio_postgres::connect(&env("BORING_TEST_DATABASE_URL"), tokio_postgres::NoTls)
@@ -688,11 +675,11 @@ async fn count(c: &SurrealClient, sql: &str) -> i64 {
 
 /// backend=surreal: `remember`'s writer (`Store::upsert_claim`) goes through the Surreal
 /// transaction, not pg, and one `catch_up` pass afterwards neither deletes those rows nor undoes
-/// the seal they made (the pass copies pg's rows over Surreal's and used to delete what pg lacked).
-/// The claims Python wrote to pg only reach Surreal in the same pass.
+/// the seal they made. A claim written straight to pg does not arrive in the same pass (C0b1
+/// bundle 3: `catch_up` copies no claim row; the door refuses to run a pg-writing claim path).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
-async fn surreal_written_claims_survive_catch_up_and_pg_written_ones_arrive() {
+async fn surreal_written_claims_survive_catch_up_and_pg_written_ones_do_not_arrive() {
     let c = client("z1_wire").await;
     let dsn = env("BORING_TEST_DATABASE_URL");
     let pg = Store::open(&dsn, DIM).await.expect("open store");
@@ -775,7 +762,7 @@ async fn surreal_written_claims_survive_catch_up_and_pg_written_ones_arrive() {
     for lap in 0..2 {
         c.catch_up(&pg).await.expect("catch_up");
         println!(
-            "Z1 wire lap={lap} surreal_written_rows={}/{} sealed={}/{n} open_vector_claims={}/{n} pg_has_surreal_written={in_pg} pg_written_rows_in_surreal={}/{n}",
+            "Z1 wire lap={lap} surreal_written_rows={}/{} sealed={}/{n} open_vector_claims={}/{n} pg_has_surreal_written={in_pg} pg_written_rows_in_surreal={}/0",
             count(&c, &rows("z1-w1-")).await,
             2 * n,
             count(&c, sealed).await,
@@ -799,8 +786,8 @@ async fn surreal_written_claims_survive_catch_up_and_pg_written_ones_arrive() {
     assert_eq!(count(&c, open_vectors).await, n as i64);
     assert_eq!(
         count(&c, &rows("z1-w2-")).await,
-        n as i64,
-        "a pg-written claim did not arrive"
+        0,
+        "catch_up copied a pg-written claim"
     );
 }
 

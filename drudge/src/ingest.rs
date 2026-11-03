@@ -215,17 +215,18 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                 // row. Leaving the existing row alone also keeps its `valid_from`, which is
                 // the first time this value was true rather than the last time the note was
                 // touched — the more honest of the two.
-                if Store::claim_is_unchanged_on(
-                    tx,
-                    &subject,
-                    &predicate,
-                    value,
-                    path,
-                    cl.kind(),
-                    cl.confidence(),
-                    anchor_db.as_deref(),
-                )
-                .await?
+                if lookup
+                    .claim_is_unchanged(
+                        tx,
+                        &subject,
+                        &predicate,
+                        value,
+                        path,
+                        cl.kind(),
+                        cl.confidence(),
+                        anchor_db.as_deref(),
+                    )
+                    .await?
                 {
                     stats.claims_unchanged += 1;
                 } else {
@@ -251,7 +252,9 @@ impl GraphExtractor for FrontmatterGraphExtractor {
                         .await?;
                     stats.claims += 1;
                 }
-                Store::mirror_claim_said_by_on(tx, &subject, &predicate, path, cl.said_by).await?;
+                lookup
+                    .claim_said_by(tx, &subject, &predicate, path, cl.said_by)
+                    .await?;
                 stats.edges += Store::upsert_claim_node_on(
                     lookup,
                     tx,
@@ -593,16 +596,6 @@ async fn ingest_in_own_tx<C: Chunker, G: GraphExtractor, E: Embed>(
         .context("begin ingest transaction")?;
     let outcome = ingest_steps::<C, G, E>(store, &tx, llm, cfg, path, stats).await?;
     tx.commit().await.context("commit ingest transaction")?;
-    // Only a note that wrote a document, chunk or claim row has anything for Surreal to follow.
-    let wrote = matches!(
-        outcome,
-        FileOutcome::New | FileOutcome::Updated | FileOutcome::ShaMoved
-    );
-    if wrote {
-        store
-            .mirror_surreal(&crate::store::Scope::notes([path.to_owned()]))
-            .await?;
-    }
     Ok(outcome)
 }
 

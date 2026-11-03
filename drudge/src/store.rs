@@ -23,7 +23,7 @@ use deadpool_postgres::{
 use pgvector::Vector;
 use serde_json::{Value, json};
 use tokio_postgres::error::SqlState;
-use tokio_postgres::types::{Json as PgJson, ToSql};
+use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use crate::frontmatter::{Claim, FrontMatter};
@@ -39,8 +39,8 @@ pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
     ClaimRowDiff, ClaimWrite, FillTable, GraphOp, KeySet, NoteChunk, NoteWrite, ProjectTable,
-    ProjectTableError, RegisterAsk, SURREAL_BEHIND, SURREAL_GRAPH_FAILED, Scope, SplitStanding,
-    SurrealClient, Swap, TX_RETRIES, TxCount, TxPlace,
+    ProjectTableError, RegisterAsk, SURREAL_GRAPH_FAILED, SplitStanding, SurrealClient, Swap,
+    TX_RETRIES, TxCount, TxPlace,
 };
 
 /// Ingest input (one chunk).
@@ -403,51 +403,14 @@ const STALE_CLAIM_MIRROR_NODES: &str = "(kind = 'claim' AND id NOT IN (SELECT 'c
 /// close must not read as retired here, or the hand-over reopens its slot's older row
 /// while the note itself stays current — two current rows in one slot. `c` is the claim
 /// alias at every use site; `doc:` matches what `doc_node_id` writes.
-/// (Built by `RetireEdges::note`; this is the part after the edge source.)
-const RETIRED_NOTE_REST: &str = "JOIN document n ON n.source_path = substr(e.src, 5) \
+/// pgvector only: on `backend=surreal` the same rule runs in Surreal (`claim_tx.rs`
+/// `RETIRED_LETS`, which reads Surreal's `edge` and `document`).
+const RETIRED_NOTE: &str = "EXISTS (SELECT 1 FROM edge e \
+     JOIN document n ON n.source_path = substr(e.src, 5) \
      WHERE e.kind = 'supersedes' AND e.dst = 'doc:' || c.source_path \
        AND (n.author = 'owner' OR NOT EXISTS (SELECT 1 FROM document o \
                                              WHERE o.source_path = c.source_path \
                                                AND o.author = 'owner')))";
-
-/// Where the retirement fragment reads its `supersedes` edges. `edge` lives in pg on pgvector
-/// and only in Surreal on `backend=surreal` (C0b1 bundle 2), so there the edges are read from
-/// Surreal once, before the pg statement, and bound as two parallel `text[]` (`src`, `dst`).
-/// That read is outside the pg transaction: it sees every edge Surreal has committed, including
-/// the ones this request wrote a moment ago, and a pg rollback does not take them back. The
-/// owner rule still reads pg's `document.author`; `document` moves to Surreal in bundle 3.
-pub enum RetireEdges {
-    Table,
-    Given {
-        srcs: Vec<String>,
-        dsts: Vec<String>,
-    },
-}
-
-impl RetireEdges {
-    /// The fragment; `at` is the `$n` of the first bound array (unused for `Table`).
-    fn note(&self, at: usize) -> String {
-        let edges = match self {
-            Self::Table => "edge e".to_owned(),
-            Self::Given { .. } => format!(
-                "(SELECT u.s AS src, u.d AS dst, 'supersedes'::text AS kind \
-                 FROM unnest(${at}::text[], ${}::text[]) AS u(s, d)) e",
-                at + 1
-            ),
-        };
-        format!("EXISTS (SELECT 1 FROM {edges} {RETIRED_NOTE_REST}")
-    }
-
-    /// `base` followed by the bound arrays, numbered from `base.len() + 1` as `note` expects.
-    fn bind<'a>(&'a self, base: &[&'a (dyn ToSql + Sync)]) -> Vec<&'a (dyn ToSql + Sync)> {
-        let mut params = base.to_vec();
-        if let Self::Given { srcs, dsts } = self {
-            params.push(srcs);
-            params.push(dsts);
-        }
-        params
-    }
-}
 
 /// `ingest::canon` in SQL. The class lists Rust's White_Space code points because `\s` follows the
 /// server locale. Measured equal to `ingest::canon` on 12 inputs; `lower()` differs from
@@ -619,9 +582,8 @@ impl DocLookup<'_> {
     }
 
     /// Apply graph writes where the backend keeps `node` and `edge` (C0b1 bundle 2): on pgvector
-    /// the pg SQL on `c`, on `backend=surreal` one Surreal transaction and nothing on pg. `c` is
-    /// then unused for the graph, so a pg transaction that also writes claim rows commits apart
-    /// from these rows (the inter-bundle state bundle 3 closes).
+    /// the pg SQL on `c`, on `backend=surreal` one Surreal transaction and nothing on pg (`c` is
+    /// unused there; since bundle 3 the claim rows of the same request are Surreal's too).
     pub async fn graph(self, c: &impl GenericClient, ops: &[GraphOp]) -> Result<()> {
         match self {
             Self::Pg => Store::graph_ops_pg(c, ops).await,
@@ -657,19 +619,107 @@ impl DocLookup<'_> {
         self.graph(c, &[GraphOp::edge(src, dst, kind, judge)]).await
     }
 
-    /// The `supersedes` edges as the retirement fragment must read them: pg's own `edge` table,
-    /// or Surreal's rows read now (`RetireEdges`).
-    pub async fn retire_edges(self) -> Result<RetireEdges> {
+    /// `Store::claim_is_unchanged_on` where the backend keeps `claim` (C0b1 bundle 3): pg's table
+    /// on `c`, or Surreal's `claim_row`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_is_unchanged(
+        self,
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+    ) -> Result<bool> {
         match self {
-            Self::Pg => Ok(RetireEdges::Table),
+            Self::Pg => {
+                Store::claim_is_unchanged_on(
+                    c,
+                    subject,
+                    predicate,
+                    value,
+                    source_path,
+                    kind,
+                    confidence,
+                    anchor,
+                )
+                .await
+            }
             Self::Surreal(client) => {
-                let (srcs, dsts) = client
-                    .supersedes_edges()
+                client
+                    .claim_is_unchanged(
+                        subject,
+                        predicate,
+                        value,
+                        source_path,
+                        kind,
+                        confidence,
+                        anchor,
+                    )
                     .await
-                    .context("read supersedes edges for the seal")?
-                    .into_iter()
-                    .unzip();
-                Ok(RetireEdges::Given { srcs, dsts })
+            }
+        }
+    }
+
+    /// `Store::mirror_claim_said_by_on` where the backend keeps `claim`.
+    pub async fn claim_said_by(
+        self,
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        said_by: Option<crate::frontmatter::SaidBy>,
+    ) -> Result<()> {
+        match self {
+            Self::Pg => {
+                Store::mirror_claim_said_by_on(c, subject, predicate, source_path, said_by).await
+            }
+            Self::Surreal(client) => {
+                let by = said_by.map(String::from);
+                client
+                    .claim_said_by(subject, predicate, source_path, by.as_deref())
+                    .await
+            }
+        }
+    }
+
+    /// The whole-note seal of `older` under `newer` (`SealRule::WholeNote`), where the backend
+    /// keeps `claim`: pg's lock-and-update on `tx`, or one Surreal transaction that applies the
+    /// same owner rule to Surreal's own `document` and `edge` (`SurrealClient::seal_note`).
+    pub async fn seal_note(self, tx: &Transaction<'_>, newer: &str, older: &str) -> Result<usize> {
+        match self {
+            Self::Pg => Store::seal_superseded_claims(tx, newer, older).await,
+            Self::Surreal(client) => client.seal_note(newer, older).await,
+        }
+    }
+
+    /// The seal of the slots `newer` re-states (`SealRule::RestatedSlots`), the same two ways.
+    pub async fn seal_restated(self, tx: &Transaction<'_>, newer: &str, older: &str) -> Result<()> {
+        match self {
+            Self::Pg => Store::seal_restated_slots(tx, newer, older).await,
+            Self::Surreal(client) => client.seal_restated(newer, older).await.map(|_| ()),
+        }
+    }
+
+    /// Append the slots of `older` that the seal just closed under `newer` to `retired`, each once.
+    pub async fn note_retired(
+        self,
+        tx: &Transaction<'_>,
+        newer: &str,
+        older: &str,
+        retired: &mut Vec<(String, String)>,
+    ) -> Result<()> {
+        match self {
+            Self::Pg => Store::note_retired_slots(tx, newer, older, retired).await,
+            Self::Surreal(client) => {
+                for slot in client.retired_slots(newer, older).await? {
+                    if !retired.contains(&slot) {
+                        retired.push(slot);
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -1884,17 +1934,18 @@ impl Store {
         confidence: &str,
         anchor: Option<&str>,
     ) -> Result<bool> {
-        Self::claim_is_unchanged_on(
-            &self.db().await?,
-            subject,
-            predicate,
-            value,
-            source_path,
-            kind,
-            confidence,
-            anchor,
-        )
-        .await
+        self.doc_lookup()
+            .claim_is_unchanged(
+                &self.db().await?,
+                subject,
+                predicate,
+                value,
+                source_path,
+                kind,
+                confidence,
+                anchor,
+            )
+            .await
     }
 
     /// `claim_is_unchanged` on a caller-held connection or transaction handle.
@@ -1982,10 +2033,72 @@ impl Store {
         anchor_hash: Option<&str>,
         anchor_symbol: Option<&str>,
     ) -> Result<()> {
+        self.upsert_claim_with_anchor_on(
+            &self.db().await?,
+            subject,
+            predicate,
+            value,
+            source_path,
+            valid_from,
+            embedding,
+            kind,
+            confidence,
+            anchor,
+            anchor_hash,
+            anchor_symbol,
+        )
+        .await
+    }
+
+    /// Lock every claim row of one canon slot, in the order `lock_claim_slots_of` takes them.
+    async fn lock_claim_slot_on(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+    ) -> Result<()> {
+        let canon_subject = canon_sql("c.subject");
+        let canon_predicate = canon_sql("c.predicate");
+        let slot_subject = canon_sql("$1::text");
+        let slot_predicate = canon_sql("$2::text");
+        c.execute(
+            &format!(
+                "SELECT 1 FROM claim c
+                 WHERE {canon_subject} = {slot_subject} AND {canon_predicate} = {slot_predicate}
+                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
+                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
+                 FOR UPDATE OF c;"
+            ),
+            &[&subject, &predicate],
+        )
+        .await
+        .context("lock claim slot in slot order")?;
+        Ok(())
+    }
+
+    /// `upsert_claim_with_anchor` on a caller-held connection or transaction handle. On pgvector
+    /// the row is written on `c`; on `backend=surreal` it is written in Surreal, in its own
+    /// transaction with the slot guard and the seal (`SurrealClient::claim_slot_upsert`), and `c`
+    /// is not used.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_claim_with_anchor_on(
+        &self,
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        value: &str,
+        source_path: &str,
+        valid_from: SystemTime,
+        embedding: &[f32],
+        kind: &str,
+        confidence: &str,
+        anchor: Option<&str>,
+        anchor_hash: Option<&str>,
+        anchor_symbol: Option<&str>,
+    ) -> Result<()> {
         match &self.vector_route {
             VectorRoute::Pgvector => {
-                self.upsert_claim_with_anchor_on(
-                    &self.db().await?,
+                self.upsert_claim_pg_on(
+                    c,
                     subject,
                     predicate,
                     value,
@@ -1998,12 +2111,8 @@ impl Store {
                     anchor_hash,
                     anchor_symbol,
                 )
-                .await?;
-                self.mirror_surreal(&Scope::notes([source_path.to_owned()]))
-                    .await
+                .await
             }
-            // backend=surreal: the row is written on Surreal, in its own transaction with the
-            // slot guard and the seal (`SurrealClient::claim_slot_upsert`), not on pg.
             VectorRoute::Surreal(client) => {
                 self.checked_vector(embedding)?;
                 let valid_from_us = i64::try_from(
@@ -2032,34 +2141,9 @@ impl Store {
         }
     }
 
-    /// Lock every claim row of one canon slot, in the order `lock_claim_slots_of` takes them.
-    async fn lock_claim_slot_on(
-        c: &impl GenericClient,
-        subject: &str,
-        predicate: &str,
-    ) -> Result<()> {
-        let canon_subject = canon_sql("c.subject");
-        let canon_predicate = canon_sql("c.predicate");
-        let slot_subject = canon_sql("$1::text");
-        let slot_predicate = canon_sql("$2::text");
-        c.execute(
-            &format!(
-                "SELECT 1 FROM claim c
-                 WHERE {canon_subject} = {slot_subject} AND {canon_predicate} = {slot_predicate}
-                 ORDER BY ({canon_subject}) COLLATE \"C\", ({canon_predicate}) COLLATE \"C\",
-                          c.valid_from, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
-                 FOR UPDATE OF c;"
-            ),
-            &[&subject, &predicate],
-        )
-        .await
-        .context("lock claim slot in slot order")?;
-        Ok(())
-    }
-
-    /// `upsert_claim_with_anchor` on a caller-held connection or transaction handle.
+    /// The pgvector half of `upsert_claim_with_anchor_on`.
     #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_claim_with_anchor_on(
+    async fn upsert_claim_pg_on(
         &self,
         c: &impl GenericClient,
         subject: &str,
@@ -2119,14 +2203,12 @@ impl Store {
         // note's rows outright: nothing about them reopens. The fact unseal needs no such
         // guard — (subject, predicate, valid_from) is the primary key, so a row equalling
         // the live race's max is a race row itself and cannot be retired.
-        let edges = self.doc_lookup().retire_edges().await?;
         if kind == "fact" {
-            let retired = edges.note(3);
             c.execute(
                     &format!(
                         "UPDATE claim c SET superseded_at = m.mx
                          FROM (SELECT c.subject, c.predicate, max(c.valid_from) AS mx FROM claim c
-                               WHERE c.subject = $1 AND c.predicate = $2 AND NOT {retired}
+                               WHERE c.subject = $1 AND c.predicate = $2 AND NOT {RETIRED_NOTE}
                                GROUP BY c.subject, c.predicate) m
                          WHERE c.subject = m.subject AND c.predicate = m.predicate
                            AND c.valid_from < m.mx AND c.superseded_at IS DISTINCT FROM m.mx
@@ -2136,7 +2218,7 @@ impl Store {
                                             WHERE l.subject = m.subject AND l.predicate = m.predicate
                                               AND l.valid_from = m.mx AND d.author = 'owner'));"
                     ),
-                    &edges.bind(&[&subject, &predicate]),
+                    &[&subject, &predicate],
                 )
                 .await
                 .context("seal old claims")?;
@@ -2146,9 +2228,9 @@ impl Store {
                          WHERE c.subject = $1 AND c.predicate = $2 AND c.superseded_at IS NOT NULL
                            AND c.valid_from = (SELECT max(c.valid_from) FROM claim c
                                                WHERE c.subject = $1 AND c.predicate = $2
-                                                 AND NOT {retired});"
+                                                 AND NOT {RETIRED_NOTE});"
                 ),
-                &edges.bind(&[&subject, &predicate]),
+                &[&subject, &predicate],
             )
             .await
             .context("unseal latest claim")?;
@@ -2165,7 +2247,6 @@ impl Store {
             )
             .await
             .context("seal old claims")?;
-            let retired = edges.note(4);
             c.execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = NULL
@@ -2174,9 +2255,9 @@ impl Store {
                            AND c.valid_from = (SELECT max(valid_from) FROM claim
                                              WHERE subject = $1 AND predicate = $2
                                                AND source_path = $3)
-                           AND NOT {retired};"
+                           AND NOT {RETIRED_NOTE};"
                 ),
-                &edges.bind(&[&subject, &predicate, &source_path]),
+                &[&subject, &predicate, &source_path],
             )
             .await
             .context("unseal latest claim")?;
@@ -2198,7 +2279,7 @@ impl Store {
         predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<usize> {
-        let written = Self::upsert_claim_node_on(
+        Self::upsert_claim_node_on(
             self.doc_lookup(),
             &self.db().await?,
             path,
@@ -2207,10 +2288,7 @@ impl Store {
             predicate,
             claim,
         )
-        .await?;
-        self.mirror_surreal(&Scope::notes([path.to_owned()]))
-            .await?;
-        Ok(written)
+        .await
     }
 
     /// `upsert_claim_node` on a caller-held connection or transaction handle. The graph rows go
@@ -2693,10 +2771,7 @@ impl Store {
         sha: &str,
         updated_at: SystemTime,
     ) -> Result<()> {
-        Self::upsert_document_on(self.doc_lookup(), &self.db().await?, front, sha, updated_at)
-            .await?;
-        self.mirror_surreal(&Scope::notes([front.source_path.clone()]))
-            .await
+        Self::upsert_document_on(self.doc_lookup(), &self.db().await?, front, sha, updated_at).await
     }
 
     /// `upsert_document` on a caller-held connection or transaction handle. The document row is
@@ -2775,8 +2850,7 @@ impl Store {
     /// note has FEWER chunks than before. Used by the upsert-then-prune re-ingest so a reader never
     /// sees an empty/half-deleted chunk set (no delete-first window). `from_idx == new chunk count`.
     pub async fn prune_chunks_from(&self, path: &str, from_idx: usize) -> Result<()> {
-        Self::prune_chunks_from_on(&self.db().await?, path, from_idx).await?;
-        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
+        Self::prune_chunks_from_on(&self.db().await?, path, from_idx).await
     }
 
     /// `prune_chunks_from` on a caller-held connection or transaction handle.
@@ -2796,43 +2870,41 @@ impl Store {
 
     /// Remove (prune) document + chunks (CASCADE) + graph edges + claims (explicit; claim has no FK).
     pub async fn delete_document(&self, path: &str) -> Result<()> {
+        let doc_id = doc_node_id(path);
         match &self.vector_route {
             VectorRoute::Pgvector => {
-                self.db()
-                    .await?
-                    .execute("DELETE FROM document WHERE source_path = $1;", &[&path])
+                let db = self.db().await?;
+                db.execute("DELETE FROM document WHERE source_path = $1;", &[&path])
                     .await?;
+                DocLookup::Pg
+                    .graph(&db, &[GraphOp::DeleteEdgesAt { id: doc_id }])
+                    .await?;
+                // claim has NO FK to document (unlike chunk's ON DELETE CASCADE) so the document delete does not
+                // cascade here — mirror the explicit edge delete above. Provenance is single-valued (source_path
+                // is overwritten last-writer-wins on conflict and is not part of the PK), so every claim row
+                // carrying this path is owned by THIS document → remove it (current + its own sealed history).
+                // Caveat: if this doc owned the latest value of a (subject,predicate) while an OLDER row from
+                // another doc stays sealed, that pair loses its current pointer (a MISSING claim, never an
+                // orphaned/WRONG one) — inherent to single-valued provenance; the remedy is a re-seal pass.
+                db.execute("DELETE FROM claim WHERE source_path = $1;", &[&path])
+                    .await?;
+                Ok(())
             }
-            // The document and every chunk of the note leave Surreal; the claims below are still
-            // pg's until their bundle.
-            VectorRoute::Surreal(client) => client.delete_note(path).await?,
+            // backend=surreal: the document, every chunk and every claim row of the note leave in
+            // one Surreal transaction (`delete_note`), then its graph edges in a second one.
+            VectorRoute::Surreal(client) => {
+                client.delete_note(path).await?;
+                self.doc_lookup()
+                    .graph(&self.db().await?, &[GraphOp::DeleteEdgesAt { id: doc_id }])
+                    .await
+            }
         }
-        let doc_id = doc_node_id(path);
-        self.doc_lookup()
-            .graph(&self.db().await?, &[GraphOp::DeleteEdgesAt { id: doc_id }])
-            .await?;
-        // claim has NO FK to document (unlike chunk's ON DELETE CASCADE) so the document delete does not
-        // cascade here — mirror the explicit edge delete above. Provenance is single-valued (source_path
-        // is overwritten last-writer-wins on conflict and is not part of the PK), so every claim row
-        // carrying this path is owned by THIS document → remove it (current + its own sealed history).
-        // Caveat: if this doc owned the latest value of a (subject,predicate) while an OLDER row from
-        // another doc stays sealed, that pair loses its current pointer (a MISSING claim, never an
-        // orphaned/WRONG one) — inherent to single-valued provenance; the remedy is a re-seal pass.
-        self.db()
-            .await?
-            .execute("DELETE FROM claim WHERE source_path = $1;", &[&path])
-            .await?;
-        // The chunk rows went with the document (CASCADE), so no SQL above names them; Surreal
-        // drops every key of this note that pg no longer holds.
-        self.mirror_surreal(&Scope::notes([path.to_owned()])).await
     }
 
     // ── chunk (embedding) ─────────────────────────────────────────────────────
 
     pub async fn upsert_chunk(&self, d: &Doc) -> Result<()> {
-        self.upsert_chunk_on(&self.db().await?, d).await?;
-        self.mirror_surreal(&Scope::notes([d.front.source_path.clone()]))
-            .await
+        self.upsert_chunk_on(&self.db().await?, d).await
     }
 
     /// `upsert_chunk` on a caller-held connection or transaction handle.
@@ -2859,8 +2931,8 @@ impl Store {
     /// in order). On pgvector: the upsert-then-prune sequence on the caller's transaction. On
     /// `backend=surreal`: one Surreal transaction for the document and chunk rows (`doc_tx.rs`),
     /// then a second one for the graph half (`graph_tx.rs`, C0b1 bundle 2). A failure between the
-    /// two leaves the new sha without the graph rows; the caller's pg transaction (claims) is a
-    /// third place until bundle 3.
+    /// two leaves the new sha without the graph rows; each claim row is a third Surreal commit
+    /// (`upsert_claim_with_anchor_on`), and the caller's pg transaction holds no row of the note.
     ///
     /// # Errors
     /// The write failed, or a vector's length is not the configured dimension.
@@ -3379,7 +3451,6 @@ impl Store {
         tx.commit()
             .await
             .context("commit split merge transaction")?;
-        self.mirror_surreal(&Scope::notes(touched)).await?;
         Ok(Some(crate::split_subjects::Merged {
             subject: subject.to_owned(),
             deleted_rows,
@@ -3869,17 +3940,18 @@ impl Store {
                 )
                 .await?;
             report.supersedes += 1;
-            // Read after the edge above is written, so the seal sees this pair's own edge.
-            let edges = lookup.retire_edges().await?;
+            // The edge above is already written where `lookup` keeps `edge`, so the seal sees it.
             match rule {
                 SealRule::WholeNote => {
-                    Self::seal_superseded_claims(tx, &edges, &pair[0], &pair[1]).await?;
+                    lookup.seal_note(tx, &pair[0], &pair[1]).await?;
                 }
                 SealRule::RestatedSlots => {
-                    Self::seal_restated_slots(tx, &edges, &pair[0], &pair[1]).await?;
+                    lookup.seal_restated(tx, &pair[0], &pair[1]).await?;
                 }
             }
-            Self::note_retired_slots(tx, &pair[0], &pair[1], &mut report.retired).await?;
+            lookup
+                .note_retired(tx, &pair[0], &pair[1], &mut report.retired)
+                .await?;
         }
         Ok(report)
     }
@@ -3888,14 +3960,8 @@ impl Store {
     /// the newer note re-states, stamped like the whole-note seal. The older note's other facts
     /// stay live, and nothing is handed on to a next-latest row. Same owner rule as the whole
     /// seal (`{RETIRED_NOTE}`).
-    async fn seal_restated_slots(
-        tx: &Transaction<'_>,
-        edges: &RetireEdges,
-        newer: &str,
-        older: &str,
-    ) -> Result<()> {
+    async fn seal_restated_slots(tx: &Transaction<'_>, newer: &str, older: &str) -> Result<()> {
         Self::lock_claim_slots_of(tx, newer).await?;
-        let retired = edges.note(3);
         tx.execute(
             &format!(
                 "UPDATE claim c SET superseded_at = COALESCE(
@@ -3904,9 +3970,9 @@ impl Store {
                  WHERE c.source_path = $2 AND c.superseded_at IS NULL
                    AND (c.subject, c.predicate) IN
                        (SELECT subject, predicate FROM claim WHERE source_path = $1)
-                   AND {retired};",
+                   AND {RETIRED_NOTE};",
             ),
-            &edges.bind(&[&newer, &older]),
+            &[&newer, &older],
         )
         .await
         .context("seal re-stated slots of the superseded note")?;
@@ -3998,12 +4064,10 @@ impl Store {
     /// becomes current, instead of the slot ending with none.
     async fn seal_superseded_claims(
         tx: &Transaction<'_>,
-        edges: &RetireEdges,
         newer: &str,
         older: &str,
     ) -> Result<usize> {
         Self::lock_claim_slots_of(tx, older).await?;
-        let retired = edges.note(3);
         let sealed = tx
             .execute(
                 &format!(
@@ -4011,9 +4075,9 @@ impl Store {
                             (SELECT max(valid_from) FROM claim WHERE source_path = $1),
                             now())
                      WHERE c.source_path = $2 AND c.superseded_at IS NULL
-                       AND {retired};",
+                       AND {RETIRED_NOTE};",
                 ),
-                &edges.bind(&[&newer, &older]),
+                &[&newer, &older],
             )
             .await
             .context("seal superseded note claims")?;
@@ -4028,7 +4092,6 @@ impl Store {
         let canon_touched_subject = canon_sql("subject");
         let canon_touched_predicate = canon_sql("predicate");
         let is_canon = is_canon_sql("c");
-        let retired = edges.note(2);
         tx.execute(
                 &format!(
                     "UPDATE claim c SET superseded_at = NULL
@@ -4039,13 +4102,13 @@ impl Store {
                                  WHERE ({canon_subject}, {canon_predicate}) IN
                                        (SELECT {canon_touched_subject}, {canon_touched_predicate} FROM claim
                                         WHERE source_path = $1 AND kind = 'fact')
-                                   AND NOT {retired}) r
+                                   AND NOT {RETIRED_NOTE}) r
                            ORDER BY cs, cp, is_canon DESC, valid_from DESC) m
                      WHERE c.kind = 'fact' AND c.superseded_at IS NOT NULL
                        AND {canon_subject} = m.cs AND {canon_predicate} = m.cp
                        AND {is_canon} = m.is_canon AND c.valid_from = m.valid_from;",
                 ),
-                &edges.bind(&[&older]),
+                &[&older],
             )
             .await
             .context("promote next-latest live fact")?;
@@ -4086,11 +4149,8 @@ impl Store {
                 VectorRoute::Pgvector => {
                     let mut conn = self.db().await?;
                     let tx = conn.transaction().await.context("begin seal transaction")?;
-                    let sealed =
-                        Self::seal_superseded_claims(&tx, &RetireEdges::Table, &newer, &older)
-                            .await?;
+                    let sealed = Self::seal_superseded_claims(&tx, &newer, &older).await?;
                     tx.commit().await.context("commit seal transaction")?;
-                    self.mirror_surreal(&Scope::notes([older])).await?;
                     sealed
                 }
                 // backend=surreal: the seal runs on Surreal's rows, in one transaction with the
@@ -4311,8 +4371,6 @@ impl Store {
             .context("begin supersedes transaction")?;
         let report = Self::record_supersedes_with(self.doc_lookup(), &tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
-        self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
-            .await?;
         Ok(report)
     }
 
@@ -4330,8 +4388,6 @@ impl Store {
             .context("begin supersedes transaction")?;
         let report = Self::remember_supersedes_with(self.doc_lookup(), &tx, pairs, judge).await?;
         tx.commit().await.context("commit supersedes transaction")?;
-        self.mirror_surreal(&Scope::notes(pairs.iter().flatten().cloned()))
-            .await?;
         Ok(report)
     }
 
@@ -4444,11 +4500,13 @@ impl Store {
         source_path: &str,
         said_by: Option<crate::frontmatter::SaidBy>,
     ) -> Result<()> {
-        Self::mirror_claim_said_by_on(&self.db().await?, subject, predicate, source_path, said_by)
+        self.doc_lookup()
+            .claim_said_by(&self.db().await?, subject, predicate, source_path, said_by)
             .await
     }
 
-    /// `mirror_claim_said_by` on a caller-held connection or transaction handle.
+    /// `mirror_claim_said_by` on a caller-held connection or transaction handle: pg's table
+    /// (`DocLookup::claim_said_by` is the backend-routed one).
     pub async fn mirror_claim_said_by_on(
         c: &impl GenericClient,
         subject: &str,
@@ -5020,16 +5078,25 @@ impl Store {
         valid_from: SystemTime,
         anchor: &str,
     ) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
-                "UPDATE claim SET anchor = $4
-                  WHERE subject = $1 AND predicate = $2 AND valid_from = $3 AND stale_at IS NULL;",
-                &[&subject, &predicate, &valid_from, &anchor],
-            )
-            .await
-            .context("repin claim anchor")?;
-        self.mirror_surreal(&Scope::slot(subject, predicate)).await
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.db()
+                    .await?
+                    .execute(
+                        "UPDATE claim SET anchor = $4
+                          WHERE subject = $1 AND predicate = $2 AND valid_from = $3 AND stale_at IS NULL;",
+                        &[&subject, &predicate, &valid_from, &anchor],
+                    )
+                    .await
+                    .context("repin claim anchor")?;
+                Ok(())
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .repin_claim(subject, predicate, valid_from, anchor)
+                    .await
+            }
+        }
     }
 
     pub async fn mark_claim_stale(
@@ -5039,16 +5106,25 @@ impl Store {
         valid_from: SystemTime,
         reason: &str,
     ) -> Result<()> {
-        self.db()
-            .await?
-            .execute(
-                "UPDATE claim SET stale_at = now(), stale_reason = $4
-                  WHERE subject = $1 AND predicate = $2 AND valid_from = $3 AND stale_at IS NULL;",
-                &[&subject, &predicate, &valid_from, &reason],
-            )
-            .await
-            .context("mark claim stale")?;
-        self.mirror_surreal(&Scope::slot(subject, predicate)).await
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.db()
+                    .await?
+                    .execute(
+                        "UPDATE claim SET stale_at = now(), stale_reason = $4
+                          WHERE subject = $1 AND predicate = $2 AND valid_from = $3 AND stale_at IS NULL;",
+                        &[&subject, &predicate, &valid_from, &reason],
+                    )
+                    .await
+                    .context("mark claim stale")?;
+                Ok(())
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .mark_claim_stale(subject, predicate, valid_from, reason)
+                    .await
+            }
+        }
     }
 
     /// Remove orphan semantic nodes — entity nodes not referenced by any edge.
@@ -5059,25 +5135,20 @@ impl Store {
         }
     }
 
-    /// `gc_orphans` on `backend=surreal` (C0b1 bundle 2): the `node` / `edge` side is Surreal's.
-    /// Which claim nodes are stale is still decided by pg's `claim` rows (the same
-    /// `STALE_CLAIM_MIRROR_NODES` predicate, evaluated here over the ids Surreal holds) until
-    /// bundle 3 moves `claim`.
+    /// `gc_orphans` on `backend=surreal`: `node`, `edge` and `claim_row` are all Surreal's. Which
+    /// claim nodes are stale is the `STALE_CLAIM_MIRROR_NODES` predicate, evaluated here over the
+    /// ids Surreal holds and the claim keys `claim_row` holds.
     async fn gc_orphans_surreal(&self, client: &SurrealClient) -> Result<GcStats> {
         let mut gc = GcStats::default();
         (gc.tool, gc.concept) = client.gc_orphan_entities().await?;
-        let claims = self
-            .db()
-            .await?
-            .query("SELECT subject, predicate, kind FROM claim;", &[])
+        let claims = client
+            .claim_node_keys()
             .await
             .context("read claim keys for the stale-node sweep")?;
         let mut live_claim: HashSet<String> = HashSet::new();
         let mut live_typed: HashSet<String> = HashSet::new();
         let mut typed_kinds: HashSet<String> = HashSet::new();
-        for row in &claims {
-            let (subject, predicate, kind): (String, String, String) =
-                (row.get(0), row.get(1), row.get(2));
+        for (subject, predicate, kind) in claims {
             live_claim.insert(format!("claim:{subject}:{predicate}"));
             if kind != "fact" {
                 live_typed.insert(format!("{kind}:{subject}:{predicate}"));

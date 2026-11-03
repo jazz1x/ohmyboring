@@ -17,14 +17,14 @@
 //! Z4: after B, pg does not receive Surreal writes. The Z4 rehearsal "all-table diff 0/N" is
 //! measured after `fill_from` aligns pg and Surreal right before the switch-over; no
 //! `backend=surreal` live, Z4 rehearsal or live-copy measurement until every table bundle is
-//! closed (ingest is three commits between the bundles: Surreal for document+chunk, Surreal for
-//! the graph (`graph_tx.rs`), pg for claims).
+//! closed. Bundle 3 closed them: a note's ingest is Surreal commits only (document+chunk here, the
+//! graph in `graph_tx.rs`, each claim in `claim_tx.rs`), and pg's request transaction holds no row.
 
 use std::time::SystemTime;
 
 use anyhow::Result;
 
-use super::claim_tx::{Attempt, TxPlace};
+use super::claim_tx::{Attempt, TxPlace, delete_claims_sql};
 use super::{
     ProjectTable, SurrealClient, chunk_ddl, first_statement, floats, micros_to_time, quote_ident,
     text, texts,
@@ -160,7 +160,7 @@ fn delete_sql(path: &str, tables: &[String]) -> String {
             bump = dirty_bump(table, n, 0)
         );
     }
-    sql
+    format!("{sql}\n{}", delete_claims_sql(path))
 }
 
 impl SurrealClient {
@@ -218,8 +218,9 @@ impl SurrealClient {
         .await
     }
 
-    /// Remove a note's `document` row and every chunk of it (`Store::delete_document`'s document
-    /// and chunk half; its edges and claims stay in pg until their bundle).
+    /// Remove a note's `document` row, every chunk of it and every claim row it owns, sealed
+    /// history included, in one transaction (`Store::delete_document`'s document, chunk and claim
+    /// half; its edges go in `graph_tx.rs`).
     ///
     /// # Errors
     /// A statement failed, or the note stayed in conflict for more than `tx_retries` resends.
