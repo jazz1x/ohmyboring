@@ -4601,12 +4601,12 @@ mod tests {
         );
     }
 
-    /// C-VECADAPT2 2b: on `backend=surreal` a remember whose Surreal write fails after pg
-    /// committed answers with the error that says pg has the note, so the caller does not send
-    /// the same note again. Nothing listens on port 1.
+    /// On `backend=surreal` a remember reads Surreal (owner guard) before pg commits anything, so
+    /// a dead Surreal fails it there. The graph-write failure text (`SURREAL_GRAPH_FAILED`) is
+    /// asserted in vector_surreal_writes. Nothing listens on port 1.
     #[tokio::test]
     #[ignore = "needs BORING_TEST_DATABASE_URL"]
-    async fn a_remember_whose_surreal_write_fails_says_pg_has_the_note() {
+    async fn a_remember_with_a_dead_surreal_fails_at_its_first_surreal_read() {
         let dsn = std::env::var("BORING_TEST_DATABASE_URL").expect("BORING_TEST_DATABASE_URL");
         let dead: crate::config::SurrealConfig = serde_json::from_value(
             json!({"url": "http://127.0.0.1:1", "namespace": "dead", "database": "dead"}),
@@ -4643,25 +4643,14 @@ mod tests {
             "supersedes": ["/vault/wiki/ghost.md"],
         });
 
-        let failed = remember_note(&s, Caller::Unverified, Some(&args))
+        let failed = remember_note(&s, Caller::Owner, Some(&args))
             .await
             .expect_err("a dead Surreal must fail the remember, not pass silently");
 
         assert!(
-            failed.message.contains(crate::store::SURREAL_BEHIND),
-            "{}",
+            failed.message.contains("owner guard"),
+            "the first Surreal read fails the remember before pg commits: {}",
             failed.message
-        );
-        let files: Vec<_> = std::fs::read_dir(tmp.path().join("wiki"))
-            .unwrap()
-            .map(|e| e.unwrap().path().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(files.len(), 1);
-        let [documents, chunks, claims, ..] = note_rows(&store, &files[0], &token).await;
-        assert_eq!(
-            [documents, chunks, claims],
-            [1, 1, 1],
-            "pg committed the note"
         );
     }
 

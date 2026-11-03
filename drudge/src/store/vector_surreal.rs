@@ -1211,6 +1211,11 @@ fn epoch_us(col: &str) -> String {
 pub const SURREAL_BEHIND: &str =
     "pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것";
 
+/// Why a failed graph (`node`/`edge`) write is not `SURREAL_BEHIND`: since C0b1 bundle 2 those rows
+/// exist only in Surreal, so pg holds no copy of them to fill from. What pg already committed in
+/// the same request (a document row, for one) stays; the graph rows of the request do not exist.
+pub const SURREAL_GRAPH_FAILED: &str = "Surreal 그래프(node·edge) 쓰기 실패. 그래프 행은 pg 에 없음, 같은 요청에서 pg 가 이미 커밋한 행(문서 등)만 남아 있음";
+
 /// What a committed pg write touched, in the terms Surreal's rows are keyed by: the notes whose
 /// chunks and claims were written, and the `(subject, predicate)` slots whose current row may
 /// have moved.

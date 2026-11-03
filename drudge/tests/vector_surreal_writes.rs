@@ -23,6 +23,9 @@ const DIM: usize = 1024;
 const BEHIND: &str =
     "pg 에는 기록됨, Surreal 만 빠짐. 같은 요청을 다시 보내지 말고 채우기를 다시 돌릴 것";
 
+/// The sentence a failed node/edge write carries: those rows have no pg copy to fill from.
+const GRAPH_FAILED: &str = "Surreal 그래프(node·edge) 쓰기 실패";
+
 fn vec_at(i: usize) -> Vec<f32> {
     let mut v = vec![0.0; DIM];
     v[i] = 1.0;
@@ -412,11 +415,20 @@ impl Fixture {
         assert_eq!(pg_docs, surreal_docs, "{step}: document rows differ");
         let (pg_text, surreal_text) = self.chunk_text_rows().await;
         assert_eq!(pg_text, surreal_text, "{step}: chunk content/origin differ");
+        // supersedes edges live only in Surreal: the edge table holds exactly those extra rows
+        let extra = self.client.supersedes_edges().await.unwrap().len();
         let tables = self.client.compare(&self.store).await.unwrap();
-        assert!(
-            tables.iter().all(drudge::store::FillTable::same),
-            "{step}: compare says different: {tables:?}"
-        );
+        for t in &tables {
+            if t.table == "edge" && extra > 0 {
+                assert_eq!(
+                    t.surreal.rows,
+                    t.pg.rows + extra,
+                    "{step}: edge rows {tables:?}"
+                );
+            } else {
+                assert!(t.same(), "{step}: compare says different: {tables:?}");
+            }
+        }
     }
 }
 
@@ -452,6 +464,21 @@ async fn upsert_supersede_and_delete_leave_the_two_stores_with_the_same_ids() {
         .supersedes_in_tx(&[[b.clone(), a.clone()]], None)
         .await
         .expect("supersedes");
+    // b-seal: the edge exists only in Surreal, yet the claim gets sealed.
+    let pg_edges: i64 =
+        f.db.query_one("SELECT count(*) FROM edge WHERE kind = 'supersedes'", &[])
+            .await
+            .unwrap()
+            .get(0);
+    assert_eq!(pg_edges, 0, "the supersedes edge must not be in pg");
+    assert!(
+        f.client
+            .supersedes_edges()
+            .await
+            .unwrap()
+            .contains(&(format!("doc:{b}"), format!("doc:{a}"))),
+        "the supersedes edge is in Surreal"
+    );
     f.assert_same("after b superseded a", 3, 1).await;
 
     // delete: a chunk tail, then a document (its chunks go by CASCADE, its claims explicitly)
@@ -782,9 +809,15 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .upsert_document(&front(&path), "sha", SystemTime::now())
         .await
         .expect_err("a dead Surreal must be an error on the document write too");
+    // Graph rows exist only in Surreal (bundle 2), so the document's failure is the graph one:
+    // it must not claim "pg has it, only Surreal is missing" (a fill could not restore the graph).
     assert!(
-        err.to_string().contains(BEHIND),
-        "document error must carry the 2b-2 sentence, got: {err:#}"
+        err.to_string().contains(GRAPH_FAILED),
+        "document error must carry the graph-write sentence, got: {err:#}"
+    );
+    assert!(
+        !err.to_string().contains(BEHIND),
+        "graph rows are not in pg, so the fill-again sentence is false: {err:#}"
     );
     let doc_in_pg: i64 = db
         .query_one(
@@ -794,7 +827,10 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(doc_in_pg, 1, "the sentence says pg has the document");
+    assert_eq!(
+        doc_in_pg, 1,
+        "the pg document row was committed before the graph write"
+    );
 
     let session = format!("s-dead-{nanos}");
     let err = store
@@ -802,8 +838,8 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .await
         .expect_err("a graph-only write must not swallow a dead Surreal either");
     assert!(
-        err.to_string().contains(BEHIND),
-        "graph error must carry the sentence, got: {err:#}"
+        err.to_string().contains(GRAPH_FAILED) && !err.to_string().contains(BEHIND),
+        "graph error must carry the graph-write sentence only, got: {err:#}"
     );
     let node_in_pg: i64 = db
         .query_one(
@@ -813,7 +849,10 @@ async fn a_surreal_write_failure_is_an_error_that_says_pg_has_it() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(node_in_pg, 1, "the sentence says pg has the session node");
+    assert_eq!(
+        node_in_pg, 0,
+        "node rows are Surreal-only, pg must hold none"
+    );
 
     let err = store
         .upsert_chunk(&Doc {
