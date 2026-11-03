@@ -28,6 +28,7 @@ from ohmyboring.remember.writer import (
     ingest_changed,
 )
 from ohmyboring.result import Either, Err, Ok
+from ohmyboring.store.surreal import SurrealClient
 from ohmyboring.sync import audit, links
 from ohmyboring.sync.classify import Different, LegacySame, NoRow, Same, judge_sha
 from ohmyboring.sync.note import ClassifyOrigin, SplitFrontmatter, parse_vault_note
@@ -75,6 +76,8 @@ class SyncDeps:
     db_errors: tuple[type[Exception], ...] = ()
     #: 엔진 cfg.allow_company_origin — audit 의 clean 판정에만 쓴다.
     allow_company: bool = False
+    #: backend=surreal 일 때만 채운다 — 위생 집계(audit)를 pg 대신 이 클라이언트로 읽는다.
+    audit_surreal: SurrealClient | None = None
 
 
 # ── 노트별 판정 ──────────────────────────────────────────────────────────────
@@ -354,6 +357,13 @@ def _run_tail(deps: SyncDeps) -> Tail:
         links_error = f"{type(e).__name__}: {e}"
     audit_stats: audit.AuditStats | None = None
     audit_error: str | None = None
+    if deps.audit_surreal is not None:
+        match audit.stats_surreal(deps.audit_surreal, deps.allow_company):
+            case Ok(stats):
+                audit_stats = stats
+            case Err(error):
+                audit_error = error.message
+        return Tail(link_report, audit_stats, links_error, audit_error)
     try:
         with deps.connect() as conn, conn.cursor() as cur:
             audit_stats = audit.stats(cur, deps.allow_company)

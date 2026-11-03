@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ohmyboring.result import Either, Err, Ok
+from ohmyboring.store import surreal
+from ohmyboring.store.surreal import SurrealClient, SurrealError
+
 #: store.rs:394 INFORMATIVE_VALUE_CHARS · :402 TAUTOLOGICAL_PREDICATES.
 INFORMATIVE_VALUE_CHARS = 25
 TAUTOLOGICAL_PREDICATES = (
@@ -124,4 +128,81 @@ def stats(cur: Any, allow_company: bool) -> AuditStats:
         claims_pre_anchor=pre_anchor,
         claims_label_only=label_only,
         claims_stale=_one(cur, _STALE_SQL)[0],
+    )
+
+
+def _count(statement: list[dict[str, Any]]) -> int:
+    """`SELECT count() AS n ... GROUP ALL` 은 빈 표에서 행이 없다 — 그 0 은 "센 결과 0"이다."""
+    return statement[0]["n"] if statement else 0
+
+
+def _by_kind_count(statement: list[dict[str, Any]], kinds: tuple[str, ...]) -> dict[str, int]:
+    found = {row["kind"]: row["n"] for row in statement}
+    return {kind: found.get(kind, 0) for kind in kinds}
+
+
+def stats_surreal(client: SurrealClient, allow_company: bool) -> Either[AuditStats, SurrealError]:
+    """`stats` 의 Surreal 짝(엔진 doc_reads.rs graph_stats·all_meta, claim_reads.rs claim_era_counts 와 같은 집계).
+    chunk 에는 kind 열이 없어 노트의 kind 를 document 에서 가져온다 — document 행이 없는 chunk 는 두 표가 갈린 것이라
+    조용히 세지 않고 Err 로 알린다."""
+    label_only = (
+        f"string::len(value) < {INFORMATIVE_VALUE_CHARS} OR "
+        f"string::matches(predicate, <regex> {surreal.text('(?i)' + TAUTOLOGICAL_PREDICATES)})"
+    )
+    sql = (
+        "SELECT source_path, origin, count() AS n FROM chunk GROUP BY source_path, origin;"
+        "SELECT source_path, kind FROM document;"
+        "SELECT count() AS n FROM chunk WHERE project = '' GROUP ALL;"
+        "SELECT count() AS n FROM document GROUP ALL;"
+        "SELECT count() AS n FROM edge GROUP ALL;"
+        "SELECT count() AS n FROM (SELECT dst FROM edge WHERE kind = 'claims' GROUP BY dst) GROUP ALL;"
+        "SELECT kind, count() AS n FROM node GROUP BY kind;"
+        "SELECT kind, count() AS n FROM edge GROUP BY kind;"
+        "SELECT count() AS n FROM claim_row WHERE superseded_us = NONE AND era = 'anchored' GROUP ALL;"
+        "SELECT count() AS n FROM claim_row WHERE superseded_us = NONE AND era = 'unanchored' GROUP ALL;"
+        "SELECT count() AS n FROM claim_row WHERE superseded_us = NONE AND era = 'pre-anchor' GROUP ALL;"
+        f"SELECT count() AS n FROM claim_row WHERE superseded_us = NONE AND ({label_only}) GROUP ALL;"
+        "SELECT count() AS n FROM claim_row WHERE stale_us != NONE GROUP ALL;"
+    )
+    match client.query(sql):
+        case Err() as failed:
+            return failed
+        case Ok(s) if len(s) == 13:
+            pass
+        case Ok(s):
+            return Err(SurrealError(f"audit: 13 statements expected, got {len(s)}"))
+    chunk_groups, doc_kinds = s[0], {row["source_path"]: row["kind"] for row in s[1]}
+    by_origin: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    for group in chunk_groups:
+        if group["source_path"] not in doc_kinds:
+            return Err(SurrealError(f"audit: chunk of {group['source_path']} has no document row in surreal"))
+        by_origin[group["origin"]] = by_origin.get(group["origin"], 0) + group["n"]
+        kind = doc_kinds[group["source_path"]]
+        by_kind[kind] = by_kind.get(kind, 0) + group["n"]
+    ordered = lambda tally: dict(sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))  # noqa: E731
+    company = by_origin.get("company", 0)
+    missing_origin = by_origin.get("", 0)
+    return Ok(
+        AuditStats(
+            total_chunks=sum(by_origin.values()),
+            total_files=len({g["source_path"] for g in chunk_groups}),
+            by_origin=ordered(by_origin),
+            by_kind=ordered(by_kind),
+            company_contamination=company,
+            company_allowed=allow_company,
+            missing_origin=missing_origin,
+            missing_project=_count(s[2]),
+            clean=(allow_company or company == 0) and missing_origin == 0,
+            graph_documents=_count(s[3]),
+            graph_edges=_count(s[4]),
+            graph_claims_with_doc=_count(s[5]),
+            nodes=_by_kind_count(s[6], _NODE_KINDS),
+            edges=_by_kind_count(s[7], _EDGE_KINDS),
+            claims_anchored=_count(s[8]),
+            claims_unanchored=_count(s[9]),
+            claims_pre_anchor=_count(s[10]),
+            claims_label_only=_count(s[11]),
+            claims_stale=_count(s[12]),
+        )
     )

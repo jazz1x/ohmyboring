@@ -21,6 +21,8 @@ import psycopg
 
 from ohmyboring.result import Either, Err, Ok, map_ok
 from ohmyboring.search.pg import PgError, _canonical_confidence, _canonical_kind
+from ohmyboring.store import surreal
+from ohmyboring.store.surreal import SurrealClient
 
 #: ── 상수 (drudge store.rs·serve.rs·ask.rs 정본) ─────────────────────────────
 REGISTER_LIMIT = 50
@@ -401,8 +403,153 @@ def _register_rows_from(rows: list[tuple]) -> RegisterRows:
     return RegisterRows(rows=tuple(_to_register_row(row) for row in rows), total_matching=int(total))
 
 
-def recent_register_rows(conn: psycopg.Connection, query: RegisterQuery) -> Either[RegisterRows, PgError]:
+#: ── Surreal 읽기 (엔진 vector_surreal.rs register_where·claim_reads.rs 를 조건 그대로 옮김) ──────────
+#: 읽는 표는 `claim_row`(열린 행 = `superseded_us = NONE`). `origin != NONE` 은 pg 의 document inner join.
+#: 순서의 끝(subject·predicate 바이트 순)은 pg 쪽 COLLATE "C" 와 같다.
+_DAY_US = 86_400_000_000
+_NOT_YET_ON_SURREAL = "{what}: backend=surreal 읽기 길이 아직 없음 (C-SURALL2 C0b2) — pg 로 되돌아가지 않는다"
+
+
+def _now_micros() -> int:
+    return int(datetime.now(UTC).timestamp() * 1_000_000)
+
+
+def _surreal_where(query: RegisterQuery) -> str:
+    conds = [
+        "superseded_us = NONE",
+        "origin != NONE",
+        f"!(origin IN {surreal.texts(list(query.exclude_origins))})",
+        f"!string::matches(source_path, <regex> {surreal.text(NOT_USER_MEMORY_RE)})",
+    ]
+    if query.project is not None:
+        conds.append(f"project = {surreal.text(query.project)}")
+    if query.kinds is not None:
+        conds.append(f"kind IN {surreal.texts(list(query.kinds))}")
+    return " AND ".join(conds)
+
+
+def _surreal_rows(client: SurrealClient, sql: str) -> Either[list[list[dict[str, Any]]], PgError]:
+    match client.query(sql):
+        case Err(e):
+            return Err(PgError(e.message))
+        case Ok(statements):
+            return Ok(statements)
+
+
+def _register_row_of(row: dict[str, Any]) -> RegisterRow:
+    return RegisterRow(
+        subject=row["subject"],
+        predicate=row["predicate"],
+        value=row["value"],
+        kind=row["kind"],
+        confidence=row["confidence"],
+        valid_from=surreal.micros_to_time(row["valid_from_us"]),
+        project=row["project"],
+    )
+
+
+_SURREAL_COLUMNS = (
+    "subject, predicate, value, kind, confidence, valid_from_us, project ?? '' AS project, source_path"
+)
+
+
+def _surreal_recent_register_rows(
+    client: SurrealClient, query: RegisterQuery
+) -> Either[RegisterRows, PgError]:
+    where = _surreal_where(query)
+    taut = surreal.text("(?i)" + TAUTOLOGICAL_PREDICATES)
+    sql = (
+        f"SELECT {_SURREAL_COLUMNS},"
+        f" (IF string::len(value) < {INFORMATIVE_VALUE_CHARS} {{ 1 }} ELSE {{ 0 }})"
+        f" + (IF string::matches(predicate, <regex> {taut}) {{ 1 }} ELSE {{ 0 }}) AS rank"
+        f" FROM claim_row WHERE {where}"
+        f" ORDER BY rank ASC, valid_from_us DESC, subject ASC, predicate ASC LIMIT {max(query.limit, 0)};"
+        f"SELECT count() AS n FROM claim_row WHERE {where} GROUP ALL;"
+    )
+    match _surreal_rows(client, sql):
+        case Err() as failed:
+            return failed
+        case Ok([rows, counted]):
+            total = counted[0]["n"] if counted else 0
+            return Ok(RegisterRows(rows=tuple(_register_row_of(r) for r in rows), total_matching=int(total)))
+        case Ok(other):
+            return Err(PgError(f"register: 2 statements expected, got {len(other)}"))
+
+
+def _surreal_stalled_register_rows(
+    client: SurrealClient, query: RegisterQuery
+) -> Either[RegisterRows, PgError]:
+    now = _now_micros()
+    older = query.older_than_days if query.older_than_days is not None else 0
+    sql = (
+        f"SELECT {_SURREAL_COLUMNS} FROM claim_row WHERE {_surreal_where(query)}"
+        f" AND valid_from_us < {now - older * _DAY_US} AND valid_from_us >= {now - STALE_HORIZON_DAYS * _DAY_US}"
+        " ORDER BY valid_from_us ASC, source_path ASC, subject ASC, predicate ASC;"
+    )
+    match _surreal_rows(client, sql):
+        case Err() as failed:
+            return failed
+        case Ok(statements):
+            seen: set[str] = set()
+            oldest = []
+            for row in statements[0]:  # 문서당 가장 오래된 한 행
+                if row["source_path"] not in seen:
+                    seen.add(row["source_path"])
+                    oldest.append(row)
+            return Ok(
+                RegisterRows(
+                    rows=tuple(_register_row_of(r) for r in oldest[: max(query.limit, 0)]),
+                    total_matching=len(oldest),
+                )
+            )
+
+
+def _surreal_recent_claims(
+    client: SurrealClient, query: RegisterQuery
+) -> Either[tuple[RegisterRow, ...], PgError]:
+    match _surreal_recent_register_rows(client, query):
+        case Err() as failed:
+            return failed
+        case Ok(found):
+            return Ok(
+                tuple(
+                    RegisterRow(row.subject, row.predicate, row.value, row.kind, row.confidence)
+                    for row in found.rows
+                )
+            )
+
+
+def _surreal_north_star_claims(
+    client: SurrealClient, project: str, exclude_origins: Iterable[str]
+) -> Either[tuple[RegisterRow, ...], PgError]:
+    query = RegisterQuery(0, None, None, tuple(exclude_origins))
+    sql = (
+        f"SELECT {_SURREAL_COLUMNS} FROM claim_row WHERE {_surreal_where(query)}"
+        f" AND kind = 'decision' AND subject = {surreal.text(north_star_subject(project))}"
+        f" AND predicate IN {surreal.texts(list(NORTH_STAR_PREDICATES))}"
+        " ORDER BY predicate ASC, valid_from_us DESC;"
+    )
+    match _surreal_rows(client, sql):
+        case Err() as failed:
+            return failed
+        case Ok(statements):
+            newest: dict[str, dict[str, Any]] = {}
+            for row in statements[0]:  # 술어별 최신 한 줄(DISTINCT ON)
+                newest.setdefault(row["predicate"], row)
+            return Ok(
+                tuple(
+                    RegisterRow(r["subject"], r["predicate"], r["value"], r["kind"], r["confidence"])
+                    for r in newest.values()
+                )
+            )
+
+
+def recent_register_rows(
+    conn: psycopg.Connection | SurrealClient, query: RegisterQuery
+) -> Either[RegisterRows, PgError]:
     """store.rs:1728 recent_register_rows — 레지스터 다섯이 같이 쓰는 본질문."""
+    if isinstance(conn, SurrealClient):
+        return _surreal_recent_register_rows(conn, query)
     params = _register_params(query)
     match _attempt(lambda: _exec(conn, _RECENT_REGISTER_ROWS_SQL, params)):
         case Err(e):
@@ -411,8 +558,12 @@ def recent_register_rows(conn: psycopg.Connection, query: RegisterQuery) -> Eith
             return Ok(_register_rows_from(rows))
 
 
-def stalled_register_rows(conn: psycopg.Connection, query: RegisterQuery) -> Either[RegisterRows, PgError]:
+def stalled_register_rows(
+    conn: psycopg.Connection | SurrealClient, query: RegisterQuery
+) -> Either[RegisterRows, PgError]:
     """store.rs:1855 stalled_register_rows — 문서당 한 행, older_than_days ≤ age < 30d."""
+    if isinstance(conn, SurrealClient):
+        return _surreal_stalled_register_rows(conn, query)
     params = _register_params(query)
     params["older_than_days"] = query.older_than_days
     params["horizon"] = STALE_HORIZON_DAYS
@@ -424,9 +575,11 @@ def stalled_register_rows(conn: psycopg.Connection, query: RegisterQuery) -> Eit
 
 
 def recurrence_rows(
-    conn: psycopg.Connection, days: int, project: str | None, limit: int
+    conn: psycopg.Connection | SurrealClient, days: int, project: str | None, limit: int
 ) -> Either[list[Recurrence], PgError]:
     """store.rs:1914 recurrences — 짝은 SQL 이, 그룹화(최신 걸 그룹 키·첫 짝 거리·older 시간순)는 러스트 따라 옮김."""
+    if isinstance(conn, SurrealClient):
+        return Err(PgError(_NOT_YET_ON_SURREAL.format(what="recurrences")))
     params = {
         "days": days,
         "min_days_apart": RECURRENCE_MIN_DAYS_APART,
@@ -481,7 +634,7 @@ def recurrence_rows(
 
 
 def recent_claims(
-    conn: psycopg.Connection,
+    conn: psycopg.Connection | SurrealClient,
     limit: int,
     project: str | None,
     kinds: tuple[str, ...] | None,
@@ -489,6 +642,8 @@ def recent_claims(
 ) -> Either[tuple[RegisterRow, ...], PgError]:
     """store.rs:1602 recent_claims — /context 다섯 칸의 재료 (유효시각 없이 다섯 칸만 낸다)."""
     query = RegisterQuery(limit, project, kinds, tuple(exclude_origins))
+    if isinstance(conn, SurrealClient):
+        return _surreal_recent_claims(conn, query)
     params = _register_params(query)
     match _attempt(lambda: _exec(conn, _RECENT_CLAIMS_SQL, params)):
         case Err(e):
@@ -518,9 +673,11 @@ def north_star_subject(project: str) -> str:
 
 
 def north_star_claims(
-    conn: psycopg.Connection, project: str, exclude_origins: Iterable[str]
+    conn: psycopg.Connection | SurrealClient, project: str, exclude_origins: Iterable[str]
 ) -> Either[tuple[RegisterRow, ...], PgError]:
     """store.rs north_star_claims — 북극성 claim 만 읽어 온다 (순서·중복 제거는 with_north_star)."""
+    if isinstance(conn, SurrealClient):
+        return _surreal_north_star_claims(conn, project, exclude_origins)
     params = {
         "subject": north_star_subject(project),
         "predicates": list(NORTH_STAR_PREDICATES),
@@ -560,9 +717,11 @@ def with_north_star(
 
 
 def status_docs(
-    conn: psycopg.Connection, project: str, exclude_origins: Iterable[str] = ()
+    conn: psycopg.Connection | SurrealClient, project: str, exclude_origins: Iterable[str] = ()
 ) -> Either[tuple[StatusDoc, ...], PgError]:
     """store.rs:1040 recent_docs 의 since_hours=Some(720) 갈래 — /status 의 근 30일 문서."""
+    if isinstance(conn, SurrealClient):
+        return Err(PgError(_NOT_YET_ON_SURREAL.format(what="status docs")))
     params = {
         "exclude_origins": list(exclude_origins),
         "since_hours": STATUS_SINCE_HOURS,
@@ -589,9 +748,11 @@ def status_docs(
 
 
 def status_claims(
-    conn: psycopg.Connection, project: str, vec: list[float]
+    conn: psycopg.Connection | SurrealClient, project: str, vec: list[float]
 ) -> Either[tuple[RegisterRow, ...], PgError]:
     """store.rs:2036 current_claims 의 /status 갈래 — 프로젝트명 임베딩의 최근접 현행 claim 열 개."""
+    if isinstance(conn, SurrealClient):
+        return Err(PgError(_NOT_YET_ON_SURREAL.format(what="status claims")))
     params = {
         "vec": _vector_literal(vec),
         "limit": STATUS_CLAIM_LIMIT,

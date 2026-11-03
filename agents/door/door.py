@@ -117,6 +117,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import functools
 import hmac
 import http.client
 import json
@@ -128,7 +129,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -168,6 +169,8 @@ from ohmyboring.result import Either, Err, Ok
 from ohmyboring.search import hits as search_hits
 from ohmyboring.search import pg as search_pg
 from ohmyboring.search import retriever as search_retriever
+from ohmyboring.store import claims as store_claims
+from ohmyboring.store import surreal as surreal_store
 from ohmyboring.sync import hash as sync_hash
 from ohmyboring.sync import run as sync_run
 from ohmyboring.sync import schedule as sync_schedule
@@ -201,7 +204,13 @@ def _refuse_python_writers_on_surreal() -> None:
     RECALL_READER door.py:1205, SEARCH_READER door.py:2259). 나머지(EVENTS_OWNER=event_log, BRIEF_OWNER=볼트 md,
     MEMORY_READER·REGISTER_READER=읽기) 는 node·edge 를 쓰지 않는다. claim 을 쓰는 파이썬 SQL(묶음3)도 같은
     스위치 뒤에 있다: writer.py:139-181 (REMEMBER_WRITER), compact/run.py:47·53 (COMPACT_OWNER),
-    door.py:1537 split 삭제 (LINK_WRITER=python 일 때만)."""
+    door.py split 삭제·sha 비움(_SPLIT_DELETE_SQL·_SPLIT_UPDATE_SQL, LINK_WRITER=python 일 때만).
+    이 표들의 backend=surreal 불변식은 가) Surreal 이 유일한 쓰기 주인(엔진) — 파이썬 쓰기 길은 위 스위치로 막고, pg→Surreal
+    복사는 꺼져 있다(#533~#535). 나) 는 event_log·query_log·recall_label·sync_state: pg 가 쓰기 주인이고 복사가 나른다
+    (log_copy_surreal.rs) — 파이썬 쓰기(events/pg.py, search/pg.py log_query)는 그대로 pg 다.
+    파이썬 *읽기* 는 막지 않고 Surreal 로 보낸다(Z3): claim_source·rules·split-subjects 읽기(door.py _fetch_*), 레지스터
+    decisions·risks·next_actions·stalled·context 의 claim 읽기(registers/pg.py), sync 위생 집계(audit.stats_surreal).
+    recurrences·status 는 아직 Surreal 길이 없어 Err 로 답한다(pg 로 되돌아가지 않음)."""
     # rollback = backend=pg + DOOR_*=python as a pair
     backend = (boring_config.load().get("vector") or {}).get("backend")
     python_on = [
@@ -667,8 +676,21 @@ def _sync_owner() -> str:
     return _SYNC_PYTHON if os.environ.get(_SYNC_OWNER_ENV) == _SYNC_PYTHON else "engine"
 
 
+def _audit_client() -> surreal_store.SurrealClient | None:
+    """The Surreal client the audit reads from, or None on pg. A backend=surreal config that does not
+    parse is an error, not a quiet read of pg."""
+    match _backend():
+        case Ok(surreal_store.OnSurreal(settings)):
+            return _surreal_client(settings)
+        case Ok(surreal_store.OnPg()):
+            return None
+        case Err(error):
+            raise StoreUnreachable(error.message)
+
+
 def _sync_deps() -> sync_run.SyncDeps:
     return sync_run.SyncDeps(
+        audit_surreal=_audit_client(),
         wiki_dir=os.path.join(_vault_dir(), "wiki"),
         connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
         embed=remember_writer.embed_via_adapter,
@@ -1091,17 +1113,24 @@ def _embed_text(text: str):
 
 def _register_answer(args: dict, surface: str, transport: str) -> Either[dict, str]:
     """읽기 길 한 바퀴 — 읽기 전용 연결(그림자·켬 응답 길 같음). 실패는 message 값으로."""
+    ctx = registers_pg.AnswerCtx(
+        policy_origins=_policy_origins(),
+        lang=boring_config.note_lang(),
+        embed=_embed_text,
+        transport=transport,
+    )
+    match _backend():
+        case Err(error):
+            return Err(error.message)
+        case Ok(surreal_store.OnSurreal(settings)):
+            return registers_pg.answer(_surreal_client(settings), surface, args, ctx)
+        case Ok(surreal_store.OnPg()):
+            pass
     try:
         conn = psycopg.connect(os.environ["DOOR_PG_DSN"], options="-c default_transaction_read_only=on")
     except psycopg.Error as e:
         return Err(f"pg connect: {e}")
     with conn:
-        ctx = registers_pg.AnswerCtx(
-            policy_origins=_policy_origins(),
-            lang=boring_config.note_lang(),
-            embed=_embed_text,
-            transport=transport,
-        )
         return registers_pg.answer(conn, surface, args, ctx)
 
 
@@ -1147,8 +1176,8 @@ async def _register_python(
 
     켬 응답 길은 주 요청 안에서 돈다(그림자와 달리). 사건 기록은 없다 — 켬에서는 비교할
     엔진 답이 없고, 답 자체는 읽기라 기록할 사건 이며: 응답은 엔진 모양 그대로 준다."""
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
     parse = registers_pg.http_args if transport == "http" else registers_pg.mcp_args
     match parse(surface, arguments):
         case Err(rejected):
@@ -1375,16 +1404,71 @@ async def _approved(request: Request) -> Response:
     return JSONResponse(payload)
 
 
+class StoreUnreachable(Exception):
+    """The Surreal side of a claim read failed (connection, auth, statement). Raised only at the
+    thread hand-off of `_on_store` — the handlers answer it as 502, like psycopg.OperationalError
+    on the pg side. There is no fallback to pg: a failed Surreal read is a failed read."""
+
+
+_STORE_UNREACHABLE = (psycopg.OperationalError, StoreUnreachable)
+
+
+def _backend() -> Either[surreal_store.Backend, surreal_store.SurrealError]:
+    """vector.backend + Surreal settings, parsed from boring.json and env once per request."""
+    return surreal_store.parse_backend(boring_config.load(), os.environ)
+
+
+@functools.cache
+def _surreal_client(settings: surreal_store.SurrealSettings) -> surreal_store.SurrealClient:
+    return surreal_store.SurrealClient(settings)
+
+
+def _store_unconfigured() -> JSONResponse | None:
+    """The 503 of a claim read: pg needs DOOR_PG_DSN, Surreal needs a parsed backend (password env set)."""
+    match _backend():
+        case Err(error):
+            return JSONResponse({"error": "store not configured", "detail": error.message}, status_code=503)
+        case Ok(surreal_store.OnSurreal()):
+            return None
+        case Ok(surreal_store.OnPg()):
+            if os.environ.get("DOOR_PG_DSN"):
+                return None
+            return JSONResponse({"error": "store not configured"}, status_code=503)
+
+
+def _on_store(
+    on_pg: Callable[[], Any], on_surreal: Callable[[surreal_store.SurrealClient], Either[Any, Any]]
+) -> Any:
+    """Run the pg reader or the Surreal reader by vector.backend. One of the two, never both."""
+    match _backend():
+        case Err(error):
+            raise StoreUnreachable(error.message)
+        case Ok(surreal_store.OnPg()):
+            return on_pg()
+        case Ok(surreal_store.OnSurreal(settings)):
+            match on_surreal(_surreal_client(settings)):
+                case Ok(rows):
+                    return rows
+                case Err(error):
+                    raise StoreUnreachable(error.message)
+
+
 def _fetch_claim_source(subject: str) -> list:
-    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
-        cur.execute(claim_source.SQL, (subject,))
-        return cur.fetchall()
+    def on_pg() -> list:
+        with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+            cur.execute(claim_source.SQL, (subject,))
+            return cur.fetchall()
+
+    return _on_store(on_pg, lambda client: store_claims.claim_source_rows(client, subject))
 
 
 def _fetch_claim_sources(predicate: str) -> list:
-    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
-        cur.execute(claim_source.LIST_SQL, (predicate,))
-        return cur.fetchall()
+    def on_pg() -> list:
+        with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+            cur.execute(claim_source.LIST_SQL, (predicate,))
+            return cur.fetchall()
+
+    return _on_store(on_pg, lambda client: store_claims.claim_source_list_rows(client, predicate))
 
 
 #: active_days bounds — 1 day minimum (a shorter window is not "recently active"), 365 days
@@ -1450,11 +1534,11 @@ async def _claim_source(request: Request) -> Response:
         return JSONResponse({"error": "subject query param is required"}, status_code=400)
     if "\x00" in subject:
         return JSONResponse({"error": "subject must not contain NUL"}, status_code=400)
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
     try:
         rows = await asyncio.to_thread(_fetch_claim_source, subject)
-    except psycopg.OperationalError as e:
+    except _STORE_UNREACHABLE as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     payload = claim_source.pick_current(subject, rows)
     if payload is None:
@@ -1468,30 +1552,33 @@ async def _claim_sources(request: Request) -> Response:
         return JSONResponse({"error": "predicate query param is required"}, status_code=400)
     if "\x00" in predicate:
         return JSONResponse({"error": "predicate must not contain NUL"}, status_code=400)
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
     try:
         rows = await asyncio.to_thread(_fetch_claim_sources, predicate)
-    except psycopg.OperationalError as e:
+    except _STORE_UNREACHABLE as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     return JSONResponse({"predicate": predicate, "claims": claim_source.group_current(rows)})
 
 
 def _fetch_rules() -> list:
-    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
-        cur.execute(rules.SQL, ("rule",))
-        return cur.fetchall()
+    def on_pg() -> list:
+        with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn, conn.cursor() as cur:
+            cur.execute(rules.SQL, ("rule",))
+            return cur.fetchall()
+
+    return _on_store(on_pg, lambda client: store_claims.rule_rows(client, "rule"))
 
 
 async def _rules(request: Request) -> Response:
     """GET /rules — the owner's standing corrections, grouped by subject for the
     trigger hook: each subject's 'rule' sentence + its trigger words. A subject
     holding only one of the pair is counted in `incomplete`, never served half."""
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
     try:
         rows = await asyncio.to_thread(_fetch_rules)
-    except psycopg.OperationalError as e:
+    except _STORE_UNREACHABLE as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     return JSONResponse(rules.group_rules(rows))
 
@@ -1513,9 +1600,12 @@ _SPLIT_SAMPLES_SQL = (
 
 
 def _fetch_split_samples(variants: list[str]) -> list[tuple[str, int, str]]:
-    with _split_subjects_connect() as conn, conn.cursor() as cur:
-        cur.execute(_SPLIT_SAMPLES_SQL, (_SAMPLE_VALUE_CHARS, variants, _SAMPLE_LIMIT))
-        return cur.fetchall()
+    def on_pg() -> list[tuple[str, int, str]]:
+        with _split_subjects_connect() as conn, conn.cursor() as cur:
+            cur.execute(_SPLIT_SAMPLES_SQL, (_SAMPLE_VALUE_CHARS, variants, _SAMPLE_LIMIT))
+            return cur.fetchall()
+
+    return _on_store(on_pg, lambda client: store_claims.split_samples(client, variants))
 
 
 async def _repairs_split_subjects_samples(request: Request) -> Response:
@@ -1524,11 +1614,11 @@ async def _repairs_split_subjects_samples(request: Request) -> Response:
         return JSONResponse(
             {"error": f"variant must be given 1..{_SAMPLE_MAX_VARIANTS} times"}, status_code=400
         )
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
     try:
         rows = await asyncio.to_thread(_fetch_split_samples, variants)
-    except psycopg.OperationalError as e:
+    except _STORE_UNREACHABLE as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     return JSONResponse({"samples": [{"predicate": p, "rows": n, "value": v} for p, n, v in rows]})
 
@@ -1612,9 +1702,12 @@ def _split_subjects_connect() -> psycopg.Connection:
 
 
 def _fetch_split_subject_rows() -> list[tuple[str, str]]:
-    with _split_subjects_connect() as conn, conn.cursor() as cur:
-        cur.execute(_SPLIT_SUBJECTS_SQL)
-        return cur.fetchall()
+    def on_pg() -> list[tuple[str, str]]:
+        with _split_subjects_connect() as conn, conn.cursor() as cur:
+            cur.execute(_SPLIT_SUBJECTS_SQL)
+            return cur.fetchall()
+
+    return _on_store(on_pg, store_claims.split_subject_rows)
 
 
 def _emit_subject_merged_event(
@@ -1765,7 +1858,7 @@ def _reread_outcomes(
         return [card_view.reread_failed_outcome(error, lang=lang) for _ in batch]
     try:
         rows = _fetch_split_subject_rows()
-    except psycopg.Error as e:
+    except (psycopg.Error, StoreUnreachable) as e:
         print(f"[door] recount after the reread failed: {e}", file=sys.stderr, flush=True)
         return [card_view.reread_failed_outcome(e, lang=lang) for _ in batch]
     return [_record_merged(merged, rows, lang) for merged in batch]
@@ -1960,11 +2053,11 @@ async def _repairs_split_subjects_get(request: Request) -> Response:
         return JSONResponse(
             {"error": f"limit must be an integer {_MIN_REPAIR_LIMIT}..{_MAX_REPAIR_LIMIT}"}, status_code=400
         )
-    if not os.environ.get("DOOR_PG_DSN"):
-        return JSONResponse({"error": "store not configured"}, status_code=503)
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
     try:
         rows = await asyncio.to_thread(_fetch_split_subject_rows)
-    except psycopg.OperationalError as e:
+    except _STORE_UNREACHABLE as e:
         return JSONResponse({"error": "store unreachable", "detail": str(e)}, status_code=502)
     groups = _group_split_subjects(rows)
     return JSONResponse({"groups": groups[:limit], "total_groups": len(groups)})

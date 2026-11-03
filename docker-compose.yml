@@ -119,6 +119,10 @@ services:
     environment:
       DOOR_UPSTREAM: http://boring-drudge:7700
       DOOR_PG_DSN: postgresql://boring:boring@boring-postgres:5432/boring
+      # vector.backend=surreal: the door's claim reads (claim-source, rules, split-subjects, registers)
+      # go to Surreal. Read only when boring.json says surreal; the password has no other way in.
+      BORING_SURREAL_URL: ${BORING_SURREAL_URL:-http://boring-surreal:8000}
+      BORING_SURREAL_PASSWORD: ${BORING_SURREAL_PASSWORD:-boring}
       BORING_OWNER_TOKEN: ${BORING_OWNER_TOKEN:-}
       # The door rewrites a card row after a merge (door.py _slack_client) with the bot token,
       # from .env like the secretary. SECRETARY_OWNER_ID rides along for the
