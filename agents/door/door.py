@@ -209,8 +209,8 @@ def _refuse_python_writers_on_surreal() -> None:
     복사는 꺼져 있다(#533~#535). 나) 는 event_log·query_log·recall_label·sync_state: pg 가 쓰기 주인이고 복사가 나른다
     (log_copy_surreal.rs) — 파이썬 쓰기(events/pg.py, search/pg.py log_query)는 그대로 pg 다.
     파이썬 *읽기* 는 막지 않고 Surreal 로 보낸다(Z3): claim_source·rules·split-subjects 읽기(door.py _fetch_*), 레지스터
-    decisions·risks·next_actions·stalled·context 의 claim 읽기(registers/pg.py), sync 위생 집계(audit.stats_surreal).
-    recurrences·status 는 아직 Surreal 길이 없어 Err 로 답한다(pg 로 되돌아가지 않음)."""
+    decisions·risks·next_actions·stalled·context 의 claim 읽기(registers/pg.py). sync 위생 집계는 파이썬 sync 가
+    surreal 에서 기동 거부라 부를 곳이 없어 옮기지 않았다(C0b2). recurrences·status 는 아직 Surreal 길이 없어 Err 로 답한다(pg 로 되돌아가지 않음)."""
     # rollback = backend=pg + DOOR_*=python as a pair
     backend = (boring_config.load().get("vector") or {}).get("backend")
     python_on = [
@@ -676,21 +676,8 @@ def _sync_owner() -> str:
     return _SYNC_PYTHON if os.environ.get(_SYNC_OWNER_ENV) == _SYNC_PYTHON else "engine"
 
 
-def _audit_client() -> surreal_store.SurrealClient | None:
-    """The Surreal client the audit reads from, or None on pg. A backend=surreal config that does not
-    parse is an error, not a quiet read of pg."""
-    match _backend():
-        case Ok(surreal_store.OnSurreal(settings)):
-            return _surreal_client(settings)
-        case Ok(surreal_store.OnPg()):
-            return None
-        case Err(error):
-            raise StoreUnreachable(error.message)
-
-
 def _sync_deps() -> sync_run.SyncDeps:
     return sync_run.SyncDeps(
-        audit_surreal=_audit_client(),
         wiki_dir=os.path.join(_vault_dir(), "wiki"),
         connect=lambda: psycopg.connect(os.environ["DOOR_PG_DSN"]),
         embed=remember_writer.embed_via_adapter,

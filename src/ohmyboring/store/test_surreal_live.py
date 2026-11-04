@@ -4,8 +4,7 @@
   BORING_Z3_SURREAL_URL · BORING_Z3_SURREAL_PASSWORD  — 일회용 Surreal (네임스페이스 z3test_<pid> 를 만들고 끝에 지운다)
   BORING_Z3_PG_DSN                                      — 스키마가 깔린 pg. 시험 행은 한 트랜잭션 안에서만 넣고 rollback 한다.
 같은 고정 입력을 양쪽에 넣고, 옮긴 가지마다 pg 의 기존 SQL 이 낸 행과 Surreal 길이 낸 행을 비교한다.
-시험 행은 주어·술어·프로젝트·경로 접두를 `z3test` 로 잡아 기존 행과 섞이지 않는다.
-(audit.stats_surreal 은 전 표 집계라 사본 밖 행과 섞여 여기서 대조하지 않는다 — 별도 표본 대조 필요.)"""
+시험 행은 주어·술어·프로젝트·경로 접두를 `z3test` 로 잡아 기존 행과 섞이지 않는다."""
 
 from __future__ import annotations
 

@@ -22,7 +22,6 @@ sys.path[:0] = [
 from ohmyboring.registers import pg as registers  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 from ohmyboring.store import claims, surreal  # noqa: E402
-from ohmyboring.sync import audit  # noqa: E402
 
 SETTINGS = surreal.SurrealSettings("http://surreal.test", "boring", "boring", "root", "pw")
 
@@ -240,47 +239,6 @@ class RegisterReads(unittest.TestCase):
         self.assertIsInstance(registers.recurrence_rows(client, 30, None, 10), Err)
         self.assertIsInstance(registers.status_docs(client, "p"), Err)
         self.assertIsInstance(registers.status_claims(client, "p", [0.0]), Err)
-
-
-class AuditReads(unittest.TestCase):
-    def test_stats_fold_thirteen_statements_into_the_pg_shape(self) -> None:
-        statements = [
-            [
-                {"source_path": "/a", "origin": "user", "n": 2},
-                {"source_path": "/b", "origin": "company", "n": 1},
-            ],
-            [{"source_path": "/a", "kind": "wiki"}, {"source_path": "/b", "kind": "wiki"}],
-            [{"n": 1}],
-            [{"n": 2}],
-            [{"n": 4}],
-            [{"n": 1}],
-            [{"kind": "tool", "n": 3}],
-            [{"kind": "uses", "n": 5}],
-            [{"n": 1}],
-            [],
-            [{"n": 2}],
-            [{"n": 3}],
-            [{"n": 6}],
-        ]
-        match audit.stats_surreal(_server(lambda sql: statements), allow_company=False):
-            case Ok(stats):
-                self.assertEqual((stats.total_chunks, stats.total_files), (3, 2))
-                self.assertEqual(stats.by_origin, {"user": 2, "company": 1})
-                self.assertEqual(stats.by_kind, {"wiki": 3})
-                self.assertFalse(stats.clean)
-                self.assertEqual(stats.nodes["tool"], 3)
-                self.assertEqual(stats.nodes["project"], 0)
-                self.assertEqual(stats.edges, {"uses": 5, "about": 0})
-                self.assertEqual(
-                    (stats.claims_anchored, stats.claims_unanchored, stats.claims_pre_anchor), (1, 0, 2)
-                )
-                self.assertEqual((stats.claims_label_only, stats.claims_stale), (3, 6))
-            case other:
-                self.fail(other)
-
-    def test_a_chunk_without_a_document_row_is_an_err(self) -> None:
-        statements = [[{"source_path": "/a", "origin": "user", "n": 1}], [], *[[] for _ in range(11)]]
-        self.assertIsInstance(audit.stats_surreal(_server(lambda sql: statements), allow_company=True), Err)
 
 
 if __name__ == "__main__":
