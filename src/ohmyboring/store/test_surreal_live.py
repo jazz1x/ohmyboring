@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
@@ -145,7 +146,7 @@ class PgAndSurrealAgree(unittest.TestCase):
             return cur.fetchall()
 
     def test_claim_source_rows_agree(self) -> None:
-        from agents.door import claim_source
+        claim_source = importlib.import_module("agents.door.claim_source")
 
         expected = self._pg(claim_source.SQL, ("z3test-s",))
         got = claims.claim_source_rows(self.client, "z3test-s")
@@ -154,13 +155,13 @@ class PgAndSurrealAgree(unittest.TestCase):
         self.assertNotIn("z3test/c.md", [r[0] for r in expected])
 
     def test_claim_source_list_rows_agree(self) -> None:
-        from agents.door import claim_source
+        claim_source = importlib.import_module("agents.door.claim_source")
 
         expected = self._pg(claim_source.LIST_SQL, ("z3test-p",))
         self.assertEqual(claims.claim_source_list_rows(self.client, "z3test-p"), Ok(expected))
 
     def test_rule_groups_agree(self) -> None:
-        from agents.door import rules
+        rules = importlib.import_module("agents.door.rules")
 
         pg_rows = [r for r in self._pg(rules.SQL, ("rule",)) if r[0].startswith("z3test")]
         match claims.rule_rows(self.client, "rule"):
@@ -183,7 +184,7 @@ class PgAndSurrealAgree(unittest.TestCase):
                 self.fail(other)
 
     def test_split_samples_agree(self) -> None:
-        from agents.door import door
+        door = importlib.import_module("agents.door.door")
 
         variants = ["z3test-s", "Z3Test-S"]
         expected = self._pg(door._SPLIT_SAMPLES_SQL, (door._SAMPLE_VALUE_CHARS, variants, door._SAMPLE_LIMIT))

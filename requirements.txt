@@ -20,6 +20,12 @@ slack-sdk>=3.27
 # The door lives outside hooks/ on purpose: hooks stay stdlib-only, a door may have dependencies.
 fastapi>=0.110
 uvicorn>=0.29
+# httpx is the Surreal HTTP client (src/ohmyboring/store/surreal.py, backend=surreal claim reads).
+# It already arrived through langchain_ollama; named here because the door imports it directly.
+httpx>=0.27
+# starlette is fastapi's own base; named because agents/door/test_door_surreal_reads.py builds a
+# starlette Request directly.
+starlette>=0.37
 # langgraph, langchain_core, langchain_ollama and pydantic are the core package's dependencies:
 # their versions live in pyproject.toml (`pip install .` brings them), not here.
 # psycopg is the door's first read of the store (agents/door/approved.py — what the morning
