@@ -189,15 +189,15 @@ async fn main() -> Result<()> {
                     .map_or_else(String::new, |id| format!(" repository '{id}'"))
             );
             let dsn = config::pg_dsn();
-            let mut code_store = code_index::CodeIndexStore::connect(&dsn)?;
-            code_store.initialize().await?;
             let surreal = match cfg.vector.effective().backend {
                 config::VectorBackend::Surreal => Some(store::SurrealClient::new(
                     cfg.vector.surreal.settings(&config::env_set)?,
                 )?),
                 config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
             };
-            let mut behind = Vec::new();
+            // backend=surreal: sync_repository writes Surreal directly; pg stays untouched.
+            let mut code_store = code_index::CodeIndexStore::connect(&dsn)?.with_surreal(surreal);
+            code_store.initialize().await?;
             for source in selected {
                 let report = code_index::sync_repository(&mut code_store, source).await?;
                 println!(
@@ -209,26 +209,7 @@ async fn main() -> Result<()> {
                     report.deleted,
                     report.parse_errors
                 );
-                // Every selected repository is mirrored, changed or not: a pass that failed
-                // after an earlier commit is repaired by the next code-sync.
-                if let Some(client) = &surreal {
-                    match client.copy_code_repo(&code_store, source.id()).await {
-                        Ok(copied) => {
-                            for table in &copied {
-                                println!("code-copy {}: {}", source.id(), table.line());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("code-copy {}: {e:#}", source.id());
-                            behind.push(source.id().to_owned());
-                        }
-                    }
-                }
             }
-            anyhow::ensure!(
-                behind.is_empty(),
-                "code-sync: pg 에는 기록됨, Surreal 사본만 빠진 repository {behind:?} — 다음 code-sync 가 이어 맞춤"
-            );
             return Ok(());
         }
         Cmd::CodeCheck => {
