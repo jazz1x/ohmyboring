@@ -1,9 +1,12 @@
 //! C-SURALL2 A5: the four `code_index` tables (`repository`, `file`, `symbol`, `relation`) copied
 //! from pg into Surreal, one repository at a time, by a pass that reads pg after the sync commit.
 //!
-//! The only writer is `replace_repository` (one pg transaction per repository: upsert of the
-//! repository row, `DELETE`+`INSERT` per changed file, `DELETE` of vanished files), run by the host
-//! binary `drudge code-sync`. Row ids are content hashes and a row's values change under the
+//! This pass is the pg→Surreal copy tool (Z4). It is no longer the only way rows reach Surreal:
+//! on `backend=surreal`, `drudge code-sync` writes Surreal directly (`replace_repository_surreal`,
+//! one transaction per file, or several when a file does not fit one request, the repository row
+//! last) and does not touch pg. On `backend=pg` the writer is pg `replace_repository` (one pg
+//! transaction per repository: upsert of the repository row, `DELETE`+`INSERT` per changed file,
+//! `DELETE` of vanished files). Row ids are content hashes and a row's values change under the
 //! same id, so the A4 id watermark does not fit; the scope that does fit is the repository, the
 //! same shape as `SurrealClient::mirror` (pg's current state of a scope, re-read, then reconciled).
 //!

@@ -9,7 +9,7 @@ use super::{
     SyncReport, usize_to_i64,
 };
 use crate::config::CodeIndexSource;
-use crate::store::{SurrealClient, code_upsert_stmt};
+use crate::store::{CODE_TX_BYTES, SurrealClient, code_upsert_stmt};
 
 /// PostgreSQL adapter dedicated to the `code_index` schema. It never reads or writes the memory
 /// corpus (`document`, `chunk`, `node`, `edge`, `claim`).
@@ -460,19 +460,36 @@ fn json_rows(rows: impl Iterator<Item = serde_json::Value>) -> Vec<String> {
     rows.map(|row| row.to_string()).collect()
 }
 
-/// The Surreal writes of one changed file as one transaction body: the file's old symbols and
-/// relations go, its new rows come in, and the `code_file` row (the sha `existing_hashes` reads)
-/// is written in the same transaction as the symbols it describes.
-fn file_tx_body(repository_id: &str, file: &PreparedFile, now_us: i64) -> anyhow::Result<String> {
+/// Room left for rows in one request after `BEGIN; ... COMMIT;` and one `FOR ... UPSERT` wrapper.
+const ROW_BYTES_PER_TX: usize = CODE_TX_BYTES - 256;
+
+/// The Surreal writes of one changed file as transaction bodies, sent in order. The rule they
+/// keep: when `code_file.sha256` holds the file's real sha (what `existing_hashes` compares), all of
+/// the file's rows are there.
+///
+/// A file that fits one request is one body: old rows go, new rows and the sha come in together.
+/// Measured 11-04 on the trunk (29b63d8), 16 of 459 files do not fit (largest 3,322,717 bytes), so
+/// such a file is several bodies: the first deletes its old rows and writes `code_file` with an
+/// empty sha, the middle ones carry its symbols and relations under the cap, and the last writes
+/// the real sha. A run cut off in between leaves the empty sha, which never matches, so the next
+/// run redoes the file. A single row over the cap is its own body and `code_tx` refuses it.
+fn file_tx_bodies(
+    repository_id: &str,
+    file: &PreparedFile,
+    now_us: i64,
+) -> anyhow::Result<Vec<String>> {
     let file_id = &file.collected.id;
     let repo = serde_json::to_string(repository_id)?;
     let fid = serde_json::to_string(file_id)?;
-    let file_row = serde_json::json!({
-        "cid": file_id, "repository_id": repository_id,
-        "relative_path": file.collected.relative_path, "sha256": file.collected.sha256,
-        "parse_status": file.parsed.status.as_str(), "error_count": file.parsed.error_count,
-        "updated_us": now_us,
-    });
+    let file_row = |sha256: &str| {
+        serde_json::json!({
+            "cid": file_id, "repository_id": repository_id,
+            "relative_path": file.collected.relative_path, "sha256": sha256,
+            "parse_status": file.parsed.status.as_str(), "error_count": file.parsed.error_count,
+            "updated_us": now_us,
+        })
+        .to_string()
+    };
     let symbols = json_rows(file.parsed.symbols.iter().map(|s| {
         serde_json::json!({
             "cid": s.id, "repository_id": repository_id, "file_id": file_id,
@@ -489,18 +506,48 @@ fn file_tx_body(repository_id: &str, file: &PreparedFile, now_us: i64) -> anyhow
             "start_byte": r.start_byte, "end_byte": r.end_byte,
         })
     }));
-    let mut body = format!(
+    let delete_old = format!(
         "DELETE code_relation WHERE repository_id = {repo} AND file_id = {fid}; \
          DELETE code_symbol WHERE repository_id = {repo} AND file_id = {fid}; "
     );
-    body.push_str(&code_upsert_stmt("code_file", &[file_row.to_string()]));
-    if !symbols.is_empty() {
-        body.push_str(&code_upsert_stmt("code_symbol", &symbols));
+    let real_sha = code_upsert_stmt("code_file", &[file_row(&file.collected.sha256)]);
+    let row_bytes: usize = symbols.iter().chain(&relations).map(|r| r.len() + 1).sum();
+    if delete_old.len() + real_sha.len() + row_bytes <= ROW_BYTES_PER_TX {
+        let mut body = delete_old + &real_sha;
+        if !symbols.is_empty() {
+            body.push_str(&code_upsert_stmt("code_symbol", &symbols));
+        }
+        if !relations.is_empty() {
+            body.push_str(&code_upsert_stmt("code_relation", &relations));
+        }
+        return Ok(vec![body]);
     }
-    if !relations.is_empty() {
-        body.push_str(&code_upsert_stmt("code_relation", &relations));
-    }
-    Ok(body)
+    let mut bodies = vec![delete_old + &code_upsert_stmt("code_file", &[file_row("")])];
+    bodies.extend(rows_under_cap(&symbols).map(|rows| code_upsert_stmt("code_symbol", rows)));
+    bodies.extend(rows_under_cap(&relations).map(|rows| code_upsert_stmt("code_relation", rows)));
+    bodies.push(real_sha);
+    Ok(bodies)
+}
+
+/// `rows` cut, in order, into runs whose joined size fits `ROW_BYTES_PER_TX`; a row larger than
+/// that alone is a run of its own.
+fn rows_under_cap(rows: &[String]) -> impl Iterator<Item = &[String]> {
+    let mut rest = rows;
+    std::iter::from_fn(move || {
+        let first = rest.first()?;
+        let mut used = first.len() + 1;
+        let mut take = 1;
+        while let Some(row) = rest.get(take) {
+            if used + row.len() + 1 > ROW_BYTES_PER_TX {
+                break;
+            }
+            used += row.len() + 1;
+            take += 1;
+        }
+        let (run, tail) = rest.split_at(take);
+        rest = tail;
+        Some(run)
+    })
 }
 
 /// Delete the rows of files that are no longer in the repository.
@@ -515,11 +562,11 @@ fn vanished_tx_body(repository_id: &str, file_ids: &[&str]) -> anyhow::Result<St
 }
 
 /// `replace_repository` on Surreal. HTTP carries no open transaction and a request body is capped
-/// near 1 MiB, so a repository cannot be one transaction as it is on pg. Each changed file is one
-/// (symbols and the sha that vouches for them land together or not at all), then the vanished
-/// files, then the `code_repository` row last. A run that stops half way leaves each file whole at
-/// its old or new version, and the next run's `existing_hashes` re-does exactly the files whose
-/// sha is still the old one. A single file whose rows pass the request cap fails loudly.
+/// near 1 MiB, so a repository cannot be one transaction as it is on pg. Each changed file goes as
+/// `file_tx_bodies` (its real sha lands only once all its rows are in), then the vanished files,
+/// then the `code_repository` row last. A run that stops half way leaves no real sha over missing
+/// rows, and the next run's `existing_hashes` re-does exactly the files whose sha is not the new
+/// one. A single row over the request cap fails loudly.
 async fn replace_repository_surreal(
     client: &SurrealClient,
     source: &CodeIndexSource,
@@ -542,9 +589,9 @@ async fn replace_repository_surreal(
         .partition(|row| !seen.contains(row.relative_path.as_str()));
 
     for file in changed {
-        client
-            .code_tx(&file_tx_body(source.id(), file, now_us)?)
-            .await?;
+        for body in file_tx_bodies(source.id(), file, now_us)? {
+            client.code_tx(&body).await?;
+        }
     }
     let vanished_ids: Vec<&str> = vanished.iter().map(|row| row.cid.as_str()).collect();
     for ids in vanished_ids.chunks(VANISHED_PER_TX) {
