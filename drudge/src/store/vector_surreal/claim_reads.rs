@@ -29,7 +29,7 @@ use crate::rules::RuleRow;
 use crate::split_subjects::{SAMPLE_LIMIT, SAMPLE_VALUE_CHARS, Sample};
 use crate::store::{
     AnchorCheckRow, AnchorCheckWatermark, ClaimEraCounts, RegisterRow, RegisterRows,
-    STALE_HORIZON_DAYS,
+    STALE_HORIZON_DAYS, UnpinnedAnchorRow,
 };
 
 const DAY_US: i64 = 86_400_000_000;
@@ -132,6 +132,14 @@ struct AnchorRow {
     anchor: Option<String>,
     anchor_hash: String,
     anchor_symbol: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UnpinnedRow {
+    subject: String,
+    predicate: String,
+    valid_from_us: i64,
+    anchor: String,
 }
 
 fn utc(us: i64, what: &str) -> Result<DateTime<Utc>> {
@@ -589,6 +597,25 @@ impl SurrealClient {
               AND (subject < {s} OR (subject = {s} AND predicate <= {p}))))"
         );
         self.anchor_rows(&upto, limit).await
+    }
+
+    /// `Store::claims_without_anchor_hash`: open, live `claim_row`s with an anchor and no hash.
+    pub async fn claims_without_anchor_hash(&self) -> Result<Vec<UnpinnedAnchorRow>> {
+        let sql = "SELECT subject, predicate, valid_from_us, anchor FROM claim_row
+                    WHERE anchor != NONE AND anchor_hash = NONE
+                      AND superseded_us = NONE AND stale_us = NONE
+                    ORDER BY valid_from_us ASC, subject ASC, predicate ASC;";
+        let rows: Vec<UnpinnedRow> = first_statement(sql, self.rows::<UnpinnedRow>(sql).await?)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(UnpinnedAnchorRow {
+                    valid_from: micros_to_time(r.valid_from_us, "claim_row valid_from_us")?,
+                    subject: r.subject,
+                    predicate: r.predicate,
+                    anchor: r.anchor,
+                })
+            })
+            .collect()
     }
 
     async fn anchor_rows(&self, window: &str, limit: usize) -> Result<Vec<AnchorCheckRow>> {

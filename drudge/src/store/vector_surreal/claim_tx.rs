@@ -826,6 +826,30 @@ impl SurrealClient {
         self.write_retrying(TxPlace::Slot, &sql).await
     }
 
+    /// `Store::pin_anchor_hash`: fill the hash and symbol of one open, live `claim_row` that has
+    /// none. The vector `claim` table carries neither column (its DDL has `anchor` only), so
+    /// there is nothing to mirror there, unlike `repin_claim`.
+    ///
+    /// # Errors
+    /// A statement failed, or the rows stayed in conflict for more than `tx_retries` resends.
+    pub async fn pin_anchor_hash(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        anchor_hash: &str,
+        anchor_symbol: &str,
+    ) -> Result<()> {
+        self.ensure_via_field().await?;
+        let cid = text(&claim_key(subject, predicate, epoch_micros(valid_from)?));
+        let (hash, symbol) = (text(anchor_hash), text(anchor_symbol));
+        let sql = format!(
+            "UPDATE claim_row SET anchor_hash = {hash}, anchor_symbol = {symbol}, via = 'surreal' \
+             WHERE cid = {cid} AND stale_us = NONE AND superseded_us = NONE AND anchor_hash = NONE;"
+        );
+        self.write_retrying(TxPlace::Slot, &sql).await
+    }
+
     /// `Store::mark_claim_stale`: stamp one live row stale, now, in `claim_row` and in the vector
     /// `claim` table (the embedding stays, so the HNSW index is untouched).
     ///

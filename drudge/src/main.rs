@@ -58,6 +58,12 @@ enum Cmd {
         #[arg(long)]
         repository: Option<String>,
     },
+    /// Fill anchor_hash/anchor_symbol of open claims that have an anchor but no hash (roots come from code_index.sources only)
+    AnchorBackfill {
+        /// Judge and print the same report, write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Inspect the isolated source-code corpus
     CodeStatus {
         /// Stable repository id (default: every indexed repository)
@@ -565,6 +571,13 @@ async fn main() -> Result<()> {
                 });
             let n = vault::project_links(store, std::path::Path::new(&vault_root), 6).await?;
             println!("graph→obsidian: updated relates_to of {n} wiki notes");
+        }
+        Cmd::AnchorBackfill { dry_run } => {
+            let store = store.as_ref().context(VEC_OFF)?;
+            let sources = &cfg.code_index.sources;
+            let tally = drudge::anchor_backfill::run(store, sources, dry_run).await?;
+            println!("{}", tally.render(dry_run));
+            println!("{}", drudge::anchor_backfill::root_line(sources));
         }
         Cmd::Gc => {
             let store = store.as_ref().context(VEC_OFF)?;

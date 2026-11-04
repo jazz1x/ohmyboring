@@ -13,7 +13,7 @@ use super::{
     AnchorCheckRow, AnchorCheckWatermark, AnchoredClaim, ClaimEraCounts, ConsumptionCounts,
     ContestedBy, EventLogFilter, EventLogRow, GraphStats, Hit, Meta, QueryLogRow, RankFacts,
     RecallLabelRow, RecallLabelStats, RecentDoc, Recurrence, RegisterAsk, RegisterRow,
-    RegisterRows, SEMANTIC_EDGE_KINDS, SemanticStats, Store,
+    RegisterRows, SEMANTIC_EDGE_KINDS, SemanticStats, Store, UnpinnedAnchorRow,
 };
 use crate::approved::EdgeRow;
 use crate::claim_priors::ClaimPrior;
@@ -22,6 +22,7 @@ use crate::frontmatter::Claim;
 use crate::rules::RuleRow;
 use crate::split_subjects::Sample;
 use crate::vector::VectorIndex;
+use std::time::SystemTime;
 
 /// Which backend ranks the vectors for this `Store`.
 #[derive(Debug, Clone, Default)]
@@ -377,6 +378,43 @@ impl Store {
         match &self.vector_route {
             VectorRoute::Pgvector => self.claims_due_for_anchor_check_pg(after, limit).await,
             VectorRoute::Surreal(client) => client.claims_due_for_anchor_check(after, limit).await,
+        }
+    }
+
+    /// Open, live claims with an anchor and no `anchor_hash`; on Surreal the `claim_row` copy.
+    ///
+    /// # Errors
+    /// The backend's query failed.
+    pub async fn claims_without_anchor_hash(&self) -> Result<Vec<UnpinnedAnchorRow>> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.claims_without_anchor_hash_pg().await,
+            VectorRoute::Surreal(client) => client.claims_without_anchor_hash().await,
+        }
+    }
+
+    /// Fill `anchor_hash`/`anchor_symbol` of one open, live row that has none. `valid_from`,
+    /// `superseded_at` and the row count stay as they are.
+    ///
+    /// # Errors
+    /// The backend's statement failed.
+    pub async fn pin_anchor_hash(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        anchor_hash: &str,
+        anchor_symbol: &str,
+    ) -> Result<()> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => {
+                self.pin_anchor_hash_pg(subject, predicate, valid_from, anchor_hash, anchor_symbol)
+                    .await
+            }
+            VectorRoute::Surreal(client) => {
+                client
+                    .pin_anchor_hash(subject, predicate, valid_from, anchor_hash, anchor_symbol)
+                    .await
+            }
         }
     }
 

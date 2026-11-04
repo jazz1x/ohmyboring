@@ -97,6 +97,18 @@ services:
       # that replaces the file left the engine reading a deleted copy (2026-10-04). rw so the
       # agent's classify_repo can persist rules.
       - ${BORING_CONFIG_DIR:-./config}:/config:rw
+      # The code the anchors point at, read-only, at the SAME absolute path as on the host: the
+      # code_index source roots in boring.json are host paths, and the scheduler's stale check
+      # (anchor_hash.rs) reads them as written. Only the folders anchors land in (not vault, data,
+      # .git or boring.json). BORING_CODE_ROOT picks the checkout (default: where compose runs).
+      - ${BORING_CODE_ROOT:-${PWD}}/drudge:${BORING_CODE_ROOT:-${PWD}}/drudge:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/agents:${BORING_CODE_ROOT:-${PWD}}/agents:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/scripts:${BORING_CODE_ROOT:-${PWD}}/scripts:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/src:${BORING_CODE_ROOT:-${PWD}}/src:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/docs:${BORING_CODE_ROOT:-${PWD}}/docs:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/.github:${BORING_CODE_ROOT:-${PWD}}/.github:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/start.sh:${BORING_CODE_ROOT:-${PWD}}/start.sh:ro
+      - ${BORING_CODE_ROOT:-${PWD}}/CLAUDE.md:${BORING_CODE_ROOT:-${PWD}}/CLAUDE.md:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

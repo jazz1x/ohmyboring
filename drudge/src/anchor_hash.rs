@@ -1,5 +1,6 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 use crate::anchor::{Anchor, LineSpan};
 use crate::code_index::{self, ParsedSymbol};
@@ -17,13 +18,25 @@ pub struct AnchorHash {
 pub fn hash_for_anchor(anchor: &Anchor, sources: &[CodeIndexSource]) -> Option<AnchorHash> {
     let source = registered_source(anchor, sources)?;
     let content = read_under_root(source, &anchor.path)?;
+    hash_content(source, anchor, &content)
+}
+
+/// Pure half of `hash_for_anchor`: the hash of what the anchor points at inside `content`.
+pub fn hash_content(
+    source: &CodeIndexSource,
+    anchor: &Anchor,
+    content: &str,
+) -> Option<AnchorHash> {
     match anchor.span {
         None => Some(AnchorHash {
             hash: sha256_hex(content.as_bytes()),
             symbol: String::new(),
         }),
         Some(span) => {
-            let symbols = code_index::parse_symbols(source, &anchor.path, &content).ok()?;
+            if !code_index::matches_language(Path::new(&anchor.path), source.language()) {
+                return None;
+            }
+            let symbols = code_index::parse_symbols(source, &anchor.path, content).ok()?;
             let resolved = resolve_covering(&symbols, span)?;
             Some(AnchorHash {
                 hash: sha256_hex(resolved.body.as_bytes()),
@@ -33,16 +46,35 @@ pub fn hash_for_anchor(anchor: &Anchor, sources: &[CodeIndexSource]) -> Option<A
     }
 }
 
-fn registered_source<'a>(
+fn hyphen_free(name: &str) -> String {
+    name.chars()
+        .filter(|c| *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The anchor's project is a claim-note prefix (`ohmyboring`); sources are named per language
+/// (`oh-my-boring`, `oh-my-boring-python`, `oh-my-boring-shell`). A source belongs to the
+/// project when its id starts with the project name, hyphens ignored. Of those, the one whose
+/// language parses the anchor's file wins; a whole-file anchor needs only the root, so the
+/// first match serves it. The check and the backfill both pick through this function.
+pub fn registered_source<'a>(
     anchor: &Anchor,
     sources: &'a [CodeIndexSource],
 ) -> Option<&'a CodeIndexSource> {
-    sources
+    let project = hyphen_free(&anchor.project);
+    let named: Vec<&CodeIndexSource> = sources
         .iter()
-        .find(|source| source.enabled() && source.id() == anchor.project)
+        .filter(|source| source.enabled() && hyphen_free(source.id()).starts_with(&project))
+        .collect();
+    named
+        .iter()
+        .copied()
+        .find(|source| code_index::matches_language(Path::new(&anchor.path), source.language()))
+        .or_else(|| named.first().copied())
 }
 
-fn read_under_root(source: &CodeIndexSource, path: &str) -> Option<String> {
+pub fn read_under_root(source: &CodeIndexSource, path: &str) -> Option<String> {
     let file = source.root().join(path);
     if !file.starts_with(source.root()) {
         return None;
@@ -202,9 +234,6 @@ fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Recheck 
     let Some(content) = read_under_root(source, &anchor.path) else {
         return Recheck::Verdict(StaleVerdict::Stale("file missing"));
     };
-    let Ok(symbols) = code_index::parse_symbols(source, &anchor.path, &content) else {
-        return Recheck::NoEvidence;
-    };
     let probe = |symbol: &ParsedSymbol| SymbolProbe {
         span: LineSpan {
             start: row_to_line(symbol.start_row),
@@ -222,6 +251,12 @@ fn recheck_anchor(sources: &[CodeIndexSource], row: &AnchorCheckRow) -> Recheck 
         }
         Some(span) => {
             let Some(stored_symbol) = row.anchor_symbol.as_deref() else {
+                return Recheck::NoEvidence;
+            };
+            if !code_index::matches_language(Path::new(&anchor.path), source.language()) {
+                return Recheck::NoEvidence;
+            }
+            let Ok(symbols) = code_index::parse_symbols(source, &anchor.path, &content) else {
                 return Recheck::NoEvidence;
             };
             let covering = resolve_covering(&symbols, span).map(probe);
