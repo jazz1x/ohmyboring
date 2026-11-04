@@ -46,11 +46,19 @@ CLAIMS = [
     ("z3test-t", "z3test-p", "ab", "z3test/d.md", 2, False, "decision", "agent", "pre-anchor"),
     ("north-star:" + PROJECT, "goal", "ship it", "z3test/a.md", 6, False, "decision", "owner", "anchored"),
 ]  # fmt: skip
-DOCS = {c[3]: c[7] for c in CLAIMS}  # source_path -> author (a.md 는 owner, 나머지 agent)
+#: stalled 는 지금 기준 나이로 가르므로 고정 T0 가 아니라 지금에서 며칠 전인지로 심는다: (days ago, 문서 하나에 행 하나).
+#: older_than_days=7 로 물으면 40일 전(지평선 밖)·3일 전(너무 새것)은 빠지고 12일·20일 전이 든다.
+NOW = datetime.now(UTC).replace(microsecond=0)
+STALLS = [(f"z3test-stall-{ago}", f"z3test/stall-{ago}.md", ago) for ago in (40, 20, 12, 3)]
+DOCS = {c[3]: c[7] for c in CLAIMS} | {path: "agent" for _s, path, _a in STALLS}
 
 
 def _us(days: int) -> int:
     return int((T0 + timedelta(days=days)).timestamp() * 1_000_000)
+
+
+def _ago_us(days: int) -> int:
+    return int((NOW - timedelta(days=days)).timestamp() * 1_000_000)
 
 
 @unittest.skipUnless(
@@ -61,7 +69,8 @@ class PgAndSurrealAgree(unittest.TestCase):
     def setUpClass(cls) -> None:
         settings = surreal.SurrealSettings(_URL, NS, "z3", "root", _PASSWORD)
         cls.client = surreal.SurrealClient(settings)
-        ddl = """
+        ddl = f"""
+            DEFINE NAMESPACE IF NOT EXISTS {NS}; DEFINE DATABASE IF NOT EXISTS z3;
             DEFINE TABLE claim_row SCHEMAFULL;
             DEFINE FIELD cid ON claim_row TYPE string; DEFINE FIELD subject ON claim_row TYPE string;
             DEFINE FIELD predicate ON claim_row TYPE string; DEFINE FIELD value ON claim_row TYPE string;
@@ -83,6 +92,13 @@ class PgAndSurrealAgree(unittest.TestCase):
             }  # fmt: skip
             if sealed:
                 row["superseded_us"] = _us(day + 1)
+            seeds.append(f"CREATE claim_row CONTENT {json.dumps(row)};")
+        for subject, path, ago in STALLS:
+            row = {
+                "cid": f"stall{ago}", "subject": subject, "predicate": "z3test-p", "value": f"stalled {ago}d ago",
+                "source_path": path, "valid_from_us": _ago_us(ago), "kind": "fact", "confidence": "certain",
+                "era": "anchored", "origin": "user", "project": PROJECT,
+            }  # fmt: skip
             seeds.append(f"CREATE claim_row CONTENT {json.dumps(row)};")
         for path, author in DOCS.items():
             doc = {
@@ -109,6 +125,12 @@ class PgAndSurrealAgree(unittest.TestCase):
                     "INSERT INTO claim (subject, predicate, value, source_path, valid_from, superseded_at, kind, era)"
                     " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                     (s, p, v, path, at, at + timedelta(days=1) if sealed else None, kind, era),
+                )
+            for subject, path, ago in STALLS:
+                cur.execute(
+                    "INSERT INTO claim (subject, predicate, value, source_path, valid_from, kind, era)"
+                    " VALUES (%s,'z3test-p',%s,%s,%s,'fact','anchored')",
+                    (subject, f"stalled {ago}d ago", path, NOW - timedelta(days=ago)),
                 )
 
     @classmethod
@@ -172,6 +194,26 @@ class PgAndSurrealAgree(unittest.TestCase):
         pg_side = registers.recent_register_rows(self.conn, query)
         surreal_side = registers.recent_register_rows(self.client, query)
         self.assertEqual(pg_side, surreal_side)
+
+    def test_stalled_register_rows_agree(self) -> None:
+        query = registers.RegisterQuery(10, PROJECT, ("fact",), (), older_than_days=7)
+        pg_side = registers.stalled_register_rows(self.conn, query)
+        surreal_side = registers.stalled_register_rows(self.client, query)
+        self.assertEqual(pg_side, surreal_side)
+        match pg_side:
+            case Ok(found):
+                self.assertEqual(
+                    sorted(r.subject for r in found.rows), ["z3test-stall-12", "z3test-stall-20"]
+                )
+            case other:
+                self.fail(other)
+
+    def test_recent_claims_agree(self) -> None:
+        args = (10, PROJECT, ("rule", "decision", "fact"), ())
+        pg_side = registers.recent_claims(self.conn, *args)
+        surreal_side = registers.recent_claims(self.client, *args)
+        self.assertEqual(pg_side, surreal_side)
+        self.assertIsInstance(pg_side, Ok)
 
     def test_north_star_agrees(self) -> None:
         self.assertEqual(
