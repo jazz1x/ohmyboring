@@ -443,9 +443,11 @@ fn split_sql(
          FOR $c IN $gone {{ UPSERT type::record('claim_gone', $c) SET cid = $c, via = 'surreal'; }};
          DELETE claim_row WHERE cid INSIDE $gone;
          DELETE claim WHERE cid INSIDE $gone;
+         {bump}
          LET $blanked = UPDATE document SET sha = '', via = 'surreal' WHERE source_path INSIDE $touched RETURN source_path;
          RETURN {{deleted: array::len($gone), reread: array::len($blanked), owner_held: $owner}};",
         want = texts(expected),
+        bump = claim_dirty_bump("array::len($gone)"),
         stale = text(SPLIT_STALE),
         notes = texts(notes),
     )
