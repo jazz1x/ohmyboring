@@ -11,7 +11,8 @@
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::too_many_lines,
-    clippy::panic
+    clippy::panic,
+    clippy::cast_possible_wrap
 )]
 
 use std::time::SystemTime;
@@ -235,5 +236,116 @@ async fn a_failing_define_keeps_the_old_index_and_fails_the_run() {
     assert!(
         matches!(of(&swaps, "chunk"), Swap::Swapped { .. }),
         "control: {swaps:?}"
+    );
+}
+
+impl Fixture {
+    /// `vector_meta:<table>.dirty`, 0 when the row is absent.
+    async fn dirty(&self, table: &str) -> i64 {
+        let rows = self
+            .client
+            .run(&format!(
+                "SELECT VALUE dirty FROM type::record('vector_meta', '{table}');"
+            ))
+            .await
+            .unwrap();
+        rows[0]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    }
+}
+
+/// C0b2 (e): the swap subtracts the count it read (`dirty - changed`) as one statement, so a write
+/// that bumps `dirty` while the index builds is still counted afterwards:
+/// final dirty = rows written in all - rows the swap consumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn writes_during_a_swap_are_not_subtracted_away() {
+    const FIRST: usize = 3;
+    const DURING: usize = 20;
+    let f = fixture("sw_overlap").await;
+    for i in 0..FIRST {
+        f.note(&format!("/v/first-{i}.md"), "oh-my-boring", i).await;
+    }
+    assert_eq!(f.dirty("chunk").await, FIRST as i64);
+    let writer = async {
+        for i in 0..DURING {
+            f.note(&format!("/v/during-{i}.md"), "oh-my-boring", 10 + i)
+                .await;
+        }
+    };
+    let (swaps, ()) = tokio::join!(f.client.swap_if_changed(), writer);
+    let swaps = swaps.expect("swap run");
+    let Swap::Swapped { changed, .. } = of(&swaps, "chunk") else {
+        panic!("chunk must swap: {swaps:?}");
+    };
+    let written = (FIRST + DURING) as i64;
+    let left = f.dirty("chunk").await;
+    println!("written {written}, swap consumed {changed}, dirty left {left}");
+    assert_eq!(left, written - *changed as i64);
+    assert!(
+        *changed >= FIRST as u64,
+        "the swap consumed at least what it saw"
+    );
+}
+
+/// C0b2 (e): `split_sql` deletes claim rows (and so their vectors). The next swap has to see them.
+#[tokio::test]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn a_split_merge_leaves_the_claim_index_dirty() {
+    let f = fixture("sw_split").await;
+    let mut emb = vec![0.0_f32; DIM];
+    emb[0] = 1.0;
+    for k in 0..3 {
+        let path = format!("/v/sp-{k}.md");
+        f.client
+            .run(&format!(
+                "UPSERT type::record('document', {p}) CONTENT {{cid: {p}, source_path: {p}, origin: 'personal', \
+                 project: 'sw', kind: 'note', tags: [], sha: 'sha', extracted_sha: '', updated_us: 0, author: 'agent'}};",
+                p = json!(path)
+            ))
+            .await
+            .expect("document");
+        let subject = ["Sw Split", "sw-split", "sw_split"][k];
+        f.client
+            .claim_slot_upsert(&drudge::store::ClaimWrite {
+                subject,
+                predicate: &format!("p{k}"),
+                value: "a long enough value to count as a statement",
+                source_path: &path,
+                valid_from_us: 100 + k as i64,
+                embedding: &emb,
+                kind: "fact",
+                confidence: "certain",
+                anchor: None,
+                anchor_hash: None,
+                anchor_symbol: None,
+            })
+            .await
+            .expect("claim");
+    }
+    // Consume what the writes bumped, so only the merge can make the counter rise again.
+    let first = f.swap().await;
+    assert!(
+        matches!(of(&first, "claim"), Swap::Swapped { .. }),
+        "{first:?}"
+    );
+    assert_eq!(f.dirty("claim").await, 0);
+
+    let merged = f
+        .client
+        .merge_split_subject("sw-split", drudge::store::SplitStanding::Owner)
+        .await
+        .expect("merge")
+        .expect("a group to merge");
+    assert_eq!(merged.deleted_rows, 3);
+
+    let after = f.swap().await;
+    println!("{}", of(&after, "claim").line());
+    assert!(
+        matches!(of(&after, "claim"), Swap::Swapped { .. }),
+        "claim rows were deleted but the swap skipped: {after:?}"
     );
 }

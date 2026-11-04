@@ -43,6 +43,15 @@ const WINDOW_IDS: i64 = 2000;
 const PG_ROWS_PER_READ: usize = 200;
 const REQUEST_BYTES: usize = 384 * 1024;
 
+/// One statement upserting json rows (each carrying its record key as `cid`) into `table`.
+pub(super) fn json_batch_stmt<S: AsRef<str>>(table: &str, rows: &[S]) -> String {
+    let joined: Vec<&str> = rows.iter().map(AsRef::as_ref).collect();
+    format!(
+        "FOR $r IN [{}] {{ UPSERT type::record('{table}', $r.cid) CONTENT $r; }};",
+        joined.join(",")
+    )
+}
+
 /// How a table's rows are keyed and re-read.
 enum Kind {
     /// Immutable rows with a pg sequence id.
@@ -219,11 +228,7 @@ impl SurrealClient {
     }
 
     async fn send_json_batch(&self, table: &str, batch: &[&str]) -> Result<()> {
-        self.run(&format!(
-            "FOR $r IN [{}] {{ UPSERT type::record('{table}', $r.cid) CONTENT $r; }};",
-            batch.join(",")
-        ))
-        .await?;
+        self.run(&json_batch_stmt(table, batch)).await?;
         Ok(())
     }
 

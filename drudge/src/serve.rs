@@ -132,6 +132,13 @@ impl AppState {
             errors.push(format!("store: {error:#}"));
         }
 
+        // No ping call exists; `RETURN 1` is the cheapest statement the server answers.
+        if let Some(surreal) = self.store.as_ref().and_then(|s| s.surreal_client())
+            && let Err(error) = surreal.run("RETURN 1;").await
+        {
+            errors.push(format!("surreal: {error:#}"));
+        }
+
         if let Some(code_index) = self.code_index.as_ref()
             && let Err(error) = code_index.liveness_probe().await
         {
