@@ -25,6 +25,7 @@ use crate::store::{Store, UnpinnedAnchorRow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Unmeasured {
+    AnchorUnparsed,
     NoSource,
     FileMissing,
     NameOnly,
@@ -38,6 +39,7 @@ pub enum Unmeasured {
 impl Unmeasured {
     const fn label(self) -> &'static str {
         match self {
+            Self::AnchorUnparsed => "anchor 문자열 해석 실패",
             Self::NoSource => "등록 소스 없음",
             Self::FileMissing => "파일 없음",
             Self::NameOnly => "파일 이름만 적힘(범위 밖)",
@@ -146,7 +148,8 @@ impl Tally {
     /// The chain: open anchor -> registered source -> file present -> hash n + unmeasured k.
     #[must_use]
     pub fn render(&self, dry_run: bool) -> String {
-        let with_source = self.open_anchors - self.of(Unmeasured::NoSource);
+        let with_source =
+            self.open_anchors - self.of(Unmeasured::AnchorUnparsed) - self.of(Unmeasured::NoSource);
         let file_missing = self.of(Unmeasured::FileMissing) + self.of(Unmeasured::NameOnly);
         let file_present = with_source - file_missing;
         let k = file_present - self.hashed();
@@ -330,7 +333,7 @@ fn settle_pin(judgement: Judgement, pinned_rows: u64) -> Judgement {
 
 fn judge_row(row: &UnpinnedAnchorRow, sources: &[CodeIndexSource]) -> Judgement {
     match Anchor::from_db_string(&row.anchor) {
-        None => Judgement::Unmeasured(Unmeasured::NoSource),
+        None => Judgement::Unmeasured(Unmeasured::AnchorUnparsed),
         Some(anchor) => judge(&anchor, row.valid_from, &gather_evidence(&anchor, sources)),
     }
 }
