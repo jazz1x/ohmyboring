@@ -393,7 +393,8 @@ impl Store {
     }
 
     /// Fill `anchor_hash`/`anchor_symbol` of one open, live row that has none. `valid_from`,
-    /// `superseded_at` and the row count stay as they are.
+    /// `superseded_at` and the row count stay as they are. Returns the rows changed: 0 when the
+    /// row was replaced, marked stale or pinned between the read and this write.
     ///
     /// # Errors
     /// The backend's statement failed.
@@ -404,7 +405,7 @@ impl Store {
         valid_from: SystemTime,
         anchor_hash: &str,
         anchor_symbol: &str,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         match &self.vector_route {
             VectorRoute::Pgvector => {
                 self.pin_anchor_hash_pg(subject, predicate, valid_from, anchor_hash, anchor_symbol)

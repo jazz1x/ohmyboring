@@ -5112,7 +5112,7 @@ impl Store {
         valid_from: SystemTime,
         anchor_hash: &str,
         anchor_symbol: &str,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         self.db()
             .await?
             .execute(
@@ -5128,8 +5128,7 @@ impl Store {
                 ],
             )
             .await
-            .context("pin claim anchor_hash")?;
-        Ok(())
+            .context("pin claim anchor_hash")
     }
 
     pub async fn repin_claim(

@@ -839,15 +839,29 @@ impl SurrealClient {
         valid_from: SystemTime,
         anchor_hash: &str,
         anchor_symbol: &str,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         self.ensure_via_field().await?;
         let cid = text(&claim_key(subject, predicate, epoch_micros(valid_from)?));
         let (hash, symbol) = (text(anchor_hash), text(anchor_symbol));
         let sql = format!(
             "UPDATE claim_row SET anchor_hash = {hash}, anchor_symbol = {symbol}, via = 'surreal' \
-             WHERE cid = {cid} AND stale_us = NONE AND superseded_us = NONE AND anchor_hash = NONE;"
+             WHERE cid = {cid} AND stale_us = NONE AND superseded_us = NONE AND anchor_hash = NONE \
+             RETURN cid;"
         );
-        self.write_retrying(TxPlace::Slot, &sql).await
+        self.retrying(TxPlace::Slot, || async {
+            Ok(match self.tx_once(&sql).await? {
+                Attempt::Done(answers) => {
+                    let updated = answers
+                        .iter()
+                        .rev()
+                        .find_map(Value::as_array)
+                        .context("pin answered no row list")?;
+                    Attempt::Done(u64::try_from(updated.len())?)
+                }
+                Attempt::Conflict(m) => Attempt::Conflict(m),
+            })
+        })
+        .await
     }
 
     /// `Store::mark_claim_stale`: stamp one live row stale, now, in `claim_row` and in the vector

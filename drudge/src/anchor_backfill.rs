@@ -32,6 +32,7 @@ pub enum Unmeasured {
     ChangedAfterClaim,
     Uncommitted,
     GitFailed,
+    GoneBeforePin,
 }
 
 impl Unmeasured {
@@ -44,6 +45,7 @@ impl Unmeasured {
             Self::ChangedAfterClaim => "git/파일 시각이 valid_from 뒤",
             Self::Uncommitted => "커밋 안 된 변경 있음",
             Self::GitFailed => "git 실패",
+            Self::GoneBeforePin => "쓰기 전에 대체·stale 됨",
         }
     }
 }
@@ -297,21 +299,33 @@ pub async fn run(store: &Store, sources: &[CodeIndexSource], dry_run: bool) -> R
     let rows = store.claims_without_anchor_hash().await?;
     let mut tally = Tally::default();
     for row in &rows {
-        let judgement = judge_row(row, sources);
+        let judgement = match (dry_run, judge_row(row, sources)) {
+            (false, Judgement::Hashed { hash, basis }) => {
+                let pinned = store
+                    .pin_anchor_hash(
+                        &row.subject,
+                        &row.predicate,
+                        row.valid_from,
+                        &hash.hash,
+                        &hash.symbol,
+                    )
+                    .await?;
+                settle_pin(Judgement::Hashed { hash, basis }, pinned)
+            }
+            (_, judgement) => judgement,
+        };
         tally.count(&judgement);
-        if let (false, Judgement::Hashed { hash, .. }) = (dry_run, &judgement) {
-            store
-                .pin_anchor_hash(
-                    &row.subject,
-                    &row.predicate,
-                    row.valid_from,
-                    &hash.hash,
-                    &hash.symbol,
-                )
-                .await?;
-        }
     }
     Ok(tally)
+}
+
+/// A hashed row counts toward n only when the pin statement changed a row: one replaced or
+/// marked stale between the read and the write is left as it was.
+fn settle_pin(judgement: Judgement, pinned_rows: u64) -> Judgement {
+    match (judgement, pinned_rows) {
+        (Judgement::Hashed { .. }, 0) => Judgement::Unmeasured(Unmeasured::GoneBeforePin),
+        (judgement, _) => judgement,
+    }
 }
 
 fn judge_row(row: &UnpinnedAnchorRow, sources: &[CodeIndexSource]) -> Judgement {
@@ -328,9 +342,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Evidence, FileClock, Judgement, Unmeasured, WorkTree, judge, read_rev_parse};
+    use super::{
+        ClockBasis, Evidence, FileClock, Judgement, Unmeasured, WorkTree, judge, read_rev_parse,
+        settle_pin,
+    };
     use crate::anchor::Anchor;
-    use crate::anchor_hash::registered_source;
+    use crate::anchor_hash::{AnchorHash, registered_source};
     use crate::config::{CodeIndexSource, CodeLanguage};
 
     fn source(id: &str, language: CodeLanguage) -> CodeIndexSource {
@@ -395,5 +412,25 @@ mod tests {
 
         assert_eq!(not_a_repo, WorkTree::NotARepository);
         assert_eq!(dubious, WorkTree::Failed);
+    }
+
+    #[test]
+    fn a_pin_that_changed_no_row_is_not_counted_as_hashed() {
+        let hashed = || Judgement::Hashed {
+            hash: AnchorHash {
+                hash: "h".to_owned(),
+                symbol: String::new(),
+            },
+            basis: ClockBasis::Git,
+        };
+
+        let written = settle_pin(hashed(), 1);
+        let missed = settle_pin(hashed(), 0);
+
+        assert!(matches!(written, Judgement::Hashed { .. }));
+        assert!(matches!(
+            missed,
+            Judgement::Unmeasured(Unmeasured::GoneBeforePin)
+        ));
     }
 }
