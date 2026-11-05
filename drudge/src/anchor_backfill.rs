@@ -152,7 +152,23 @@ impl Tally {
             self.open_anchors - self.of(Unmeasured::AnchorUnparsed) - self.of(Unmeasured::NoSource);
         let file_missing = self.of(Unmeasured::FileMissing) + self.of(Unmeasured::NameOnly);
         let file_present = with_source - file_missing;
-        let k = file_present - self.hashed();
+        // k is summed from its own reason columns, not taken as file_present - n, so the
+        // check line below can disagree when a reason is counted on the wrong side.
+        let k: usize = [
+            Unmeasured::NoParser,
+            Unmeasured::ChangedAfterClaim,
+            Unmeasured::Uncommitted,
+            Unmeasured::GitFailed,
+            Unmeasured::GoneBeforePin,
+        ]
+        .into_iter()
+        .map(|reason| self.of(reason))
+        .sum();
+        let agrees = if self.hashed() + k == file_present {
+            "일치"
+        } else {
+            "어긋남"
+        };
         let mut out = String::new();
         let mode = if dry_run {
             " (dry-run: 쓰지 않음)"
@@ -168,6 +184,11 @@ impl Tally {
             file_present,
             self.hashed(),
             k
+        );
+        let _ = writeln!(
+            out,
+            "대조 n+k={} 대 파일 있음 {file_present}: {agrees}",
+            self.hashed() + k
         );
         for (reason, n) in &self.unmeasured {
             let _ = writeln!(out, "  못 잼 사유: {} = {n}", reason.label());
