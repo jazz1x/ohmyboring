@@ -26,6 +26,37 @@ pub(crate) struct SyncOutcome {
     pub(crate) total_edges: Option<usize>,
 }
 
+/// One sync stage's start and end lines, with UTC wall-clock time and elapsed seconds. A sync that
+/// hit its deadline (c4, 11-05: 75 min, last line "gc orphans") could not say which stage held it.
+/// An error inside the stage leaves no end line; the stage's own error says what failed.
+struct StageClock {
+    name: &'static str,
+    started: Instant,
+}
+
+impl StageClock {
+    fn start(name: &'static str) -> Self {
+        eprintln!("[sync-stage] {name} start {}", utc_now());
+        Self {
+            name,
+            started: Instant::now(),
+        }
+    }
+
+    fn end(self) {
+        eprintln!(
+            "[sync-stage] {} end {} ({:.1}s)",
+            self.name,
+            utc_now(),
+            self.started.elapsed().as_secs_f64()
+        );
+    }
+}
+
+fn utc_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 /// Deterministic re-ingest: walk notes → embed → pgvector upsert → graph (from frontmatter) → GC →
 /// recompute relations. When `store=None` (BORING_VECTOR=off), the wiki files are first-class memory
 /// (wiki_recall reads them directly) — nothing to embed/graph. Shared by HTTP `/sync` + the scheduler (SSOT).
@@ -49,27 +80,67 @@ pub(crate) async fn do_sync(
     let dirs: Vec<String> = vault_dir
         .map(|v| vec![v.join("wiki").to_string_lossy().into_owned()])
         .unwrap_or_default();
+    let clock = StageClock::start("ingest");
     let ingest = ingest::run(store, llm, cfg, &dirs).await?;
+    clock.end();
     // GC orphan semantic nodes (edges are rebuilt per-doc on re-ingest) — keeps the graph lean.
+    let clock = StageClock::start("gc_orphans");
     match store.gc_orphans().await {
         Ok(g) => eprintln!("[scheduler] gc orphans: {}", g.total()),
         Err(e) => eprintln!("[scheduler] gc warning (ignored): {e:#}"),
     }
+    clock.end();
     // graph → Obsidian projection: doc↔doc relations as wiki relates_to wikilinks (only when vault exists).
     // Auxiliary stage — on failure it does not break the core ingest, just logs.
     if let Some(vd) = vault_dir {
+        let clock = StageClock::start("project_links");
         match vault::project_links(store, vd, 6).await {
             Ok(n) => eprintln!("[scheduler] graph→obsidian: updated {n} wiki relates_to"),
             Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }
+        clock.end();
     }
+    let clock = StageClock::start("audit");
+    let (total_chunks, total_edges) = log_corpus_audit(store, cfg, &ingest).await;
+    clock.end();
+
+    let clock = StageClock::start("anchors");
+    match crate::anchor_hash::check_stale_anchors(store, &cfg.code_index.sources).await {
+        Ok(stats) => eprintln!(
+            "[scheduler] anchors checked={} repinned={} stale={} unreadable={}",
+            stats.checked, stats.repinned, stats.stale, stats.unreadable
+        ),
+        Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
+    }
+    clock.end();
+
+    let clock = StageClock::start("surreal_catch_up");
+    surreal_catch_up(store).await?;
+    clock.end();
+    let clock = StageClock::start("surreal_last_stage");
+    surreal_last_stage(store).await?;
+    clock.end();
+
+    Ok(SyncOutcome {
+        ingest,
+        total_chunks,
+        total_edges,
+    })
+}
+
+/// Corpus totals `(chunks, edges)` from the post-sync audit, logging the hygiene lines on the way.
+async fn log_corpus_audit(
+    store: &Store,
+    cfg: &config::BoringConfig,
+    ingest: &ingest::Stats,
+) -> (Option<usize>, Option<usize>) {
     // Post-sync corpus audit + report-only hygiene sweep (every sync surfaces corpus rot in the logs
     // without a manual `make steward`; detection only, never mutates the vault). If audit::stats
     // fails we do NOT fabricate a zero-filled AuditStats — reporting "0 files / clean" as a measured
     // fact would be a lie (Layer 1). Instead we report the corpus totals as unavailable (None) and
     // log the failure with the real this-sync delta for context. Deep checks (placeholder tags,
     // project variants/typos) stay in `scripts/data-steward.py`, which the verdict points operators to.
-    let (total_chunks, total_edges) = match audit::stats(store, cfg.allow_company_origin).await {
+    match audit::stats(store, cfg.allow_company_origin).await {
         Ok(audit) => {
             let generic_projects: usize = audit
                 .by_project
@@ -123,24 +194,7 @@ pub(crate) async fn do_sync(
             );
             (None, None)
         }
-    };
-
-    match crate::anchor_hash::check_stale_anchors(store, &cfg.code_index.sources).await {
-        Ok(stats) => eprintln!(
-            "[scheduler] anchors checked={} repinned={} stale={} unreadable={}",
-            stats.checked, stats.repinned, stats.stale, stats.unreadable
-        ),
-        Err(e) => eprintln!("[scheduler] anchor staleness warning (ignored): {e:#}"),
     }
-
-    surreal_catch_up(store).await?;
-    surreal_last_stage(store).await?;
-
-    Ok(SyncOutcome {
-        ingest,
-        total_chunks,
-        total_edges,
-    })
 }
 
 /// Last stage, no-ops on pgvector: swap in a rebuilt HNSW index when this or an earlier write

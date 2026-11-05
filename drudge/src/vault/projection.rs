@@ -9,18 +9,31 @@ use crate::store::Store;
 use crate::vault::{is_seed_note, set_relates_to, split_frontmatter, wiki_stem};
 use crate::vector::VectorIndex;
 
+const PROGRESS_EVERY: usize = 1_000;
+
 /// Project the Postgres graph (`related_docs`) into each wiki note's `relates_to` wikilinks.
 /// Makes the Obsidian graph view draw the GraphRAG connections directly. Idempotent (recomputed and rewritten every time).
 /// Among related documents, only wiki notes in the same vault become `[[wiki-NNNN]]` (so Obsidian can resolve them).
 /// The shipped seed note (`wiki-0000`) is skipped so private note ids never leak into the public sample.
 pub async fn project_links(store: &Store, vault_root: &Path, limit: i64) -> Result<usize> {
     let wiki_dir = vault_root.join("wiki");
-    let mut updated = 0;
-    for entry in std::fs::read_dir(&wiki_dir)
+    let entries = std::fs::read_dir(&wiki_dir)
         .with_context(|| format!("failed to read wiki dir: {}", wiki_dir.display()))?
-    {
-        if project_note(store, &entry?.path(), limit).await? {
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let total = entries.len();
+    let started = std::time::Instant::now();
+    let mut updated = 0;
+    for (done, entry) in entries.iter().enumerate() {
+        if project_note(store, &entry.path(), limit).await? {
             updated += 1;
+        }
+        // The loop issues 2–3 store queries per file; at 17k files a stall here was silent (c4, 11-05).
+        if (done + 1) % PROGRESS_EVERY == 0 {
+            eprintln!(
+                "[sync-stage] project_links {}/{total} files, {:.1}s",
+                done + 1,
+                started.elapsed().as_secs_f64()
+            );
         }
     }
     Ok(updated)
