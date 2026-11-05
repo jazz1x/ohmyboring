@@ -13,7 +13,7 @@
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use drudge::code_index::{CodeIndexStore, sync_repository};
+use drudge::code_index::{CodeIndexStore, RepositoryStatus, sync_repository};
 use drudge::config::{CodeIndexSource, CodeLanguage, SurrealConfig};
 use drudge::frontmatter::FrontMatter;
 use drudge::store::{
@@ -316,18 +316,28 @@ async fn the_code_reads_answer_from_surreal_and_equal_pg() {
             .expect("sync into surreal");
     }
 
-    let status_pg = pg.status(None).await.unwrap();
-    let status_sr = routed.status(None).await.unwrap();
+    // Two separate syncs stamp their own `last_synced_at` (ms apart); every other field must match.
+    let unstamped = |statuses: Vec<RepositoryStatus>| -> Vec<RepositoryStatus> {
+        statuses
+            .into_iter()
+            .map(|status| RepositoryStatus {
+                last_synced_at: UNIX_EPOCH,
+                ..status
+            })
+            .collect()
+    };
+    let status_pg = unstamped(pg.status(None).await.unwrap());
+    let status_sr = unstamped(routed.status(None).await.unwrap());
     same("code status all", &status_pg, &status_sr);
     same(
         "code status one repository",
-        &pg.status(Some("z2r-b")).await.unwrap(),
-        &routed.status(Some("z2r-b")).await.unwrap(),
+        &unstamped(pg.status(Some("z2r-b")).await.unwrap()),
+        &unstamped(routed.status(Some("z2r-b")).await.unwrap()),
     );
     same(
         "code status unknown repository",
-        &pg.status(Some("nope")).await.unwrap(),
-        &routed.status(Some("nope")).await.unwrap(),
+        &unstamped(pg.status(Some("nope")).await.unwrap()),
+        &unstamped(routed.status(Some("nope")).await.unwrap()),
     );
     let mut first_hits = Vec::new();
     for q in [
