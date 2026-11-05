@@ -175,6 +175,7 @@ impl Tally {
 
 fn git_output(root: &Path, args: &[&str]) -> Option<std::process::Output> {
     Command::new("git")
+        .env("LC_ALL", "C")
         .arg("-C")
         .arg(root)
         .args(args)
@@ -186,14 +187,39 @@ fn stdout_text(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// What `git rev-parse --is-inside-work-tree` said about the root.
+#[derive(Debug, PartialEq, Eq)]
+enum WorkTree {
+    Inside,
+    NotARepository,
+    Failed,
+}
+
+/// git exits 128 both outside a repository and for e.g. a root owned by another uid; only the
+/// first may fall back to mtime, the rest is "git failed" (`git_output` pins `LC_ALL=C`).
+fn read_rev_parse(succeeded: bool, stderr: &str) -> WorkTree {
+    match (succeeded, stderr.contains("not a git repository")) {
+        (true, _) => WorkTree::Inside,
+        (false, true) => WorkTree::NotARepository,
+        (false, false) => WorkTree::Failed,
+    }
+}
+
 fn file_clock(root: &Path, path: &str) -> FileClock {
     let Some(inside) = git_output(root, &["rev-parse", "--is-inside-work-tree"]) else {
         return FileClock::GitFailed;
     };
-    if !inside.status.success() {
-        return std::fs::metadata(root.join(path))
-            .and_then(|meta| meta.modified())
-            .map_or(FileClock::GitFailed, FileClock::Outside);
+    match read_rev_parse(
+        inside.status.success(),
+        &String::from_utf8_lossy(&inside.stderr),
+    ) {
+        WorkTree::Inside => {}
+        WorkTree::Failed => return FileClock::GitFailed,
+        WorkTree::NotARepository => {
+            return std::fs::metadata(root.join(path))
+                .and_then(|meta| meta.modified())
+                .map_or(FileClock::GitFailed, FileClock::Outside);
+        }
     }
     let Some(status) = git_output(root, &["status", "--porcelain", "--", path]) else {
         return FileClock::GitFailed;
@@ -302,7 +328,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Evidence, FileClock, Judgement, Unmeasured, judge};
+    use super::{Evidence, FileClock, Judgement, Unmeasured, WorkTree, judge, read_rev_parse};
     use crate::anchor::Anchor;
     use crate::anchor_hash::registered_source;
     use crate::config::{CodeIndexSource, CodeLanguage};
@@ -354,5 +380,20 @@ mod tests {
         let picked = registered_source(&anchor, &sources).unwrap();
 
         assert_eq!(picked.id(), "oh-my-boring");
+    }
+
+    #[test]
+    fn only_not_a_repository_falls_back_to_mtime_and_any_other_rev_parse_failure_is_git_failed() {
+        let not_a_repo = read_rev_parse(
+            false,
+            "fatal: not a git repository (or any of the parent directories): .git",
+        );
+        let dubious = read_rev_parse(
+            false,
+            "fatal: detected dubious ownership in repository at '/repo'",
+        );
+
+        assert_eq!(not_a_repo, WorkTree::NotARepository);
+        assert_eq!(dubious, WorkTree::Failed);
     }
 }
