@@ -843,6 +843,15 @@ pub struct AnchorCheckRow {
     pub anchor_symbol: Option<String>,
 }
 
+/// An open, live claim that carries an anchor but no `anchor_hash` yet (`drudge anchor-backfill`).
+#[derive(Debug)]
+pub struct UnpinnedAnchorRow {
+    pub subject: String,
+    pub predicate: String,
+    pub valid_from: SystemTime,
+    pub anchor: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct AnchorCheckWatermark {
     pub valid_from: SystemTime,
@@ -5069,6 +5078,57 @@ impl Store {
             .await
             .context("claims due for anchor check (head)")?;
         Ok(rows.iter().map(anchor_check_row_from).collect())
+    }
+
+    async fn claims_without_anchor_hash_pg(&self) -> Result<Vec<UnpinnedAnchorRow>> {
+        let rows = self
+            .db()
+            .await?
+            .query(
+                "SELECT subject, predicate, valid_from, anchor
+                   FROM claim
+                  WHERE anchor IS NOT NULL AND anchor_hash IS NULL
+                    AND superseded_at IS NULL AND stale_at IS NULL
+                  ORDER BY valid_from, subject, predicate;",
+                &[],
+            )
+            .await
+            .context("claims without anchor_hash")?;
+        Ok(rows
+            .iter()
+            .map(|r| UnpinnedAnchorRow {
+                subject: r.get(0),
+                predicate: r.get(1),
+                valid_from: r.get(2),
+                anchor: r.get(3),
+            })
+            .collect())
+    }
+
+    async fn pin_anchor_hash_pg(
+        &self,
+        subject: &str,
+        predicate: &str,
+        valid_from: SystemTime,
+        anchor_hash: &str,
+        anchor_symbol: &str,
+    ) -> Result<u64> {
+        self.db()
+            .await?
+            .execute(
+                "UPDATE claim SET anchor_hash = $4, anchor_symbol = $5
+                  WHERE subject = $1 AND predicate = $2 AND valid_from = $3
+                    AND anchor_hash IS NULL AND superseded_at IS NULL AND stale_at IS NULL;",
+                &[
+                    &subject,
+                    &predicate,
+                    &valid_from,
+                    &anchor_hash,
+                    &anchor_symbol,
+                ],
+            )
+            .await
+            .context("pin claim anchor_hash")
     }
 
     pub async fn repin_claim(

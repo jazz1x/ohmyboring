@@ -98,6 +98,10 @@ run_maintenance() {
     # and doctor only notices after the fact. Failure must not fail housekeeping either.
     echo "--- code-sync ---"
     ./drudge/target/release/drudge code-sync || echo "(code-sync failed — continuing)"
+    # The Python write path stores claims with anchor_hash NULL, and the scheduler's stale check
+    # only reads rows that have one — so a one-off backfill leaves every later row unchecked.
+    echo "--- anchor-backfill ---"
+    ./drudge/target/release/drudge anchor-backfill || echo "(anchor-backfill failed — continuing)"
     # Surreal's HNSW index loses recall after delete/overwrite churn; rebuild it by swap-in (a new
     # index is defined and confirmed built before the old one goes) when rows changed. Not
     # `|| continuing` like the steps above: a failed swap is a ✗ the run must show — it still

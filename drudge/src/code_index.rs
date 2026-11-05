@@ -353,7 +353,7 @@ fn prepare_changed(
         .collect()
 }
 
-fn matches_language(path: &Path, language: CodeLanguage) -> bool {
+pub(crate) fn matches_language(path: &Path, language: CodeLanguage) -> bool {
     match language {
         CodeLanguage::Rust => path.extension().is_some_and(|extension| extension == "rs"),
         CodeLanguage::Python => path.extension().is_some_and(|extension| extension == "py"),
