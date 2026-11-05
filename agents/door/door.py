@@ -194,9 +194,10 @@ _STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=_STREAM_WORKERS, thread_name_p
 _CONTRACT = Path(__file__).resolve().parents[2] / "data" / "contract" / "engine-contract.json"
 
 
-def _refuse_python_writers_on_surreal() -> None:
-    """backend=surreal 이면 document·chunk 의 쓰기 주인은 엔진 하나다. 문 안의 파이썬 쓰기 길은 pg 에 직접
-    써서 Surreal 에 닿지 않으니, 셋 중 하나라도 python 이면 이유를 찍고 뜨지 않는다. 기동에 한 번만 본다.
+def _refuse_python_pg_paths_on_surreal() -> None:
+    """backend=surreal 이면 pg 를 직접 읽거나 쓰는 파이썬 길은 Surreal 에 닿지 않거나 낡은 값을 읽으니, 아래 스위치
+    중 하나라도 python 이면 이유를 찍고 뜨지 않는다(쓰기 + 읽기 MEMORY_READER·BRIEF_OWNER). 기동에 한 번만 본다.
+    document·chunk 의 쓰기 주인은 엔진 하나다.
     document·chunk 를 쓰는 파이썬 SQL 은 이 셋뿐이다: writer.py:97·115·121·125(REMEMBER_WRITER, SYNC_OWNER),
     sync/run.py:44(SYNC_OWNER), door.py:1505(LINK_WRITER). node·edge 를 쓰는 파이썬 SQL(묶음2): writer.py:104-113
     (REMEMBER_WRITER), sync/run.py:55-59 gc (SYNC_OWNER, COMPACT_OWNER 는 compact/run.py:166 gc_apply),
@@ -208,12 +209,35 @@ def _refuse_python_writers_on_surreal() -> None:
     이 표들의 backend=surreal 불변식은 가) Surreal 이 유일한 쓰기 주인(엔진) — 파이썬 쓰기 길은 위 스위치로 막고, pg→Surreal
     복사는 꺼져 있다(#533~#535). 나) 는 event_log·query_log·recall_label·sync_state: pg 가 쓰기 주인이고 복사가 나른다
     (log_copy_surreal.rs) — 파이썬 쓰기(events/pg.py, search/pg.py log_query)는 그대로 pg 다.
-    파이썬 *읽기* 는 막지 않고 Surreal 로 보낸다(Z3): claim_source·rules·split-subjects 읽기(door.py _fetch_*), 레지스터
-    decisions·risks·next_actions·stalled·context 의 claim 읽기(registers/pg.py). sync 위생 집계는 파이썬 sync 가
+    파이썬 읽기 중 Surreal 로 가는 것(Z3, `_on_store`): claim_source(door.py:1463·1472 _fetch_claim_source·_fetch_claim_sources),
+    rules(door.py:1571 _fetch_rules), split-subjects 읽기(door.py:1609 _fetch_split_samples, :1711 _fetch_split_subject_rows),
+    레지스터 decisions·risks·next_actions·stalled·context 의 claim 읽기(registers/pg.py). 그대로 pg 인 읽기는 둘:
+    _fetch_edges(door.py:1386, MEMORY_READER 의 /approved)·_fetch_active_projects(door.py:1502), 그리고 BRIEF_OWNER 의
+    briefing/generate.py:210·243·262·291 — 셋 다 이 거부가 막는다(C-PGREAD1). sync 위생 집계는 파이썬 sync 가
     surreal 에서 기동 거부라 부를 곳이 없어 옮기지 않았다(C0b2). recurrences·status 는 아직 Surreal 길이 없어 Err 로 답한다(pg 로 되돌아가지 않음)."""
-    # rollback = backend=pg + DOOR_*=python as a pair
+    match pg_path_refusal(_python_pg_paths_on()):
+        case None:
+            return
+        case str(refusal):
+            raise SystemExit(refusal)
+
+
+def pg_path_refusal(python_on: list[str]) -> str | None:
+    """backend=surreal 이고 python_on 이 비지 않으면 pg 를 직접 읽거나 쓰는 파이썬 길을 이름 짓는 거부 문장을, 아니면
+    None. 문 기동과 brief_once 가 이 한 함수를 부른다 — 거부 문장은 여기 한 곳이다."""
     backend = (boring_config.load().get("vector") or {}).get("backend")
-    python_on = [
+    if backend != "surreal" or not python_on:
+        return None
+    return (
+        f"[door] refusing to start: boring.json vector.backend=surreal but {', '.join(python_on)} reads or writes "
+        "pg directly (document/chunk/node/edge/claim writes, edge/project/brief reads), which Surreal never sees. "
+        "Set the DOOR_* switches to engine, or roll back as a pair (vector.backend=pgvector + DOOR_*=python)."
+    )
+
+
+def _python_pg_paths_on() -> list[str]:
+    # rollback = backend=pg + DOOR_*=python as a pair
+    return [
         name
         for name, owner in (
             (_REMEMBER_WRITER_ENV, _remember_writer()),
@@ -223,15 +247,11 @@ def _refuse_python_writers_on_surreal() -> None:
             (_COMPACT_OWNER_ENV, _compact_owner()),
             (_RECALL_READER_ENV, _recall_reader()),
             (_SEARCH_READER_ENV, os.environ.get(_SEARCH_READER_ENV, "engine")),
+            (_MEMORY_READER_ENV, os.environ.get(_MEMORY_READER_ENV, "engine")),
+            (_BRIEF_OWNER_ENV, _brief_owner()),
         )
         if owner == _WRITER_PYTHON
     ]
-    if backend == "surreal" and python_on:
-        raise SystemExit(
-            f"[door] refusing to start: boring.json vector.backend=surreal but {', '.join(python_on)}=python "
-            "writes document/chunk/node/edge/claim straight to pg, which Surreal never sees. Set them to engine, "
-            "or roll back as a pair (vector.backend=pgvector + DOOR_*=python)."
-        )
 
 
 @contextlib.asynccontextmanager
@@ -240,7 +260,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     빈 색인으로 받은 첫 쓰기가 볼트 통째 파싱(수 초)을 그대로 낼 수 없다. 채우는 동안
     들어온 그림자 쓰기는 디스크 훑기로 떨어지고(sync() → None), 그 결정이 엔진과 같은
     결정이라는 계약은 그대로다. 응답은 채우기를 기다리지 않는다."""
-    _refuse_python_writers_on_surreal()
+    _refuse_python_pg_paths_on_surreal()
     index = remember_index.NoteIndex(
         remember_index.DiskSeams(
             vault_dir=_vault_dir(),

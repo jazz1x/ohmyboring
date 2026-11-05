@@ -20,6 +20,8 @@ from ohmyboring.adapters import events as event_log
 from ohmyboring.briefing import daily, generate
 from ohmyboring.result import Err, Ok
 
+from . import door
+
 _VAULT_ENV = "BORING_VAULT_DIR"
 _DEFAULT_VAULT_DIR = "/vault"
 
@@ -38,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None, help="YYYY-MM-DD(기본: 오늘)")
     parser.add_argument("--dsn", default=os.environ.get("DOOR_PG_DSN", ""))
     args = parser.parse_args(argv)
+    refusal = door.pg_path_refusal(["brief_once (briefing/generate.py reads pg)"])
+    if refusal is not None:
+        print(f"[brief] {refusal}", file=sys.stderr)
+        return 2
     if not args.dsn:
         print("[brief] DOOR_PG_DSN 이 비어 있다 — 문 안에서 돌리거나 --dsn 을 준다.", file=sys.stderr)
         return 2
