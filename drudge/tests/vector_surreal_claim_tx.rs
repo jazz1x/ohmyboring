@@ -1182,3 +1182,35 @@ async fn a_sealed_row_promoted_again_is_in_the_vector_claim_search() {
     println!("Z2b promoted_embedding_equal={}/1", usize::from(got == ea));
     assert_eq!(got, ea, "promoted embedding equals the one written");
 }
+
+/// `SurrealClient::pin_anchor_hash` returns the rows it changed: 1 for a fresh open row, 0 when
+/// the row already has a hash (the `anchor_hash = NONE` filter leaves it out). The caller
+/// (`anchor_backfill::run`) needs a `Store`, so this asserts on the return value directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs throwaway pg+surreal: see the run command in this file's header"]
+async fn pin_anchor_hash_counts_one_row_then_zero() {
+    let c = client("z1_pin_count").await;
+    let valid_from_us: i64 = 1_700_000_000_000_000;
+    let cid = format!("z1-pin\u{1f}goal\u{1f}{valid_from_us}");
+    c.run(&format!(
+        "CREATE claim_row CONTENT {{cid: {cid}, subject: 'z1-pin', predicate: 'goal', value: 'v', \
+         source_path: '/v/z1-pin.md', valid_from_us: {valid_from_us}, kind: 'fact', \
+         confidence: 'certain', era: 'anchored', anchor: 'a.rs#f', origin: 'personal', project: 'z1'}};",
+        cid = json!(cid)
+    ))
+    .await
+    .unwrap();
+    let valid_from =
+        std::time::UNIX_EPOCH + std::time::Duration::from_micros(valid_from_us.cast_unsigned());
+
+    let first = c
+        .pin_anchor_hash("z1-pin", "goal", valid_from, "hash-1", "sym")
+        .await
+        .unwrap();
+    let second = c
+        .pin_anchor_hash("z1-pin", "goal", valid_from, "hash-2", "sym")
+        .await
+        .unwrap();
+    println!("C-ANCHOR1 pin first={first} second={second}");
+    assert_eq!((first, second), (1, 0), "pin counts the changed rows");
+}
