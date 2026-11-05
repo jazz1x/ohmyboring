@@ -412,7 +412,7 @@ pub struct VectorConfig {
 /// Shown at startup and in `config_get` next to the effective backend when it is surreal: how the
 /// Surreal copy is kept.
 pub const SURREAL_PINNED_NOTES: [&str; 2] = [
-    "surreal: 한 번 채운 뒤 pg 쓰기를 따라 씀 (실패는 오류, 복구는 vector-fill)",
+    "surreal: 엔진이 Surreal 에 직접 씀 (pg 는 이 쓰기를 받지 않음, 실패는 오류, 전환 때 한 번 vector-fill)",
     "Store::open 의 시작 마이그레이션은 surreal 에 안 씀 (행이 바뀌면 vector-fill 을 다시 돌릴 것)",
 ];
 

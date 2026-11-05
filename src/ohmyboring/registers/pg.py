@@ -408,7 +408,7 @@ def _register_rows_from(rows: list[tuple]) -> RegisterRows:
 #: 순서의 끝(subject·predicate 바이트 순)은 pg 쪽 COLLATE "C" 와 같다.
 _DAY_US = 86_400_000_000
 _NOT_YET_ON_SURREAL = (
-    "{what}: backend=surreal 에서 아직 없는 질의 (벡터 거리, C-SURALL2 C0b2·Z4) — pg 로 되돌아가지 않는다"
+    "{what}: backend=surreal 에서 아직 없는 질의 (벡터 거리, C-SURALL2 Z4) — pg 로 되돌아가지 않는다"
 )
 
 

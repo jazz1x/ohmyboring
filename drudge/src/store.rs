@@ -34,7 +34,7 @@ mod vector_pg;
 mod vector_route;
 mod vector_surreal;
 
-pub use code_copy_surreal::{CodeCheck, CodeCopy};
+pub use code_copy_surreal::{CODE_TX_BYTES, CodeFileRow, code_upsert_stmt};
 pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{

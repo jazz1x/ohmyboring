@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime, Timeouts};
@@ -9,14 +9,15 @@ use super::{
     SyncReport, usize_to_i64,
 };
 use crate::config::CodeIndexSource;
-use crate::store::SurrealClient;
+use crate::store::{CODE_TX_BYTES, SurrealClient, code_upsert_stmt};
 
 /// PostgreSQL adapter dedicated to the `code_index` schema. It never reads or writes the memory
 /// corpus (`document`, `chunk`, `node`, `edge`, `claim`).
 pub struct CodeIndexStore {
     pool: Pool,
-    /// On `backend=surreal` the read paths (`status`, `search`, `symbol`) answer from the Surreal
-    /// copy; the sync path (`existing_hashes`, `replace_repository`) is the writer and stays on pg.
+    /// On `backend=surreal` every path (`status`, `search`, `symbol`, and the sync path
+    /// `existing_hashes` / `replace_repository`) reads and writes Surreal; pg's `code_index` tables
+    /// are not touched, and nothing copies Surreal back to pg.
     surreal: Option<SurrealClient>,
 }
 
@@ -100,6 +101,22 @@ impl CodeIndexStore {
         &self,
         repository_id: &str,
     ) -> Result<HashMap<String, String>, CodeIndexError> {
+        match &self.surreal {
+            None => self.existing_hashes_pg(repository_id).await,
+            Some(client) => Ok(client
+                .code_file_rows(repository_id)
+                .await
+                .map_err(|e| CodeIndexError::Surreal(format!("{e:#}")))?
+                .into_iter()
+                .map(|row| (row.relative_path, row.sha256))
+                .collect()),
+        }
+    }
+
+    async fn existing_hashes_pg(
+        &self,
+        repository_id: &str,
+    ) -> Result<HashMap<String, String>, CodeIndexError> {
         let rows = self
             .db()
             .await?
@@ -115,6 +132,23 @@ impl CodeIndexStore {
     }
 
     pub(super) async fn replace_repository(
+        &mut self,
+        source: &CodeIndexSource,
+        seen_paths: &[String],
+        changed: &[PreparedFile],
+    ) -> Result<SyncReport, CodeIndexError> {
+        match &self.surreal {
+            None => {
+                self.replace_repository_pg(source, seen_paths, changed)
+                    .await
+            }
+            Some(client) => replace_repository_surreal(client, source, seen_paths, changed)
+                .await
+                .map_err(|e| CodeIndexError::Surreal(format!("{e:#}"))),
+        }
+    }
+
+    async fn replace_repository_pg(
         &mut self,
         source: &CodeIndexSource,
         seen_paths: &[String],
@@ -411,6 +445,183 @@ async fn replace_file(
             .await?;
     }
     Ok(())
+}
+
+/// File ids per delete request for files that left the repository (a 64-char id is ~70 bytes in a
+/// request, and the request body is capped near 1 MiB).
+const VANISHED_PER_TX: usize = 2000;
+
+fn micros_now() -> anyhow::Result<i64> {
+    let since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+    Ok(i64::try_from(since_epoch.as_micros())?)
+}
+
+fn json_rows(rows: impl Iterator<Item = serde_json::Value>) -> Vec<String> {
+    rows.map(|row| row.to_string()).collect()
+}
+
+/// Room left for rows in one request after `BEGIN; ... COMMIT;` and one `FOR ... UPSERT` wrapper.
+const ROW_BYTES_PER_TX: usize = CODE_TX_BYTES - 256;
+
+/// The Surreal writes of one changed file as transaction bodies, sent in order. The rule they
+/// keep: when `code_file.sha256` holds the file's real sha (what `existing_hashes` compares), all of
+/// the file's rows are there.
+///
+/// A file that fits one request is one body: old rows go, new rows and the sha come in together.
+/// Measured 11-04 on the trunk (29b63d8), 16 of 459 files do not fit (largest 3,322,717 bytes), so
+/// such a file is several bodies: the first deletes its old rows and writes `code_file` with an
+/// empty sha, the middle ones carry its symbols and relations under the cap, and the last writes
+/// the real sha. A run cut off in between leaves the empty sha, which never matches, so the next
+/// run redoes the file. A single row over the cap is its own body and `code_tx` refuses it.
+fn file_tx_bodies(
+    repository_id: &str,
+    file: &PreparedFile,
+    now_us: i64,
+) -> anyhow::Result<Vec<String>> {
+    let file_id = &file.collected.id;
+    let repo = serde_json::to_string(repository_id)?;
+    let fid = serde_json::to_string(file_id)?;
+    let file_row = |sha256: &str| {
+        serde_json::json!({
+            "cid": file_id, "repository_id": repository_id,
+            "relative_path": file.collected.relative_path, "sha256": sha256,
+            "parse_status": file.parsed.status.as_str(), "error_count": file.parsed.error_count,
+            "updated_us": now_us,
+        })
+        .to_string()
+    };
+    let symbols = json_rows(file.parsed.symbols.iter().map(|s| {
+        serde_json::json!({
+            "cid": s.id, "repository_id": repository_id, "file_id": file_id,
+            "kind": s.kind.as_str(), "name": s.name, "qualified_name": s.qualified_name,
+            "start_byte": s.start_byte, "end_byte": s.end_byte,
+            "start_line": s.start_line, "end_line": s.end_line,
+        })
+    }));
+    let relations = json_rows(file.parsed.relations.iter().map(|r| {
+        serde_json::json!({
+            "cid": r.id, "repository_id": repository_id, "file_id": file_id,
+            "source_symbol_id": r.source_symbol_id, "kind": r.kind.as_str(),
+            "target_symbol_id": r.target_symbol_id, "target_name": r.target_name,
+            "start_byte": r.start_byte, "end_byte": r.end_byte,
+        })
+    }));
+    let delete_old = format!(
+        "DELETE code_relation WHERE repository_id = {repo} AND file_id = {fid}; \
+         DELETE code_symbol WHERE repository_id = {repo} AND file_id = {fid}; "
+    );
+    let real_sha = code_upsert_stmt("code_file", &[file_row(&file.collected.sha256)]);
+    let row_bytes: usize = symbols.iter().chain(&relations).map(|r| r.len() + 1).sum();
+    if delete_old.len() + real_sha.len() + row_bytes <= ROW_BYTES_PER_TX {
+        let mut body = delete_old + &real_sha;
+        if !symbols.is_empty() {
+            body.push_str(&code_upsert_stmt("code_symbol", &symbols));
+        }
+        if !relations.is_empty() {
+            body.push_str(&code_upsert_stmt("code_relation", &relations));
+        }
+        return Ok(vec![body]);
+    }
+    let mut bodies = vec![delete_old + &code_upsert_stmt("code_file", &[file_row("")])];
+    bodies.extend(rows_under_cap(&symbols).map(|rows| code_upsert_stmt("code_symbol", rows)));
+    bodies.extend(rows_under_cap(&relations).map(|rows| code_upsert_stmt("code_relation", rows)));
+    bodies.push(real_sha);
+    Ok(bodies)
+}
+
+/// `rows` cut, in order, into runs whose joined size fits `ROW_BYTES_PER_TX`; a row larger than
+/// that alone is a run of its own.
+fn rows_under_cap(rows: &[String]) -> impl Iterator<Item = &[String]> {
+    let mut rest = rows;
+    std::iter::from_fn(move || {
+        let first = rest.first()?;
+        let mut used = first.len() + 1;
+        let mut take = 1;
+        while let Some(row) = rest.get(take) {
+            if used + row.len() + 1 > ROW_BYTES_PER_TX {
+                break;
+            }
+            used += row.len() + 1;
+            take += 1;
+        }
+        let (run, tail) = rest.split_at(take);
+        rest = tail;
+        Some(run)
+    })
+}
+
+/// Delete the rows of files that are no longer in the repository.
+fn vanished_tx_body(repository_id: &str, file_ids: &[&str]) -> anyhow::Result<String> {
+    let repo = serde_json::to_string(repository_id)?;
+    let ids = serde_json::to_string(file_ids)?;
+    Ok(format!(
+        "DELETE code_relation WHERE repository_id = {repo} AND file_id INSIDE {ids}; \
+         DELETE code_symbol WHERE repository_id = {repo} AND file_id INSIDE {ids}; \
+         DELETE code_file WHERE repository_id = {repo} AND cid INSIDE {ids};"
+    ))
+}
+
+/// `replace_repository` on Surreal. HTTP carries no open transaction and a request body is capped
+/// near 1 MiB, so a repository cannot be one transaction as it is on pg. Each changed file goes as
+/// `file_tx_bodies` (its real sha lands only once all its rows are in), then the vanished files,
+/// then the `code_repository` row last. A run that stops half way leaves no real sha over missing
+/// rows, and the next run's `existing_hashes` re-does exactly the files whose sha is not the new
+/// one. A single row over the request cap fails loudly.
+async fn replace_repository_surreal(
+    client: &SurrealClient,
+    source: &CodeIndexSource,
+    seen_paths: &[String],
+    changed: &[PreparedFile],
+) -> anyhow::Result<SyncReport> {
+    let root_path = source
+        .root()
+        .to_str()
+        .ok_or_else(|| CodeIndexError::NonUtf8Path(source.root().to_path_buf()))?;
+    let now_us = micros_now()?;
+    let existing = client.code_file_rows(source.id()).await?;
+    let seen: HashSet<&str> = seen_paths.iter().map(String::as_str).collect();
+    let rewritten: HashSet<&str> = changed
+        .iter()
+        .map(|f| f.collected.relative_path.as_str())
+        .collect();
+    let (vanished, kept): (Vec<_>, Vec<_>) = existing
+        .iter()
+        .partition(|row| !seen.contains(row.relative_path.as_str()));
+
+    for file in changed {
+        for body in file_tx_bodies(source.id(), file, now_us)? {
+            client.code_tx(&body).await?;
+        }
+    }
+    let vanished_ids: Vec<&str> = vanished.iter().map(|row| row.cid.as_str()).collect();
+    for ids in vanished_ids.chunks(VANISHED_PER_TX) {
+        client.code_tx(&vanished_tx_body(source.id(), ids)?).await?;
+    }
+    let repository_row = serde_json::json!({
+        "cid": source.id(), "name": source.name(), "root_path": root_path,
+        "language": source.language().as_str(), "last_synced_us": now_us,
+    });
+    client
+        .code_tx(&code_upsert_stmt(
+            "code_repository",
+            &[repository_row.to_string()],
+        ))
+        .await?;
+
+    let kept_errors: i64 = kept
+        .iter()
+        .filter(|row| !rewritten.contains(row.relative_path.as_str()))
+        .map(|row| row.error_count)
+        .sum();
+    let changed_errors: usize = changed.iter().map(|f| f.parsed.error_count).sum();
+    Ok(SyncReport {
+        repository_id: source.id().to_owned(),
+        scanned: seen_paths.len(),
+        changed: changed.len(),
+        unchanged: seen_paths.len() - changed.len(),
+        deleted: vanished.len(),
+        parse_errors: count_to_usize(kept_errors)? + changed_errors,
+    })
 }
 
 fn count_to_usize(value: i64) -> Result<usize, CodeIndexError> {

@@ -97,3 +97,55 @@ async fn verdict_with_a_dead_surreal_fails_at_the_handed_read() {
     assert_eq!(session_nodes_in_pg(&dsn, "s-v").await, 0);
     drop_database(&admin_dsn, &name).await;
 }
+
+/// C0b2: `/health` on `backend=surreal` has a Surreal cell. pg is up in both cases, so only the
+/// Surreal cell can turn the answer red; the pg-only store is the control whose text must not move.
+#[tokio::test]
+async fn health_probe_names_a_dead_surreal_and_leaves_backend_pg_unchanged() {
+    let Some(admin_dsn) = std::env::var("BORING_TEST_DATABASE_URL").ok() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let name = unique("tsurh");
+    let (store, _) = fresh_store(&admin_dsn, &name).await;
+    let pg_only = state_with(Some(store), None);
+    assert_eq!(pg_only.probe_db_health().await, (Some(true), None));
+
+    let (store, _) = fresh_store(&admin_dsn, &format!("{name}b")).await;
+    let routed = state_with(
+        Some(store.with_vector_route(VectorRoute::Surreal(dead_surreal()))),
+        None,
+    );
+    let (healthy, error) = routed.probe_db_health().await;
+    assert_eq!(healthy, Some(false));
+    let error = error.unwrap_or_default();
+    assert!(error.starts_with("surreal: "), "answer was {error}");
+    assert!(!error.contains("store:"), "pg is up: {error}");
+    drop_database(&admin_dsn, &name).await;
+    drop_database(&admin_dsn, &format!("{name}b")).await;
+}
+
+/// The other half: a live Surreal answers `Some(true)`. Skipped without a throwaway Surreal.
+#[tokio::test]
+async fn health_probe_is_true_with_a_live_surreal() {
+    let (Some(admin_dsn), Some(url)) = (
+        std::env::var("BORING_TEST_DATABASE_URL").ok(),
+        std::env::var("BORING_TEST_SURREAL_URL").ok(),
+    ) else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL / BORING_TEST_SURREAL_URL not set");
+        return;
+    };
+    let name = unique("tsurl");
+    let (store, _) = fresh_store(&admin_dsn, &name).await;
+    let config: crate::config::SurrealConfig = serde_json::from_value(
+        serde_json::json!({"url": url, "namespace": "c0b2_health", "database": "c0b2_health"}),
+    )
+    .unwrap();
+    let client = SurrealClient::new(config.settings(&|n| std::env::var(n).ok()).unwrap()).unwrap();
+    let routed = state_with(
+        Some(store.with_vector_route(VectorRoute::Surreal(client))),
+        None,
+    );
+    assert_eq!(routed.probe_db_health().await, (Some(true), None));
+    drop_database(&admin_dsn, &name).await;
+}
