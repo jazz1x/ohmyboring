@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use drudge::code_index::{CodeIndexStore, sync_repository};
+use drudge::code_index::{CodeIndexStore, code_check, sync_repository};
 use drudge::config::{CodeIndexSource, CodeLanguage, SurrealConfig};
 use drudge::store::SurrealClient;
 use serde_json::json;
@@ -46,6 +46,49 @@ fn source(id: &str, root: &std::path::Path) -> CodeIndexSource {
         true,
     )
     .unwrap()
+}
+
+/// After a sync that changed a file, code-check agrees; a file edited after the sync makes it
+/// disagree. Before C0b2 gap 2 it compared pg, which a surreal sync no longer writes.
+#[tokio::test]
+#[ignore = "needs a throwaway surreal: see the run command in this file's header"]
+async fn code_check_agrees_after_a_changing_sync_and_disagrees_on_an_unsynced_edit() {
+    let namespace = format!(
+        "c0b2_check_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let config: SurrealConfig = serde_json::from_value(json!({
+        "url": std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL"),
+        "namespace": namespace,
+        "database": namespace,
+    }))
+    .unwrap();
+    let client = SurrealClient::new(config.settings(&|k| std::env::var(k).ok()).unwrap()).unwrap();
+    let mut store = CodeIndexStore::connect(DEAD_PG)
+        .unwrap()
+        .with_surreal(Some(client.clone()));
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    let src = source("c0b2-check", root.path());
+    sync_repository(&mut store, &src).await.expect("first sync");
+    fs::write(root.path().join("a.rs"), "pub fn gamma() {}\n").unwrap();
+    sync_repository(&mut store, &src)
+        .await
+        .expect("changing sync");
+
+    let after_sync = code_check(client.clone(), DEAD_PG, &[&src])
+        .await
+        .expect("code-check after sync");
+    fs::write(root.path().join("a.rs"), "pub fn delta() {}\n").unwrap();
+    let after_edit = code_check(client, DEAD_PG, &[&src])
+        .await
+        .expect("code-check after edit");
+
+    assert!(after_sync.same, "{:?}", after_sync.lines);
+    assert!(!after_edit.same, "{:?}", after_edit.lines);
 }
 
 #[tokio::test]

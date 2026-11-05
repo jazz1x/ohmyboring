@@ -70,9 +70,9 @@ enum Cmd {
     /// Read-only (the doctor line): on backend=surreal, compare pgvector and SurrealDB per table
     /// by row count and key-set hash and fail when they differ; on pgvector say it does not apply
     VectorCheck,
-    /// On backend=surreal: every code_index row (repository, file, symbol, relation) in pg against
-    /// Surreal's copy, value by value; fails when they differ. `code-sync` writes the copy. On
-    /// pgvector it does not apply
+    /// On backend=surreal: every enabled source's files on disk against the sha Surreal holds for
+    /// them; fails when a file differs, is not indexed, or is indexed but gone. `code-sync` writes
+    /// Surreal directly. On pgvector it does not apply
     CodeCheck,
     /// On backend=surreal: one copy pass of the four log tables (event_log, query_log,
     /// recall_label, sync_state) from pg into SurrealDB, then every pg row against Surreal's row
@@ -223,14 +223,19 @@ async fn main() -> Result<()> {
                 println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
                 return Ok(());
             };
-            let code_store = code_index::CodeIndexStore::connect(&config::pg_dsn())?;
-            let checks = client.check_code(&code_store).await?;
-            for check in &checks {
-                println!("{}", check.line());
+            let sources: Vec<_> = cfg
+                .code_index
+                .sources
+                .iter()
+                .filter(|source| source.enabled())
+                .collect();
+            let report = code_index::code_check(client, &config::pg_dsn(), &sources).await?;
+            for line in &report.lines {
+                println!("{line}");
             }
             anyhow::ensure!(
-                checks.iter().all(store::CodeCheck::same),
-                "code-check: pg 와 surreal 의 행 수 또는 값이 다름 — code-sync 를 다시 돌릴 것"
+                report.same,
+                "code-check: 디스크 파일과 surreal 의 sha 가 다름 — code-sync 를 다시 돌릴 것"
             );
             return Ok(());
         }

@@ -228,6 +228,59 @@ pub async fn sync_repository(
         .await
 }
 
+/// What `drudge code-check` prints, and whether every line agrees.
+#[derive(Debug)]
+pub struct CodeCheckReport {
+    pub lines: Vec<String>,
+    pub same: bool,
+}
+
+/// `drudge code-check` on `backend=surreal`: each source's files on disk against the sha Surreal
+/// holds for them. Since C0b2 a surreal `code-sync` writes Surreal only, so pg is no reference
+/// any more and is not read (`dsn` only builds the store; nothing connects to it).
+///
+/// # Errors
+/// Walking a source or reading Surreal failed.
+pub async fn code_check(
+    client: crate::store::SurrealClient,
+    dsn: &str,
+    sources: &[&CodeIndexSource],
+) -> anyhow::Result<CodeCheckReport> {
+    let store = CodeIndexStore::connect(dsn)?.with_surreal(Some(client));
+    let mut lines = Vec::with_capacity(sources.len());
+    let mut same = true;
+    for source in sources {
+        let on_disk = collect_repository(source)?;
+        let indexed = store.existing_hashes(source.id()).await?;
+        let stale = on_disk
+            .iter()
+            .filter(|file| {
+                indexed
+                    .get(&file.relative_path)
+                    .is_some_and(|sha| sha != &file.sha256)
+            })
+            .count();
+        let missing = on_disk
+            .iter()
+            .filter(|file| !indexed.contains_key(&file.relative_path))
+            .count();
+        let extra = indexed.len() + missing - on_disk.len();
+        let agrees = stale == 0 && missing == 0 && extra == 0;
+        same &= agrees;
+        lines.push(format!(
+            "{}: disk {} | surreal {} | sha differs {} | not indexed {} | gone from disk {} | {}",
+            source.id(),
+            on_disk.len(),
+            indexed.len(),
+            stale,
+            missing,
+            extra,
+            if agrees { "same" } else { "DIFFERENT" }
+        ));
+    }
+    Ok(CodeCheckReport { lines, same })
+}
+
 fn collect_repository(source: &CodeIndexSource) -> Result<Vec<CollectedFile>, CodeIndexError> {
     let metadata = fs::metadata(source.root()).map_err(|error| CodeIndexError::RootMetadata {
         path: source.root().to_path_buf(),
