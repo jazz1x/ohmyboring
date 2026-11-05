@@ -1,7 +1,7 @@
 //! C-SURALL2 Z2 reads: what `backend=surreal` answers out of Surreal for the four log tables and
-//! the four `code_index` tables. pg is not asked. The rows are the copies `log_copy_surreal` and
-//! `code_copy_surreal` write, so an answer is as fresh as the last copy pass (the log tables'
-//! pass runs once per sync tick; the code tables' once per `code-sync`).
+//! the four `code_index` tables. pg is not asked. The log rows are the copies `log_copy_surreal`
+//! writes, as fresh as the last copy pass (once per sync tick); the code rows are written to
+//! Surreal directly by `code-sync`.
 //!
 //! Each reader is the SurrealQL of one pg query in `store.rs` / `code_index/store.rs`, condition
 //! for condition. Where pg orders by the column collation (`qualified_name`, paths) Surreal
