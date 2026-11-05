@@ -296,6 +296,11 @@ async fn the_code_reads_answer_from_surreal_and_equal_pg() {
         "pub fn parseGamma() { helper_two(); }\nfn helper_two() {}\nstruct Token2;\n",
     )
     .unwrap();
+    // The routed store's writes go to Surreal only (the production `code-sync` path), pg keeps
+    // its own `sync_repository`; the parity assertions below compare the two.
+    let mut routed = CodeIndexStore::connect(&dsn)
+        .unwrap()
+        .with_surreal(Some(client));
     for (id, dir) in [("z2r-a", &first), ("z2r-b", &second)] {
         let source = CodeIndexSource::new(
             id,
@@ -306,11 +311,10 @@ async fn the_code_reads_answer_from_surreal_and_equal_pg() {
         )
         .unwrap();
         sync_repository(&mut pg, &source).await.expect("sync");
-        client.copy_code_repo(&pg, id).await.expect("copy");
+        sync_repository(&mut routed, &source)
+            .await
+            .expect("sync into surreal");
     }
-    let routed = CodeIndexStore::connect(&dsn)
-        .unwrap()
-        .with_surreal(Some(client));
 
     let status_pg = pg.status(None).await.unwrap();
     let status_sr = routed.status(None).await.unwrap();
