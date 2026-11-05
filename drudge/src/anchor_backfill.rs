@@ -342,4 +342,17 @@ mod tests {
             Judgement::Unmeasured(Unmeasured::ChangedAfterClaim)
         ));
     }
+
+    #[test]
+    fn the_source_named_exactly_like_the_project_wins_over_a_longer_name_listed_first() {
+        let sources = [
+            source("oh-my-boring-site", CodeLanguage::Rust),
+            source("oh-my-boring", CodeLanguage::Rust),
+        ];
+        let anchor = Anchor::from_db_string("ohmyboring:drudge/src/main.rs:L1-L2").unwrap();
+
+        let picked = registered_source(&anchor, &sources).unwrap();
+
+        assert_eq!(picked.id(), "oh-my-boring");
+    }
 }

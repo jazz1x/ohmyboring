@@ -56,22 +56,25 @@ fn hyphen_free(name: &str) -> String {
 /// The anchor's project is a claim-note prefix (`ohmyboring`); sources are named per language
 /// (`oh-my-boring`, `oh-my-boring-python`, `oh-my-boring-shell`). A source belongs to the
 /// project when its id starts with the project name, hyphens ignored. Of those, the one whose
-/// language parses the anchor's file wins; a whole-file anchor needs only the root, so the
-/// first match serves it. The check and the backfill both pick through this function.
+/// language parses the anchor's file wins, and among equals the id that is exactly the project
+/// name beats a longer one (`oh-my-boring` over `oh-my-boring-site`, whatever the list order);
+/// a whole-file anchor needs only the root. The check and the backfill both pick through this
+/// function.
 pub fn registered_source<'a>(
     anchor: &Anchor,
     sources: &'a [CodeIndexSource],
 ) -> Option<&'a CodeIndexSource> {
     let project = hyphen_free(&anchor.project);
-    let named: Vec<&CodeIndexSource> = sources
+    let path = Path::new(&anchor.path);
+    sources
         .iter()
         .filter(|source| source.enabled() && hyphen_free(source.id()).starts_with(&project))
-        .collect();
-    named
-        .iter()
-        .copied()
-        .find(|source| code_index::matches_language(Path::new(&anchor.path), source.language()))
-        .or_else(|| named.first().copied())
+        .min_by_key(|source| {
+            (
+                !code_index::matches_language(path, source.language()),
+                hyphen_free(source.id()) != project,
+            )
+        })
 }
 
 pub fn read_under_root(source: &CodeIndexSource, path: &str) -> Option<String> {
