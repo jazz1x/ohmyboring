@@ -182,7 +182,8 @@ async fn a_file_over_one_request_lands_whole_in_pieces() {
 async fn a_file_cut_off_mid_way_has_no_sha_vouching_for_it() {
     let mut store = store("c0b2_atomic");
     let root = tempdir().unwrap();
-    fs::write(root.path().join("small.rs"), "pub fn small_one() {}\n").unwrap();
+    // Sorts before big.rs, so it is written before the sync fails.
+    fs::write(root.path().join("a_small.rs"), "pub fn small_one() {}\n").unwrap();
     let mut big = String::new();
     for i in 0..12_000 {
         writeln!(big, "pub fn big_fn_{i}() {{}}").unwrap();
@@ -202,10 +203,11 @@ async fn a_file_cut_off_mid_way_has_no_sha_vouching_for_it() {
         "no sha vouches for rows that are not there: {:?}",
         hashes.get("big.rs")
     );
+    let small_has_sha = hashes.get("a_small.rs").is_some_and(|sha| !sha.is_empty());
+    let small_has_symbols = !store.search("small_one", None).await.unwrap().is_empty();
     assert!(
-        hashes.contains_key("small.rs")
-            || store.search("small_one", None).await.unwrap().is_empty(),
-        "a file is either whole (sha and symbols) or absent"
+        small_has_sha && small_has_symbols,
+        "a file written before the failure is whole: sha {small_has_sha}, symbols {small_has_symbols}"
     );
     assert!(
         store.status(Some("c0b2-atomic")).await.unwrap().is_empty(),
