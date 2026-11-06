@@ -494,6 +494,25 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
     assert f"✓ 채택 — <@{OWNER}>" in json.dumps(final[3], ensure_ascii=False)
 
 
+def test_a_review_agree_press_with_the_engine_down_shows_the_failure_and_keeps_the_buttons():
+    """동의 누름도 엔진이 죽어 있으면 말없이 사라지지 않는다: 첫 효과에서 멈춰 verdict_reviewed 가
+    안 남고, 줄은 「✕ 실패 — reason」 이며 단추가 남는다."""
+
+    def dead_engine(session, kind, paths, judge=None):
+        raise RuntimeError("engine down")
+
+    calls = []
+    ctx = _FakeCtx()
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls, consumption=dead_engine), mock.patch.object(PLUGIN, "_LOG"):
+            _run(handler, _body("card:3:do", REVIEW_VALUE), calls)
+    assert _without_updates(calls) == ["ack"]
+    _, failed = _updates(calls)
+    assert _status_at(failed[3], 3) == "✕ 실패 — engine down"
+    _assert_buttons_kept_under_the_reason(BLOCKS, failed[3], 3)
+
+
 def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
     """맡길게요: the model judges once and its call stands — REVIEW_VALUE proposes 'used';
     the fake model answers wrong, so the judged edge is contested (never the word flag),

@@ -209,7 +209,10 @@ class EffectsTableTests(unittest.TestCase):
         }
         self.assertEqual(
             cp.effects(cc.ReviewPress(choice="do", **base)),
-            [cc.Record(event="verdict_reviewed", fields={**fields, "choice": "agree"})],
+            [
+                cc.Consumption(session="sess-agent-1", kind="used", paths=["/vault/wiki/wiki-0700.md"]),
+                cc.Record(event="verdict_reviewed", fields={**fields, "choice": "agree"}),
+            ],
         )
         # 뒤집기: 반대 판정을 먼저 놓고 같은 이벤트 — 순서가 곧 실행 순서다
         self.assertEqual(
@@ -363,7 +366,9 @@ class EffectsTableTests(unittest.TestCase):
         self.assertEqual(
             cp.effects(cc.ReviewPress(choice="do", **base)),
             [
+                cc.Consumption(session="sess-agent-1", kind="contested", paths=[path]),
                 cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "agree"}),
+                cc.Consumption(session="sess-agent-2", kind="contested", paths=[path]),
                 cc.Record(event="verdict_reviewed", fields={**fields2, "choice": "agree"}),
             ],
         )
@@ -420,7 +425,10 @@ class EffectsTableTests(unittest.TestCase):
         )
         self.assertEqual(
             cp.effects(legacy),
-            [cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "agree"})],
+            [
+                cc.Consumption(session="sess-agent-1", kind="contested", paths=[path]),
+                cc.Record(event="verdict_reviewed", fields={**fields1, "choice": "agree"}),
+            ],
         )
 
 
@@ -524,7 +532,11 @@ class RejectedTests(unittest.TestCase):
         }
         agree = _press("card:1:do", values["card:1:do"])
         self.assertEqual(
-            cp.effects(agree), [cc.Record(event="verdict_reviewed", fields={**fields, "choice": "agree"})]
+            cp.effects(agree),
+            [
+                cc.Consumption(session="sess-s", kind="used", paths=["/vault/wiki/wiki-0800.md"]),
+                cc.Record(event="verdict_reviewed", fields={**fields, "choice": "agree"}),
+            ],
         )
         flip = cp.effects(_press("card:1:drop", values["card:1:drop"]))
         self.assertEqual(
@@ -535,7 +547,7 @@ class RejectedTests(unittest.TestCase):
             ],
         )
         ordinary = cp.effects(_press("card:0:do", values["card:0:do"]))
-        self.assertNotIn("sample", ordinary[0].fields)
+        self.assertNotIn("sample", ordinary[1].fields)
 
     def test_a_sample_press_has_no_delegate_and_no_defer(self):
         sample = cc.ProposedVerdict(
