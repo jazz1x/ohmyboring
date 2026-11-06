@@ -617,7 +617,16 @@ def effects(press: Press, delegated: card_types.Delegated | None = None) -> list
     for sid in sessions:
         row_fields = {**fields, "session_id": sid}
         if press.choice == "do":
-            out.append(card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "agree"}))
+            out.extend(
+                [
+                    card_types.Consumption(
+                        session=sid,
+                        kind=press.kind,
+                        paths=[card_view.note_path(press.note)],
+                    ),
+                    card_types.Record(event="verdict_reviewed", fields={**row_fields, "choice": "agree"}),
+                ]
+            )
         else:
             out.extend(
                 [

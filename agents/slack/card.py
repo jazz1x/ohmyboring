@@ -40,9 +40,9 @@ live collaborators — a repair row's adopt calls the door's own merge (POST
 /repairs/split-subjects); an advice row's press logs a card_verdict event — card_proposal
 exists only for these rows, and card_live._live_past_verdicts joins the two by (card_ts, idx),
 raising on a verdict with no proposal — then its adopt/reject writes the verdict to the
-engine while its hold leaves no trace beyond the event; a review row's agree leaves only a
-verdict_reviewed event, its flip writes the opposite-kind verdict to the proposing session
-and the same event — the agent's own edge is never deleted. An unanswered row stays
+engine while its hold leaves no trace beyond the event; a review row's agree writes the
+proposed verdict and its flip the opposite kind to the proposing session, each with a
+verdict_reviewed event — the agent's own edge is never deleted. An unanswered row stays
 answerable for card_press.CARD_ANSWERABLE_HOURS: the hermes plugin refuses an older press,
 and _live_past_verdicts widens its proposal read by the same hours so every press it
 accepted still joins its proposal.
