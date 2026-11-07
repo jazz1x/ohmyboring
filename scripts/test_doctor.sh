@@ -476,6 +476,50 @@ case "$(cat "$TMP/five-digit-id.out")" in
     ;;
 esac
 
+# A vault past the argument limit: the live one has 19,280 notes, and an expanded glob handed to
+# `ls` died with E2BIG and read as "no distilled notes". Long names reach the limit with 9,000
+# files, on Linux (2 MiB) as well as macOS (1 MiB).
+make_case "$TMP/many-notes" yes
+many_wiki="$TMP/many-notes/boring/vault/wiki"
+many_filler="$(printf '%0230d' 0)"
+many_i=1
+while [ "$many_i" -le 9000 ]; do
+    : >"$many_wiki/wiki-$many_filler-wiki-$many_i.md"
+    many_i=$((many_i + 1))
+done
+( BORING_READINESS_NOTE_MAX_HOURS=1 run_strict "$TMP/many-notes" "$TMP/many-notes.out" ) || true
+grep -qF "path=$many_wiki/wiki-$many_filler-wiki-9000.md" "$TMP/many-notes.out" || {
+    tail -n 20 "$TMP/many-notes.out"
+    echo "FAIL: doctor did not find the newest note in a vault past the argument limit" >&2
+    exit 1
+}
+
+# Control: a readable, empty folder is the real "no notes", not a failed read.
+grep -qF "✗ no distilled notes in $TMP/fail/boring/vault/wiki/" "$TMP/fail.out" || {
+    cat "$TMP/fail.out"
+    echo "FAIL: an empty wiki folder must say there are no distilled notes" >&2
+    exit 1
+}
+
+# A listing that failed read nothing, so it must not claim the folder is empty.
+make_case "$TMP/unreadable-wiki" yes
+rm -rf "$TMP/unreadable-wiki/boring/vault/wiki"
+if ( run_strict "$TMP/unreadable-wiki" "$TMP/unreadable-wiki.out" ); then
+    cat "$TMP/unreadable-wiki.out"
+    echo "FAIL: strict doctor should fail when the note folder cannot be listed" >&2
+    exit 1
+fi
+grep -qF "✗ cannot measure newest note — find:" "$TMP/unreadable-wiki.out" || {
+    cat "$TMP/unreadable-wiki.out"
+    echo "FAIL: a failed listing must be red with its reason" >&2
+    exit 1
+}
+if grep -qF "no distilled notes" "$TMP/unreadable-wiki.out"; then
+    cat "$TMP/unreadable-wiki.out"
+    echo "FAIL: a failed listing must not read as an empty folder" >&2
+    exit 1
+fi
+
 make_case "$TMP/stale-marker" yes
 touch "$TMP/stale-marker/home/.cache/boring-distill/stale.pending"
 old_marker_epoch=$(( $(date +%s) - 7200 ))

@@ -178,10 +178,10 @@ newest() {
 # touched, not that a session was distilled: on 2026-09-15 the newest mtime was wiki-0120, an old
 # note, while the write door had not opened since 09-12. Ids only ever go up, and only a
 # distillation mints one. Sort on the number after the last "wiki-": a text sort put wiki-9999
-# after wiki-10000.
+# after wiki-10000. Reads paths on stdin: the vault passed the argument limit at 19,280 notes, so
+# the listing comes from find and never travels as arguments.
 newest_minted() {
-    # shellcheck disable=SC2086
-    ls $1 2>/dev/null | awk -F'wiki-' '{ print $NF "\t" $0 }' | sort -n | tail -n 1 | cut -f 2-
+    awk -F'wiki-' '{ print $NF "\t" $0 }' | sort -n | tail -n 1 | cut -f 2-
 }
 
 days_since() {
@@ -522,12 +522,17 @@ esac
 
 # (d1) Newest distilled note — proof the write door produced output. The hook writes notes
 # as vault/wiki/wiki-*.md, so the newest mtime is the last successful distillation.
-note=$(newest_minted "$BORING_HOME/vault/wiki/wiki-*.md")
-if [ -n "$note" ]; then
-    ok "newest distilled note: $(mtime_human "$note") ($(days_since "$note") days ago)"
-    echo "    $note"
+note=""
+if note_listing=$(find "$BORING_HOME/vault/wiki" -maxdepth 1 -name 'wiki-*.md' 2>&1); then
+    note=$(printf '%s\n' "$note_listing" | newest_minted)
+    if [ -n "$note" ]; then
+        ok "newest distilled note: $(mtime_human "$note") ($(days_since "$note") days ago)"
+        echo "    $note"
+    else
+        bad "no distilled notes in $BORING_HOME/vault/wiki/ — nothing written yet"; failed_note=1
+    fi
 else
-    bad "no distilled notes in $BORING_HOME/vault/wiki/ — nothing written yet"; failed_note=1
+    bad "cannot measure newest note — $note_listing"; failed_note=1
 fi
 
 # (d2) Newest SessionEnd hook marker — proof the hook itself fired (it stamps MARK_DIR after
