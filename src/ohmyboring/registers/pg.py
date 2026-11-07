@@ -21,11 +21,11 @@ import psycopg
 
 from ohmyboring.result import Either, Err, Ok, map_ok
 from ohmyboring.search.pg import (
-    NEWER_OPEN_LATERAL_SQL,
     NewerOpen,
     PgError,
     _canonical_confidence,
     _canonical_kind,
+    newer_open_lateral_sql,
     newer_open_of,
 )
 from ohmyboring.store import surreal
@@ -109,7 +109,7 @@ _RECENT_REGISTER_ROWS_SQL = (
     ")"
     " SELECT b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from, b.project,"
     " b.total, nv.cnt, nv.latest_day"
-    " FROM b" + NEWER_OPEN_LATERAL_SQL + " ORDER BY b.rn"
+    " FROM b" + newer_open_lateral_sql("%(exclude_origins)s") + " ORDER BY b.rn"
 )
 
 _STALLED_REGISTER_ROWS_SQL = (

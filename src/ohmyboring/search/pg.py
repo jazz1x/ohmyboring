@@ -49,19 +49,25 @@ def newer_open_of(count: int, latest_day: str | None) -> NewerOpen | None:
     return NewerOpen(count, latest_day) if latest_day is not None and count > 0 else None
 
 
-#: store.rs NEWER_OPEN_LATERAL_SQL 과 같은 정의. 이미 LIMIT 이 걸린 relation `b` 뒤에 붙여 nv.cnt·nv.latest_day 를 낸다.
-NEWER_OPEN_LATERAL_SQL = (
-    " LEFT JOIN LATERAL ("
-    " SELECT COUNT(*) AS cnt,"
-    " to_char(max(n.valid_from) AT TIME ZONE 'Asia/Seoul', 'MM-DD') AS latest_day"
-    " FROM claim n"
-    " WHERE b.kind IN ('next', 'blocked')"
-    " AND n.subject = b.subject AND n.predicate = b.predicate"
-    " AND n.valid_from > b.valid_from"
-    " AND n.kind IN ('next', 'blocked')"
-    " AND n.superseded_at IS NULL AND n.stale_at IS NULL"
-    ") nv ON true"
-)
+def newer_open_lateral_sql(exclude_origins_param: str) -> str:
+    """store.rs NEWER_OPEN_LATERAL_SQL 과 같은 정의. 이미 LIMIT 이 걸린 relation `b` 뒤에 붙여 nv.cnt·nv.latest_day 를 낸다.
+
+    exclude_origins_param 은 제외 출처 배열의 자리표시자(psycopg 자리표시자 꼴이 질의마다 달라 받는다).
+    제외 출처 노트의 더 새 행은 세지 않는다 — 보이는 행을 거르지는 않는다."""
+    return (
+        " LEFT JOIN LATERAL ("
+        " SELECT COUNT(*) AS cnt,"
+        " to_char(max(n.valid_from) AT TIME ZONE 'Asia/Seoul', 'MM-DD') AS latest_day"
+        " FROM claim n"
+        " JOIN document dn ON dn.source_path = n.source_path"
+        " WHERE b.kind IN ('next', 'blocked')"
+        f" AND NOT (dn.origin = ANY({exclude_origins_param}))"
+        " AND n.subject = b.subject AND n.predicate = b.predicate"
+        " AND n.valid_from > b.valid_from"
+        " AND n.kind IN ('next', 'blocked')"
+        " AND n.superseded_at IS NULL AND n.stale_at IS NULL"
+        ") nv ON true"
+    )
 
 
 @dataclass(frozen=True)
@@ -456,7 +462,7 @@ _CLAIMS_SQL = (
     ")"
     " SELECT b.doc_path, b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from,"
     " b.project, b.total, nv.cnt, nv.latest_day"
-    " FROM picked b" + NEWER_OPEN_LATERAL_SQL + " WHERE b.rn <= %s"
+    " FROM picked b" + newer_open_lateral_sql("%s") + " WHERE b.rn <= %s"
     " ORDER BY b.doc_path, b.rn;"
 )
 
@@ -466,16 +472,16 @@ def current_claims(
 ) -> Either[dict[str, RegisterRows], PgError]:
     """/search·회상용 — 현재 claims→claim 간선이 잇는 행(fact 포함), tier·최신 순, 한 문서당 per_doc.
     등록부(registers/pg.py)는 자기 SQL 로 fact 를 뺀다. exclude_origins 는 newer_open 셈에만 쓰고 행은 거르지 않는다."""
-    return _claims_by_doc(conn, _CLAIMS_SQL, paths, per_doc)
+    return _claims_by_doc(conn, _CLAIMS_SQL, paths, per_doc, list(exclude_origins))
 
 
 def _claims_by_doc(
-    conn: psycopg.Connection, sql: str, paths: list[str], per_doc: int
+    conn: psycopg.Connection, sql: str, paths: list[str], per_doc: int, exclude_origins: list[str]
 ) -> Either[dict[str, RegisterRows], PgError]:
     def run() -> dict[str, RegisterRows]:
         doc_ids = [doc_node_id(path) for path in paths]
         out: dict[str, RegisterRows] = {}
-        for row in _exec_fetchall(conn, sql, (doc_ids, paths, per_doc)):
+        for row in _exec_fetchall(conn, sql, (doc_ids, paths, exclude_origins, per_doc)):
             path, subject, predicate, value, kind, confidence, valid_from, project, total, cnt, latest_day = (
                 row
             )

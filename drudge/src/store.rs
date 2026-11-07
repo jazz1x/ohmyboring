@@ -900,12 +900,16 @@ impl NewerOpen {
 }
 
 /// `LEFT JOIN LATERAL` over a relation `b` that has subject, predicate, kind, valid_from; yields
-/// `nv.cnt` and `nv.latest_day`. Run on the already-limited rows so the count touches only what is shown.
+/// `nv.cnt` and `nv.latest_day`, and binds `$4` as the excluded origins: a newer row whose note has
+/// one is not counted (the shown rows are never filtered by it). Run on the already-limited rows
+/// so the count touches only what is shown.
 const NEWER_OPEN_LATERAL_SQL: &str = "LEFT JOIN LATERAL (
          SELECT COUNT(*) AS cnt,
                 to_char(max(n.valid_from) AT TIME ZONE 'Asia/Seoul', 'MM-DD') AS latest_day
            FROM claim n
+           JOIN document dn ON dn.source_path = n.source_path
           WHERE b.kind IN ('next', 'blocked')
+            AND NOT (dn.origin = ANY($4))
             AND n.subject = b.subject AND n.predicate = b.predicate
             AND n.valid_from > b.valid_from
             AND n.kind IN ('next', 'blocked')
@@ -2711,7 +2715,7 @@ impl Store {
         &self,
         paths: &[String],
         per_doc: i64,
-        _exclude_origins: &[String],
+        exclude_origins: &[String],
     ) -> Result<HashMap<String, RegisterRows>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
         let sql = format!(
@@ -2761,7 +2765,7 @@ impl Store {
         let rows = self
             .db()
             .await?
-            .query(&sql, &[&doc_ids, &paths, &per_doc])
+            .query(&sql, &[&doc_ids, &paths, &per_doc, &exclude_origins])
             .await
             .context("declared claims")?;
         let mut map: HashMap<String, RegisterRows> = HashMap::new();
