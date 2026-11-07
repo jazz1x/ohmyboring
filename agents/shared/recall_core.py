@@ -249,6 +249,13 @@ def consumption_note(hit: dict) -> str:
 CLAIM_VALUE_MAX = 200
 
 
+def newer_open_mark(row: dict) -> str:
+    """The engine's count of newer open values in this row's slot, as the fact it is: never
+    "stale" or "done", because the row stays shown and a label can't tell which it is."""
+    newer = row.get("newer_open")
+    return f" (같은 칸 더 새 값 {newer['count']}, 최신 {newer['latest_day']})" if newer else ""
+
+
 def claim_lines(hit: dict) -> list[str]:
     """The claims this hit handed over, one line each, as the settled thing they are.
 
@@ -266,7 +273,9 @@ def claim_lines(hit: dict) -> list[str]:
         predicate = " ".join((r.get("predicate") or "").split())
         if not value:
             continue
-        out.append(f"  · [{r.get('kind') or 'claim'}] {subject} {predicate}: {value}".rstrip())
+        out.append(
+            f"  · [{r.get('kind') or 'claim'}] {subject} {predicate}: {value}{newer_open_mark(r)}".rstrip()
+        )
     total = int(hit.get("claims_total") or 0)
     if out and total > len(rows):
         out[-1] += f" (declared {total}, handed over {len(rows)})"
