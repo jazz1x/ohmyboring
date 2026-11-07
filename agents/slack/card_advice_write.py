@@ -32,13 +32,17 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
 import card_advice  # noqa: E402
 import card_types  # noqa: E402
-from card_types import MIN_ADVICE_CHARS, MIN_BOTTLENECK_CHARS, Proposal  # noqa: E402
+from card_types import MIN_ADVICE_CHARS, MIN_BOTTLENECK_CHARS, AdviseStats, Proposal  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from ohmyboring.distill import polish  # noqa: E402
 
 #: The 사건 the card reads.
 EVENT = "card_advice_written"
+
+#: One row per finished run, however many proposals it wrote — what says why a day's EVENT
+#: rows are zero (advise_stats otherwise dies with the run).
+RUN_EVENT = "card_advice_run"
 
 #: How far back the card looks for it — a day is picked by the row's own `day`, this only
 #: bounds the read.
@@ -180,6 +184,29 @@ def event_fields(proposal: Proposal, *, day: str, run: str, rank: int, revise: R
         "bottleneck": proposal.bottleneck,
         "advice": proposal.advice,
         "evidence": [e.model_dump() for e in proposal.evidence],
+    }
+
+
+def run_event_fields(
+    stats: AdviseStats,
+    *,
+    day: str,
+    run: str,
+    candidates: int,
+    unresolved: int,
+    same_note: int,
+    suppressed: int,
+    written: int,
+) -> dict[str, Any]:
+    return {
+        "day": day,
+        "run": run,
+        "candidates": candidates,
+        **stats.model_dump(),
+        "unresolved": unresolved,
+        "same_note": same_note,
+        "suppressed": suppressed,
+        "written": written,
     }
 
 
