@@ -190,15 +190,9 @@ days_since() {
     echo $(( ( $(date +%s) - then_epoch ) / 86400 ))
 }
 
+# Reads a newest-first listing of the marker dir on stdin, for the same argument limit as above.
 newest_session_marker() {
-    # shellcheck disable=SC2086
-    for f in $(ls -t $1 2>/dev/null); do
-        case "$(basename "$f")" in
-            codex-*) continue ;;
-        esac
-        printf '%s\n' "$f"
-        return 0
-    done
+    awk -v dir="$MARK_DIR" '/\.ts$/ && !/^codex-/ { print dir "/" $0; exit }'
 }
 
 mtime_epoch() {
@@ -537,12 +531,16 @@ fi
 
 # (d2) Newest SessionEnd hook marker — proof the hook itself fired (it stamps MARK_DIR after
 # a successful remember). A fresh note but a stale marker (or vice-versa) localizes the break.
-mark=$(newest_session_marker "$MARK_DIR/*.ts")
-if [ -n "$mark" ]; then
-    ok "newest Claude SessionEnd hook marker: $(mtime_human "$mark") ($(days_since "$mark") days ago)"
-    echo "    $mark"
+if mark_listing=$(ls -t "$MARK_DIR" 2>&1); then
+    mark=$(printf '%s\n' "$mark_listing" | newest_session_marker)
+    if [ -n "$mark" ]; then
+        ok "newest Claude SessionEnd hook marker: $(mtime_human "$mark") ($(days_since "$mark") days ago)"
+        echo "    $mark"
+    else
+        bad "no Claude hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
+    fi
 else
-    bad "no Claude hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
+    bad "cannot measure newest hook marker — $mark_listing"; failed_marker=1
 fi
 
 # (d2b) Marker dir and stale marker health — proof the queue can still progress.
