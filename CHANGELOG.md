@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Changed
+- **feat(hooks): 회상 주입 claim 줄에 같은 칸의 더 새 열린 값을 사실로 표시** — 엔진이 세어 주는 `newer_open` 을 `claim_lines` 가 ` (같은 칸 더 새 값 n, 최신 MM-DD)` 로 붙인다. 숨기지 않고 낡음·끝남이라 적지 않는다. 값이 없으면 줄은 그대로다. `newer_open` 을 주는 엔진은 트렁크 ae86cd4 부터다.
 - **fix(doctor): 가장 최근 노트를 번호 순으로 고른다** — 노트 번호가 다섯 자리(wiki-10000~)로 넘어가자 글자 순 정렬이 wiki-9999 를 최신으로 골라, 신선도(d5)가 오래된 노트를 재고 2026-10-29 23:12 에 거짓 빨강을 낼 참이었다. `wiki-` 뒤 숫자로 정렬한다.
 - **fix(doctor): known-losses 목록을 추적하지 않는 로컬 경로로** — 실제 세션 id 가 든 `data/contract/known-losses.tsv` 를 추적에서 빼고 doctor 가 `data/local/known-losses.tsv`(gitignored, `DOCTOR_KNOWN_LOSSES` 로 덮어씀)를 읽는다. dead 표지가 있는데 목록 파일이 없으면 「cannot measure」 별도 ✗ 줄.
 - **fix(doctor): `drudge audit` 실패를 원인별로 가른다** — Postgres 락 대기로 audit 이 실패한 것을 「boring.json 을 못 읽는다」로 찍던 것. 엔진이 파싱 실패에 내는 `Error: …boring.json` 줄일 때만 CANNOT parse, 그 밖의 실패는 종료 코드와 `[config] warning:` 을 뺀 실제 출력을 단 별도 ✗ 줄. audit 은 한 번만 돈다.

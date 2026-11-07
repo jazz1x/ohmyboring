@@ -252,6 +252,27 @@ def test_a_hit_that_declares_a_decision_puts_it_in_the_prompt():
     assert "declared 3, handed over 1" in ctx, ctx
 
 
+def test_a_claim_with_a_newer_open_value_says_so_and_its_neighbour_does_not():
+    """The engine counts newer open values in the same slot; the line states that as a fact and
+    still shows the row. A row with no count reads as it did."""
+    hit = {
+        "claims": [
+            {
+                "subject": "pool",
+                "predicate": "next",
+                "value": "resize",
+                "kind": "next",
+                "newer_open": {"count": 2, "latest_day": "11-05"},
+            },
+            {"subject": "pool", "predicate": "owner", "value": "ops", "kind": "next"},
+        ],
+    }
+    assert recall_core.claim_lines(hit) == [
+        "  · [next] pool next: resize (같은 칸 더 새 값 2, 최신 11-05)",
+        "  · [next] pool owner: ops",
+    ]
+
+
 def test_a_hit_with_no_claims_reads_exactly_as_it_did_before():
     """The claim line is additive. A hit the engine handed no claims for injects the same bytes
     it injected before this change — otherwise the render, not the ask, is the channel change."""
