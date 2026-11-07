@@ -531,13 +531,16 @@ fi
 
 # (d2) Newest SessionEnd hook marker — proof the hook itself fired (it stamps MARK_DIR after
 # a successful remember). A fresh note but a stale marker (or vice-versa) localizes the break.
-if mark_listing=$(ls -t "$MARK_DIR" 2>&1); then
+no_hook_markers="no Claude hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"
+if [ ! -d "$MARK_DIR" ]; then
+    bad "$no_hook_markers"; failed_marker=1
+elif mark_listing=$(ls -t "$MARK_DIR" 2>&1); then
     mark=$(printf '%s\n' "$mark_listing" | newest_session_marker)
     if [ -n "$mark" ]; then
         ok "newest Claude SessionEnd hook marker: $(mtime_human "$mark") ($(days_since "$mark") days ago)"
         echo "    $mark"
     else
-        bad "no Claude hook markers in $MARK_DIR — the SessionEnd hook has not fired (installed in ~/.claude/settings.json?)"; failed_marker=1
+        bad "$no_hook_markers"; failed_marker=1
     fi
 else
     bad "cannot measure newest hook marker — $mark_listing"; failed_marker=1
