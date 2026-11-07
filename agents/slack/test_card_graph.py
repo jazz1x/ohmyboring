@@ -2912,7 +2912,23 @@ class AdviceAheadTests(unittest.TestCase):
         self.assertEqual(len(stubs.propose_calls), 3)
         self.assertEqual(self.sends, [])
         self.assertEqual(self.handovers, [])
-        self.assertEqual([name for name, _ in events if name != aw.EVENT], [])
+        self.assertEqual([name for name, _ in events if name != aw.EVENT], [aw.RUN_EVENT])
+
+    def test_a_run_with_no_proposal_still_leaves_one_row_with_the_reasons(self):
+        stubs = Stubs(responses=[NOT_WORTH_JSON] * len(CANDIDATE_QUEUE))
+        events: list[tuple[str, dict]] = []
+        collabs = self._collabs(stubs)._replace(record=lambda name, fields: events.append((name, fields)))
+        card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        self.assertEqual([name for name, _ in events], [aw.RUN_EVENT])
+        row = events[0][1]
+        self.assertEqual(row["day"], aw.today_kst())
+        self.assertEqual(row["written"], 0)
+        self.assertEqual(row["candidates"], len(CANDIDATE_QUEUE))
+        self.assertEqual(row["calls"], len(CANDIDATE_QUEUE))
+        self.assertEqual(row["proposals_passed"], 0)
+        self.assertEqual(row["not_worth"], len(CANDIDATE_QUEUE))
+        self.assertEqual(row["not_worth_reasons"], ["근거가 약하다"] * len(CANDIDATE_QUEUE))
+        self.assertEqual((row["unresolved"], row["same_note"], row["suppressed"]), (0, 0, 0))
 
     def test_a_still_flagged_rewrite_is_stored_as_the_original_and_marked(self):
         stubs = Stubs()

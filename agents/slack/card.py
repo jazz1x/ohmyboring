@@ -170,6 +170,8 @@ class CardState(TypedDict):
     past_verdicts: card_types.PastCardHistory  # read once in read_history, shared by advise and resolve
     advise_stats: card_types.AdviseStats
     suppressed_count: int
+    unresolved_count: int  # resolve's drop: subject with no note
+    same_note_count: int  # resolve's drop: a second proposal on an already picked note
     advice_revisions: list[
         str
     ]  # the advice step's store_advice: one card_advice_written `revise` tag per row
@@ -466,16 +468,25 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         the coarser call-saver; this pair-level filter stays the source of truth."""
         picked: list[card_types.Proposal] = []
         seen_notes: set[str] = set()
+        unresolved = 0
+        same_note = 0
         for proposal in state["proposals"]:
             result = _resolve(proposal.subject, proposal.register_)
             if isinstance(result, card_types.Unresolved):
+                unresolved += 1
                 continue
             if result.note in seen_notes:
+                same_note += 1
                 continue
             seen_notes.add(result.note)
             picked.append(proposal.model_copy(update={"note": result.note}))
         kept, dropped = card_verdicts.suppressed(picked, state["past_verdicts"])
-        return {"proposals": kept, "suppressed_count": len(dropped)}
+        return {
+            "proposals": kept,
+            "suppressed_count": len(dropped),
+            "unresolved_count": unresolved,
+            "same_note_count": same_note,
+        }
 
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
@@ -567,7 +578,8 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         """The advice step's last node: each proposal that survived advise → resolve is
         rewritten once for a first-time reader (card_advice_write.revise) and stored as one
         card_advice_written 사건, rank in the order the card will show them. The run stamp
-        groups one run's rows, so a second run the same morning replaces the first."""
+        groups one run's rows, so a second run the same morning replaces the first. One
+        card_advice_run row closes every run, zero proposals included, with the reasons."""
         run = datetime.now(UTC).isoformat()
         day = card_advice_write.today_kst()
         revisions: list[str] = []
@@ -580,6 +592,19 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
                     revised.proposal, day=day, run=run, rank=rank, revise=revised.revise
                 ),
             )
+        collabs.record(
+            card_advice_write.RUN_EVENT,
+            card_advice_write.run_event_fields(
+                state["advise_stats"],
+                day=day,
+                run=run,
+                candidates=sum(state["per_project_candidates"].values()),
+                unresolved=state["unresolved_count"],
+                same_note=state["same_note_count"],
+                suppressed=state["suppressed_count"],
+                written=len(revisions),
+            ),
+        )
         return {"advice_revisions": revisions}
 
     return {
