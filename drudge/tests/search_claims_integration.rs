@@ -113,7 +113,7 @@ async fn declared_claims_returns_newest_first_and_states_the_cut() {
     }
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 2)
+        .declared_claims(std::slice::from_ref(&path), 2, &[])
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
@@ -199,7 +199,7 @@ async fn declared_claims_skips_rows_without_claims_edge() {
     .await;
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 10)
+        .declared_claims(std::slice::from_ref(&path), 10, &[])
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
@@ -253,7 +253,7 @@ async fn search_claims_hand_over_a_fact_only_note() {
 
     // /search keeps it (C-DSHAPE2): the note's only live claim is the fact.
     let included = store
-        .declared_claims(std::slice::from_ref(&path), 10)
+        .declared_claims(std::slice::from_ref(&path), 10, &[])
         .await
         .expect("declared claims");
     let rows = included.get(&path).expect("search hands the fact over");
@@ -303,7 +303,7 @@ async fn search_claims_prefer_a_decision_over_a_fact_at_one_per_hit() {
     .await;
 
     let declared = store
-        .declared_claims(std::slice::from_ref(&path), 1)
+        .declared_claims(std::slice::from_ref(&path), 1, &[])
         .await
         .expect("declared claims");
     let rows = declared.get(&path).expect("claims");
@@ -344,7 +344,7 @@ async fn declared_claims_node_id_is_canonical() {
     .await;
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 10)
+        .declared_claims(std::slice::from_ref(&path), 10, &[])
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");
@@ -419,7 +419,7 @@ async fn declared_claims_prefers_decisions_then_next_then_risk() {
     .await;
 
     let mut declared = store
-        .declared_claims(std::slice::from_ref(&path), 10)
+        .declared_claims(std::slice::from_ref(&path), 10, &[])
         .await
         .expect("declared claims");
     let rows = declared.remove(&path).expect("the hit's claims");

@@ -1163,8 +1163,8 @@ async fn claim_reads_equal_pg_over_the_same_rows() {
         v
     };
     for per_doc in [10_i64, 2] {
-        let a = flat(pg.declared_claims(&paths, per_doc).await.unwrap());
-        let b = flat(routed.declared_claims(&paths, per_doc).await.unwrap());
+        let a = flat(pg.declared_claims(&paths, per_doc, &[]).await.unwrap());
+        let b = flat(routed.declared_claims(&paths, per_doc, &[]).await.unwrap());
         assert!(a.len() >= 5, "declared_claims: oracle {} notes", a.len());
         same(&format!("declared_claims per_doc={per_doc}"), &a, &b);
     }

@@ -852,7 +852,6 @@ class RegisterParityTests(unittest.TestCase):
             "risks": ["risk", "assumption", "blocked"],
             "facts": ["fact"],
             "glossary": ["term"],
-            "next_actions": ["next", "blocked"],
         }
         for section, kinds in expected.items():
             oracle_rows = self._oracle_claims(5, None, kinds, ())
@@ -872,8 +871,13 @@ class RegisterParityTests(unittest.TestCase):
                 pass
             case other:
                 self.fail(f"context_payload failed: {other!r}")
-        next_subjects = {item["subject"]: item for item in card["next_actions"]}
-        self.assertEqual(next_subjects["subj-deny"]["kind"], "fact", "작업 부정 값은 fact 로 정규화")
+        match registers_pg.recent_claims(self.conn, 50, None, registers_pg.NEXT_ACTION_KINDS, ()):
+            case registers_pg.Ok(next_rows):
+                pass
+            case other:
+                self.fail(f"recent_claims failed: {other!r}")
+        next_items = {row.subject: row.as_context_item() for row in next_rows}
+        self.assertEqual(next_items["subj-deny"]["kind"], "fact", "작업 부정 값은 fact 로 정규화")
         fact_subjects = {item["subject"] for item in card["facts"]}
         self.assertIn("subj-fact", fact_subjects)
         self.assertNotIn("subj-empty", fact_subjects, "빈 kind 는 SQL 필터(원시 칸)에 안 걸러 fact 가 아니다")
@@ -889,7 +893,6 @@ class RegisterParityTests(unittest.TestCase):
             "risks": ["risk", "assumption", "blocked"],
             "facts": ["fact"],
             "glossary": ["term"],
-            "next_actions": ["next", "blocked"],
         }.items():
             oracle_rows = self._oracle_claims(2, None, kinds, ())
             self.assertEqual(len(card[section]), min(2, len(oracle_rows)))
@@ -1009,6 +1012,27 @@ class NorthStarFrontTests(unittest.TestCase):
 
         self.assertEqual(registers_pg.with_north_star(None, found, other), other)
         self.assertEqual(registers_pg.with_north_star("", found, other), other)
+
+
+class NewerOpenMarkTests(unittest.TestCase):
+    def _row(self, newer_open):
+        return registers_pg.RegisterRow(
+            subject="s", predicate="p", value="v", kind="next", confidence="certain", newer_open=newer_open
+        )
+
+    def test_mark_is_appended_only_when_a_newer_open_value_exists(self):
+        marked = registers_pg.render_register((self._row(registers_pg.NewerOpen(2, "11-07")),), False, 1)
+        self.assertTrue(
+            marked.endswith("(kind=next, confidence=certain) (같은 칸 더 새 값 2, 최신 11-07)"), marked
+        )
+        plain = registers_pg.render_register((self._row(None),), False, 1)
+        self.assertTrue(plain.endswith("(kind=next, confidence=certain)"), plain)
+
+    def test_item_carries_newer_open_only_when_present(self):
+        self.assertNotIn("newer_open", self._row(None).as_item())
+        item = self._row(registers_pg.NewerOpen(2, "11-07")).as_item()
+        self.assertEqual(item["newer_open"], {"count": 2, "latest_day": "11-07"})
+        self.assertEqual(list(item)[-2:], ["project", "newer_open"])
 
 
 if __name__ == "__main__":

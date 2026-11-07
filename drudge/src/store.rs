@@ -870,7 +870,51 @@ pub struct RegisterRow {
     #[serde(serialize_with = "serialize_valid_from")]
     pub valid_from: SystemTime,
     pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newer_open: Option<NewerOpen>,
 }
+
+/// A `next`/`blocked` row's slot (same subject and predicate) also holds newer open
+/// `next`/`blocked` rows: how many, and the day of the newest (Asia/Seoul, `MM-DD`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NewerOpen {
+    pub count: i64,
+    pub latest_day: String,
+}
+
+impl NewerOpen {
+    /// The mark appended to a shown row; one wording for the register line and the recall line.
+    pub fn mark(&self) -> String {
+        format!(
+            " (같은 칸 더 새 값 {}, 최신 {})",
+            self.count, self.latest_day
+        )
+    }
+
+    /// From the two SQL columns of `NEWER_OPEN_LATERAL_SQL`: no newer row means no value.
+    fn from_sql(count: i64, latest_day: Option<String>) -> Option<Self> {
+        latest_day
+            .filter(|_| count > 0)
+            .map(|latest_day| Self { count, latest_day })
+    }
+}
+
+/// `LEFT JOIN LATERAL` over a relation `b` that has subject, predicate, kind, valid_from; yields
+/// `nv.cnt` and `nv.latest_day`, and binds `$4` as the excluded origins: a newer row whose note has
+/// one is not counted (the shown rows are never filtered by it). Run on the already-limited rows
+/// so the count touches only what is shown.
+const NEWER_OPEN_LATERAL_SQL: &str = "LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS cnt,
+                to_char(max(n.valid_from) AT TIME ZONE 'Asia/Seoul', 'MM-DD') AS latest_day
+           FROM claim n
+           JOIN document dn ON dn.source_path = n.source_path
+          WHERE b.kind IN ('next', 'blocked')
+            AND NOT (dn.origin = ANY($4))
+            AND n.subject = b.subject AND n.predicate = b.predicate
+            AND n.valid_from > b.valid_from
+            AND n.kind IN ('next', 'blocked')
+            AND n.superseded_at IS NULL AND n.stale_at IS NULL
+     ) nv ON true";
 
 fn serialize_valid_from<S: serde::Serializer>(
     valid_from: &SystemTime,
@@ -907,7 +951,13 @@ impl RegisterRow {
             confidence: claim.confidence().to_owned(),
             valid_from,
             project,
+            newer_open: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_newer_open(self, newer_open: Option<NewerOpen>) -> Self {
+        Self { newer_open, ..self }
     }
 
     /// The plain claim this row carries (no `said_by`: a register row never held one).
@@ -2602,12 +2652,15 @@ impl Store {
         kinds: Option<&[String]>,
         exclude_origins: &[String],
     ) -> Result<RegisterRows> {
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,
-                        COUNT(*) OVER () AS total
+        let sql = format!(
+            "WITH b AS (
+                 SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,
+                        COUNT(*) OVER () AS total,
+                        ROW_NUMBER() OVER (
+                            ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
+                                   + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
+                                     c.valid_from DESC, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
+                        ) AS rn
                    FROM claim c
                    JOIN document d ON d.source_path = c.source_path
                   WHERE c.superseded_at IS NULL
@@ -2615,10 +2668,20 @@ impl Store {
                     AND ($3::text[] IS NULL OR c.kind = ANY($3))
                     AND NOT (d.origin = ANY($4))
                     AND d.source_path !~ $5
-                  ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
-                         + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
-                           c.valid_from DESC, c.subject COLLATE \"C\", c.predicate COLLATE \"C\"
-                  LIMIT $1;",
+                  ORDER BY rn
+                  LIMIT $1
+             )
+             SELECT b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from, b.project,
+                    b.total, nv.cnt, nv.latest_day
+               FROM b
+               {NEWER_OPEN_LATERAL_SQL}
+              ORDER BY b.rn;"
+        );
+        let rows = self
+            .db()
+            .await?
+            .query(
+                &sql,
                 &[
                     &k,
                     &project,
@@ -2632,7 +2695,10 @@ impl Store {
             .await
             .context("recent register rows")?;
         Ok(RegisterRows {
-            rows: rows.iter().map(register_row).collect(),
+            rows: rows
+                .iter()
+                .map(|r| register_row(r).with_newer_open(NewerOpen::from_sql(r.get(8), r.get(9))))
+                .collect(),
             total_matching: rows.first().map_or(0, |r| r.get::<_, i64>(7)),
         })
     }
@@ -2649,13 +2715,11 @@ impl Store {
         &self,
         paths: &[String],
         per_doc: i64,
+        exclude_origins: &[String],
     ) -> Result<HashMap<String, RegisterRows>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
-        let rows = self
-            .db()
-            .await?
-            .query(
-                "WITH asked AS (
+        let sql = format!(
+            "WITH asked AS (
                      SELECT unnest($1::text[]) AS doc_id, unnest($2::text[]) AS path
                  ),
                  declared AS (
@@ -2691,12 +2755,17 @@ impl Store {
                      ) AS rn
                      FROM ranked
                  )
-                 SELECT doc_path, subject, predicate, value, kind, confidence, valid_from, project, total
-                 FROM picked
-                 WHERE rn <= $3
-                 ORDER BY doc_path, rn;",
-                &[&doc_ids, &paths, &per_doc],
-            )
+                 SELECT b.doc_path, b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from,
+                        b.project, b.total, nv.cnt, nv.latest_day
+                 FROM picked b
+                 {NEWER_OPEN_LATERAL_SQL}
+                 WHERE b.rn <= $3
+                 ORDER BY b.doc_path, b.rn;"
+        );
+        let rows = self
+            .db()
+            .await?
+            .query(&sql, &[&doc_ids, &paths, &per_doc, &exclude_origins])
             .await
             .context("declared claims")?;
         let mut map: HashMap<String, RegisterRows> = HashMap::new();
@@ -2706,15 +2775,18 @@ impl Store {
                 rows: Vec::new(),
                 total_matching: r.get(8),
             });
-            entry.rows.push(RegisterRow::new(
-                r.get(1),
-                r.get(2),
-                r.get(3),
-                r.get(4),
-                r.get(5),
-                r.get(6),
-                r.get(7),
-            ));
+            entry.rows.push(
+                RegisterRow::new(
+                    r.get(1),
+                    r.get(2),
+                    r.get(3),
+                    r.get(4),
+                    r.get(5),
+                    r.get(6),
+                    r.get(7),
+                )
+                .with_newer_open(NewerOpen::from_sql(r.get(9), r.get(10))),
+            );
         }
         Ok(map)
     }

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::llm::Llm;
 use crate::retrieve;
-use crate::store::{RegisterRow, Store};
+use crate::store::{NewerOpen, RegisterRow, Store};
 use crate::vector::VectorIndex;
 use crate::wiki_recall;
 
@@ -793,12 +793,17 @@ fn render_register(rows: &[RegisterRow], limit_applied: bool, total_matching: i6
     for r in rows {
         let _ = writeln!(
             out,
-            "* {subject} — {predicate}: {value} (kind={kind}, confidence={confidence})",
+            "* {subject} — {predicate}: {value} (kind={kind}, confidence={confidence}){mark}",
             subject = r.subject,
             predicate = r.predicate,
             value = r.value,
             kind = r.kind,
             confidence = r.confidence,
+            mark = r
+                .newer_open
+                .as_ref()
+                .map(NewerOpen::mark)
+                .unwrap_or_default(),
         );
     }
     out.trim_end().to_owned()
@@ -945,7 +950,6 @@ pub struct ContextCard {
     pub risks: Vec<ContextItem>,
     pub facts: Vec<ContextItem>,
     pub glossary: Vec<ContextItem>,
-    pub next_actions: Vec<ContextItem>,
     pub language: String,
 }
 
@@ -1019,21 +1023,12 @@ pub async fn context_card(
     let glossary = store
         .recent_claims(k, project, Some(&["term".to_owned()]), exclude_origins)
         .await?;
-    let next_actions = store
-        .recent_claims(
-            k,
-            project,
-            Some(&["next".to_owned(), "blocked".to_owned()]),
-            exclude_origins,
-        )
-        .await?;
 
     Ok(ContextCard {
         decisions: decisions.iter().map(ContextItem::from).collect(),
         risks: risks.iter().map(ContextItem::from).collect(),
         facts: facts.iter().map(ContextItem::from).collect(),
         glossary: glossary.iter().map(ContextItem::from).collect(),
-        next_actions: next_actions.iter().map(ContextItem::from).collect(),
         language: lang.to_owned(),
     })
 }

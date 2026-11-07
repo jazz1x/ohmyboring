@@ -250,9 +250,13 @@ impl Store {
         &self,
         paths: &[String],
         per_doc: i64,
+        exclude_origins: &[String],
     ) -> Result<HashMap<String, RegisterRows>> {
         match &self.vector_route {
-            VectorRoute::Pgvector => self.declared_claims_pg(paths, per_doc).await,
+            VectorRoute::Pgvector => {
+                self.declared_claims_pg(paths, per_doc, exclude_origins)
+                    .await
+            }
             VectorRoute::Surreal(client) => {
                 let asked: Vec<(String, String)> = paths
                     .iter()

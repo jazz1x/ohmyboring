@@ -171,7 +171,8 @@ def recall_text(
 
 
 def _claim_line(row: pg.RegisterRow) -> str:
-    return f"  · {row.kind} {row.subject}/{row.predicate}: {row.value}"
+    mark = "" if row.newer_open is None else row.newer_open.mark()
+    return f"  · {row.kind} {row.subject}/{row.predicate}: {row.value}{mark}"
 
 
 def _refined_entry(  # noqa: PLR0913
@@ -420,7 +421,9 @@ def _vector_lines(read_only_dsn: str, args: Args) -> Either[list[Line], str]:
             return Ok([(doc.metadata["source_path"], doc.page_content) for doc in documents])
 
 
-def claims_of(dsn: str, paths: list[str]) -> Either[dict[str, pg.RegisterRows], str]:
+def claims_of(
+    dsn: str, paths: list[str], exclude_origins: tuple[str, ...]
+) -> Either[dict[str, pg.RegisterRows], str]:
     """읽기 전용 연결로 경로들의 현재 claims 를 한 번 읽는다 — 그림자가 엔진이 고른 노트에 쓴다."""
     try:
         read_only_dsn = make_conninfo(dsn, options=READ_ONLY_OPTIONS)
@@ -432,16 +435,17 @@ def claims_of(dsn: str, paths: list[str]) -> Either[dict[str, pg.RegisterRows], 
         case Ok(conn):
             pass
     with contextlib.closing(conn):
-        return _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE))
+        return _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE, exclude_origins))
 
 
-def run(
+def run(  # noqa: PLR0913
     arguments: dict,
     *,
     dsn: str,
     wiki_dir: Path,
     index: wiki.WikiIndex,
     now_ns: int,
+    exclude_origins: tuple[str, ...],
 ) -> Either[Recalled, Rejected | Failed]:
     """문 경계 — 인자를 한 번 좁히고, 읽기 전용 연결 하나를 열어 answer 에 seams 로 건넨다."""
     match parse_args(arguments):
@@ -463,7 +467,9 @@ def run(
         rank_facts=lambda paths: _detail(pg.rank_facts(conn, paths)),
         vector=lambda a: _vector_lines(read_only_dsn, a),
         superseded_by=lambda paths: _detail(pg.superseded_by(conn, paths)),
-        current_claims=lambda paths: _detail(pg.current_claims(conn, paths, _CLAIMS_PER_NOTE)),
+        current_claims=lambda paths: _detail(
+            pg.current_claims(conn, paths, _CLAIMS_PER_NOTE, exclude_origins)
+        ),
         concepts=lambda paths: _detail(pg.concepts_by_doc(conn, paths)),
     )
     with contextlib.closing(conn):

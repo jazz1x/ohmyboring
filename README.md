@@ -522,7 +522,7 @@ Memory can be reached through HTTP endpoints or the MCP server (`http://localhos
 
 | Endpoint / MCP tool | Purpose | Vector backend |
 |---|---|---|
-| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary, next_actions | not required |
+| `POST /context` / `context` | Structured context card: decisions, risks, facts, glossary | not required |
 | `POST /next_actions` / `next_actions` | Next-action register: explicit next steps + active blockers | required |
 | `POST /stalled` / `stalled` | Stalled register: old next steps and blockers | required |
 | `POST /recurrences` / `recurrences` | Recurrence register: recent risk/blocked claims repeating an older one | required |

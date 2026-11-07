@@ -628,7 +628,7 @@ def test_failed_rank_facts_lookup_fails_the_recall():
 
 def test_run_rejects_before_connecting_and_reports_a_dead_store_as_a_value():
     with tempfile.TemporaryDirectory() as tmp:
-        common = {"wiki_dir": Path(tmp), "index": _index(), "now_ns": 0}
+        common = {"wiki_dir": Path(tmp), "index": _index(), "now_ns": 0, "exclude_origins": ()}
         dead = "postgresql://u:p@127.0.0.1:9/none"
         assert answer.run({"query": " "}, dsn=dead, **common) == Err(
             answer.Rejected("missing argument: query")

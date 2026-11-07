@@ -376,7 +376,7 @@ pub(crate) async fn handle_recurrences(
     }))
 }
 
-/// Structured context card for agent session start — decisions/risks/facts/glossary/next_actions as claim lists.
+/// Structured context card for agent session start — decisions/risks/facts/glossary as claim lists.
 /// Uses recency ordering (no vector search), so it works when BORING_VECTOR=off.
 pub(crate) async fn handle_context(
     State(s): State<AppState>,
@@ -399,7 +399,6 @@ pub(crate) async fn handle_context(
             risks: vec![],
             facts: vec![],
             glossary: vec![],
-            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };
@@ -440,14 +439,19 @@ async fn attach_consumption(store: &Store, hits: &mut [SearchHit]) -> Result<(),
 /// for the whole response, never one per hit. At `0` — absent or explicit — nothing is attached
 /// and no query runs: the response stays byte-identical to what the freeze window measures.
 /// No store (wiki-recall fallback): hits keep empty `claims`, no error — same contract as `related`.
-async fn attach_claims(store: &Store, hits: &mut [SearchHit], per_hit: u32) -> Result<(), Staged> {
+async fn attach_claims(
+    store: &Store,
+    hits: &mut [SearchHit],
+    per_hit: u32,
+    exclude_origins: &[String],
+) -> Result<(), Staged> {
     if per_hit == 0 {
         return Ok(());
     }
     let paths: Vec<String> = hits.iter().map(|h| h.source_path.clone()).collect();
     // /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
     let declared = store
-        .declared_claims(&paths, i64::from(per_hit))
+        .declared_claims(&paths, i64::from(per_hit), exclude_origins)
         .await
         .map_err(stage("claims"))?;
     for hit in hits.iter_mut() {
@@ -516,7 +520,13 @@ async fn search_hits_inner(
     // Graph-backed enrichments beside every hit — one grouped query each (consumption counts,
     // and the opt-in claims handover). `claims=0` is the §5-R6 frozen shape: no query runs.
     attach_consumption(store, &mut mapped).await?;
-    attach_claims(store, &mut mapped, req.claims()).await?;
+    attach_claims(
+        store,
+        &mut mapped,
+        req.claims(),
+        &s.cfg.origins_excluded_by_policy(),
+    )
+    .await?;
     // Opt-in graph read: beside each of the first `related_heads` hits, the older notes that
     // share a concept with it. The concept walk, not the shared-node walk — measured 2026-09-10,
     // shared nodes between recent notes are almost all `tool:*`, so the node walk links everything
@@ -1691,7 +1701,7 @@ mod tests {
             claims_total: None,
             over_ceiling: false,
         };
-        super::attach_claims(store, std::slice::from_mut(&mut hit), req.claims())
+        super::attach_claims(store, std::slice::from_mut(&mut hit), req.claims(), &[])
             .await
             .unwrap();
         serde_json::to_string(&crate::serve::SearchResp { hits: vec![hit] }).unwrap()

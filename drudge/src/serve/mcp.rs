@@ -965,7 +965,8 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             eprintln!("[mcp] handover for session {session_id} failed: {error:#}");
         }
     }
-    let (claims, concepts) = claims_and_concepts(s.store.as_deref(), &paths).await?;
+    let excluded = s.cfg.origins_excluded_by_policy();
+    let (claims, concepts) = claims_and_concepts(s.store.as_deref(), &paths, &excluded).await?;
     Ok(refined_text(&lines, &superseded, &claims, &titles, &concepts) + &failed_tail)
 }
 
@@ -978,12 +979,15 @@ type ClaimsAndConcepts = (
 async fn claims_and_concepts(
     store: Option<&crate::store::Store>,
     paths: &[String],
+    exclude_origins: &[String],
 ) -> Result<ClaimsAndConcepts, (i32, String)> {
     let Some(store) = store else {
         return Ok((HashMap::new(), HashMap::new()));
     };
     // Python answer.py: both are read, and a claims failure is reported before a concepts one.
-    let claims = store.declared_claims(paths, CLAIMS_PER_NOTE).await;
+    let claims = store
+        .declared_claims(paths, CLAIMS_PER_NOTE, exclude_origins)
+        .await;
     let concepts = store.concepts_of(paths).await;
     let claims = claims.map_err(|e| (-32603_i32, format!("recall claims: {e:#}")))?;
     let concepts = concepts.map_err(|e| (-32603_i32, format!("recall concepts: {e:#}")))?;
@@ -1142,12 +1146,17 @@ fn refined_entry(
             .lines()
             .map(str::to_owned),
     );
-    out.extend(
-        register
-            .rows
-            .iter()
-            .map(|r| format!("  · {} {}/{}: {}", r.kind, r.subject, r.predicate, r.value)),
-    );
+    out.extend(register.rows.iter().map(|r| {
+        let mark = r
+            .newer_open
+            .as_ref()
+            .map(crate::store::NewerOpen::mark)
+            .unwrap_or_default();
+        format!(
+            "  · {} {}/{}: {}{mark}",
+            r.kind, r.subject, r.predicate, r.value
+        )
+    }));
     let hidden = register.total_matching - i64::try_from(register.rows.len()).unwrap_or(i64::MAX);
     if hidden > 0 {
         out.push(format!("  · … +{hidden} more"));
@@ -1596,7 +1605,6 @@ async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
             risks: vec![],
             facts: vec![],
             glossary: vec![],
-            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };

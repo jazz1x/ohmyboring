@@ -68,6 +68,7 @@ class _State:
     related: int
     related_heads: int
     stack: contextlib.ExitStack
+    exclude_origins: tuple[str, ...] = ()
     vector: list[float] = field(default_factory=list)
     conn: Any = None
     vec_hits: list[rank.Hit] = field(default_factory=list)
@@ -192,7 +193,7 @@ def _claims(state: _State) -> Either[_State, SearchFailure]:
     # /search 도 fact 포함: fact 전용 노트 105개가 claim 줄 0 이던 것(C-DSHAPE2-1, 10-27), wiki-5375 와 같은 이유
     return _capture(
         state,
-        pg.current_claims(state.conn, _paths(state.ordered), per_hit),
+        pg.current_claims(state.conn, _paths(state.ordered), per_hit, state.exclude_origins),
         "claims",
         "declared",
     )
@@ -310,6 +311,7 @@ class PgRetriever(BaseRetriever):
     claims: int = 0
     related: int = 0
     related_heads: int = 0
+    exclude_origins: tuple[str, ...] = ()
 
     def search(self, query: str) -> Either[list[Document], SearchFailure]:
         """클램프 → ExitStack → STEPS 한 줄 → 문서 목록 (접속은 스택이 닫는다)."""
@@ -337,6 +339,7 @@ class PgRetriever(BaseRetriever):
                             related=min(max(self.related, 0), SEARCH_MAX_RELATED),
                             related_heads=min(max(self.related_heads, 0), max_results),
                             stack=stack,
+                            exclude_origins=self.exclude_origins,
                         )
                     ),
                 ),

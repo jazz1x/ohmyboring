@@ -6189,3 +6189,183 @@ async fn register_ties_come_out_in_subject_predicate_order() {
 
     store.delete_document(&path).await.expect("cleanup");
 }
+
+/// A shown `next` row learns that its slot (same subject and predicate) holds newer open
+/// `next`/`blocked` rows; superseded, stale and other-kind rows do not count, and the row set
+/// stays as it was. The latest day is Seoul's: 11-07 15:30 UTC is already 11-08 there.
+#[tokio::test]
+async fn register_row_counts_newer_open_values_in_its_slot() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let tag = unique_path("newer-open");
+    let project = format!(
+        "newer-open-{}",
+        tag.len() + tag.bytes().map(usize::from).sum::<usize>()
+    );
+    let subject_a = format!("slot-a{tag}");
+    let subject_b = format!("slot-b{tag}");
+    let t0 = UNIX_EPOCH + Duration::from_hours(498_291);
+    let emb = [0.1_f32; 1024];
+
+    // (subject, value, seconds after t0, kind): each claim sits in its own note, so none replaces another.
+    let claims: [(&String, &str, u64, &str); 7] = [
+        (&subject_a, "old", 0, "next"),
+        (&subject_a, "mid", 3600, "blocked"),
+        // 11-07 16:30 UTC is 11-08 01:30 KST: the day must come from KST, not from UTC.
+        (&subject_a, "new", 2 * 86_400 + 48_600, "next"),
+        (&subject_b, "old", 0, "next"),
+        (&subject_b, "sealed", 3600, "next"),
+        (&subject_b, "stale", 7200, "next"),
+        (&subject_b, "decided", 10_800, "next"),
+    ];
+    let mut paths = Vec::new();
+    for (i, (subject, value, after, kind)) in claims.iter().enumerate() {
+        let path = unique_path(&format!("newer-open-{i}"));
+        let mut front = dummy_frontmatter(&path);
+        front.project = project.clone();
+        store
+            .upsert_document(&front, "sha", SystemTime::now())
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                subject,
+                "follow-up",
+                value,
+                &path,
+                t0 + Duration::from_secs(*after),
+                &emb,
+                kind,
+                "certain",
+            )
+            .await
+            .expect("upsert claim");
+        paths.push(path);
+    }
+    for (value, set) in [
+        ("sealed", "superseded_at = now()"),
+        ("stale", "stale_at = now()"),
+        ("decided", "kind = 'decision'"),
+    ] {
+        db.execute(
+            &format!("UPDATE claim SET {set} WHERE subject = $1 AND value = $2;"),
+            &[&subject_b, &value],
+        )
+        .await
+        .expect("mark the slot-b row");
+    }
+
+    let res = store
+        .recent_register_rows(10, Some(&project), None, &[])
+        .await
+        .expect("recent register rows");
+    let row = |subject: &str, value: &str| {
+        res.rows
+            .iter()
+            .find(|r| r.subject == subject && r.value == value)
+            .expect("row shown")
+    };
+    let mark = row(&subject_a, "old")
+        .newer_open
+        .clone()
+        .expect("old row is marked");
+    assert_eq!((mark.count, mark.latest_day.as_str()), (2, "11-08"));
+    assert_eq!(
+        row(&subject_a, "mid").newer_open.as_ref().map(|m| m.count),
+        Some(1)
+    );
+    assert_eq!(row(&subject_a, "new").newer_open, None);
+    assert_eq!(
+        row(&subject_b, "old").newer_open,
+        None,
+        "superseded, stale and decision rows are not newer open values"
+    );
+    assert_eq!(res.total_matching, 6, "marking must not change the row set");
+
+    db.execute(
+        "DELETE FROM claim WHERE subject = ANY($1);",
+        &[&vec![subject_a.clone(), subject_b.clone()]],
+    )
+    .await
+    .expect("cleanup claims");
+    for path in paths {
+        store.delete_document(&path).await.expect("cleanup doc");
+    }
+}
+
+/// The newer value counts only if its note's origin is allowed: with `company` excluded the
+/// register must not hint at a row it would never show. The empty-exclude call is the control
+/// that proves the newer row exists.
+#[tokio::test]
+async fn newer_open_value_in_an_excluded_origin_is_not_counted() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let tag = unique_path("newer-open-origin");
+    let project = format!(
+        "newer-open-origin-{}",
+        tag.bytes().map(usize::from).sum::<usize>()
+    );
+    let subject = format!("slot-origin{tag}");
+    let t0 = UNIX_EPOCH + Duration::from_hours(498_291);
+    let emb = [0.1_f32; 1024];
+
+    let mut paths = Vec::new();
+    for (origin, value, after) in [("personal", "older", 0_u64), ("company", "newer", 3600)] {
+        let path = unique_path(&format!("newer-open-origin-{origin}"));
+        let mut front = dummy_frontmatter(&path);
+        front.project = project.clone();
+        front.origin = origin.to_owned();
+        store
+            .upsert_document(&front, "sha", SystemTime::now())
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                &subject,
+                "follow-up",
+                value,
+                &path,
+                t0 + Duration::from_secs(after),
+                &emb,
+                "next",
+                "certain",
+            )
+            .await
+            .expect("upsert claim");
+        paths.push(path);
+    }
+
+    let older_in = |excluded: Vec<String>| {
+        let store = &store;
+        let project = &project;
+        async move {
+            store
+                .recent_register_rows(10, Some(project), None, &excluded)
+                .await
+                .expect("recent register rows")
+                .rows
+                .into_iter()
+                .find(|r| r.value == "older")
+                .expect("older row shown")
+                .newer_open
+        }
+    };
+    let control = older_in(Vec::new())
+        .await
+        .expect("control: newer row is counted");
+    assert_eq!(control.count, 1);
+    assert_eq!(older_in(vec!["company".to_owned()]).await, None);
+
+    for path in paths {
+        store.delete_document(&path).await.expect("cleanup doc");
+    }
+}

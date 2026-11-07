@@ -529,7 +529,7 @@ curl -s -X POST http://localhost:7710/mcp \
 
 | エンドポイント / MCP tool | 用途 | ベクトルバックエンド |
 |---|---|---|
-| `POST /context` / `context` | 構造化された context カード: decisions, risks, facts, glossary, next_actions | 不要 |
+| `POST /context` / `context` | 構造化された context カード: decisions, risks, facts, glossary | 不要 |
 | `POST /next_actions` / `next_actions` | 次アクション台帳: 明示された次の一手 + 有効な blocker | 必要 |
 | `POST /stalled` / `stalled` | 停滞台帳: 古い次の一手と blocker | 必要 |
 | `POST /recurrences` / `recurrences` | 再発台帳: 過去の失敗を繰り返す最近の risk/blocked claim | 必要 |
