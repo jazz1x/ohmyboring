@@ -202,7 +202,7 @@ class SqlShapeTests(unittest.TestCase):
     def test_promote_competes_only_among_live_rows(self):
         sql = verdict_pg._PROMOTE_SQL
         self.assertIn(f"AND NOT {_RETIRED_NOTE}", sql)
-        self.assertIn("c.valid_from = m.mx", sql)
+        self.assertIn("c.valid_from = m.valid_from", sql)
 
     def test_retired_note_keeps_the_owner_rule(self):
         self.assertIn("n.author = 'owner'", _RETIRED_NOTE)
@@ -381,6 +381,23 @@ class VerdictDbTests(unittest.TestCase):
         )
         self.assertEqual(self.sealed_count(path_c), 0, "슬롯이 C 로 넘어왔다 — 봉인이 풀렸다")
         self.assertEqual(self.current_rows("slot"), [("c-old", path_c)], "슬롯의 현재 행은 정확히 C 하나")
+
+    def test_promote_compares_slots_by_canon_so_an_old_spelling_row_stays_sealed(self):
+        """옛 철자 행(Foo_Bar)은 canon 칸(foo-bar)에서 canon 철자 행(valid_from 이 더 이르다)보다 앞서지 않는다."""
+        path_a, path_b, path_c = self.doc("/w/a.md"), self.doc("/w/b.md"), self.doc("/w/c.md")
+        self.claim("Foo_Bar", "a-old", path_a, at(0))
+        self.claim("foo-bar", "c-canon", path_c, at(1), sealed_at=at(5))
+        self.claim("Foo_Bar", "c-old-spelling", path_c, at(2), sealed_at=at(5))
+        self.claim("b-item", "y", path_b, at(3), kind="next", predicate="next_action")
+        self.supersede_in_store(((path_b, path_a),))
+        self.assertEqual(
+            self.q(
+                "SELECT subject, value FROM claim WHERE predicate = 'status' AND superseded_at IS NULL"
+                " ORDER BY valid_from;"
+            ),
+            [("foo-bar", "c-canon")],
+            "canon 칸의 현재 행은 canon 철자 하나 — 옛 철자 행은 봉인된 채",
+        )
 
     def test_consumption_judge_lands_on_edges_and_the_first_judge_stays(self):
         """consumption_integration.rs consumption_judge_lands_on_edges_and_the_first_judge_stays."""

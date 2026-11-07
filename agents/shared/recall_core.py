@@ -108,6 +108,19 @@ def exceeds_relevance_ceiling(hit: dict) -> bool:
     return hit.get("dist_kind") == "vector_cosine" and dist is not None and dist > RELEVANCE_MAX_DIST
 
 
+#: Who judges the ceiling for the recall hook. Default (unset, or anything but "python"): the
+#: engine — the hook sends `max_dist` with /search and reads each hit's `over_ceiling`.
+#: BORING_RECALL_CEILING=python is the rollback: no `max_dist` is sent and the hook judges with
+#: `exceeds_relevance_ceiling` above. Rollback also when the door answers /search itself
+#: (DOOR_SEARCH_READER=python), because that path does not know `max_dist`.
+CEILING_ENV = "BORING_RECALL_CEILING"
+CEILING_IN_PYTHON = os.environ.get(CEILING_ENV) == "python"
+
+
+def _hit_over_ceiling(hit: dict) -> bool:
+    return exceeds_relevance_ceiling(hit) if CEILING_IN_PYTHON else hit.get("over_ceiling") is True
+
+
 def _throttle_path() -> str:
     cache = os.path.join(os.path.expanduser("~"), ".cache", "oh-my-boring")
     os.makedirs(cache, exist_ok=True)
@@ -323,6 +336,7 @@ def run_recall(
             related=1,
             related_heads=MAX_RESULTS + CONTROL_RESULTS,
             claims=CLAIMS_PER_HIT,
+            max_dist=None if CEILING_IN_PYTHON else RELEVANCE_MAX_DIST,
         ),
     ):
         case Ok(hits):
@@ -348,7 +362,7 @@ def _inject(data: dict, prompt: str, client: DrudgeClient, hits: list[dict]) -> 
         src = source_name(h)
         # Only "vector_cosine" is a distance (lower = closer) — "text_rank" and "missing" are not
         # comparable to RELEVANCE_MAX_DIST, so they are never judged by it (see the constant above).
-        if exceeds_relevance_ceiling(h):
+        if _hit_over_ceiling(h):
             over_ceiling.append((src, dist))
         snip = salient(h.get("snippet"))
         if snip:

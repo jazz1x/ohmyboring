@@ -9,12 +9,17 @@
 //! which conflicts with other tests' open connections under the default parallel runner):
 //!   `BORING_TEST_DATABASE_URL=postgresql://boring:boring@localhost:5432/boring_test \`
 //!   `  cargo test -p drudge --test store_integration -- --test-threads=1`
-#![allow(clippy::expect_used, clippy::unwrap_used)] // tests may fail fast on setup errors
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+#[path = "support/tx_store.rs"]
+mod tx_store;
+use tx_store::StoreTx as _; // tests may fail fast on setup errors
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::{Author, Claim, FrontMatter};
 use drudge::store::{DistKind, Doc, EventLogFilter, LoggedHit, Store};
+use drudge::vector::VectorIndex;
 use serde_json::json;
 use tokio_postgres::{Client, NoTls};
 
@@ -1143,9 +1148,17 @@ async fn related_follows_a_shared_claim_with_no_shared_concept() {
         .expect("newer claim node");
 
     let related = store
-        .related_by_shared_ground(&newer_path, 5)
+        .related_by_shared_ground(&newer_path, 5, 2)
         .await
         .expect("related by shared ground");
+    let above_shared = store
+        .related_by_shared_ground(&newer_path, 5, 3)
+        .await
+        .expect("related by shared ground, min_shared 3");
+    assert!(
+        above_shared.iter().all(|d| d.source_path != older_path),
+        "one shared claim scores 2 — a min_shared of 3 must drop it"
+    );
 
     assert!(
         related.iter().any(|d| d.source_path == older_path),
@@ -2936,11 +2949,14 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by anchor_path");
     assert!(
-        hits.iter().any(|c| c.subject == subject),
+        hits.iter().any(|c| c.claim.subject == subject),
         "the anchored claim must match anchor_path a/b.rs"
     );
     assert_eq!(
-        hits.iter().find(|c| c.subject == subject).unwrap().era,
+        hits.iter()
+            .find(|c| c.claim.subject == subject)
+            .unwrap()
+            .era,
         "anchored"
     );
     let misses = store
@@ -2956,7 +2972,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by missing anchor_path");
     assert!(
-        !misses.iter().any(|c| c.subject == subject),
+        !misses.iter().any(|c| c.claim.subject == subject),
         "a non-matching anchor_path must drop the claim"
     );
     let suffix = store
@@ -2964,7 +2980,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by path suffix");
     assert!(
-        !suffix.iter().any(|c| c.subject == subject),
+        !suffix.iter().any(|c| c.claim.subject == subject),
         "a path suffix is not an anchor prefix and must not match"
     );
     let prefix = store
@@ -2972,7 +2988,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims filtered by path prefix");
     assert!(
-        prefix.iter().any(|c| c.subject == subject),
+        prefix.iter().any(|c| c.claim.subject == subject),
         "a path prefix must match"
     );
     let unfiltered = store
@@ -2980,7 +2996,7 @@ async fn current_claims_filters_by_anchor_path() {
         .await
         .expect("claims unfiltered");
     assert!(
-        unfiltered.iter().any(|c| c.subject == subject),
+        unfiltered.iter().any(|c| c.claim.subject == subject),
         "the filter absent must keep default behaviour"
     );
 
@@ -3184,7 +3200,7 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
         .await
         .expect("claims default");
     assert!(
-        !hidden.iter().any(|c| c.subject == fixture.subject),
+        !hidden.iter().any(|c| c.claim.subject == fixture.subject),
         "a stale claim must be hidden by default"
     );
     let shown = store
@@ -3193,7 +3209,7 @@ async fn anchor_hash_marks_edited_bodies_stale_and_current_claims_hides_them() {
         .expect("claims include_stale");
     let stale_row = shown
         .iter()
-        .find(|c| c.subject == fixture.subject)
+        .find(|c| c.claim.subject == fixture.subject)
         .expect("include_stale must surface the stale claim");
     assert!(stale_row.stale_at.is_some());
     assert_eq!(
@@ -3605,10 +3621,13 @@ fn claim_note(path: &str, subject: &str) -> FrontMatter {
 async fn extract_note_graph(store: &Store, llm: &impl Embed, front: &FrontMatter) -> Stats {
     let cfg = BoringConfig::default();
     let mut stats = Stats::default();
+    let mut conn = store.conn().await.expect("connection");
+    let tx = conn.transaction().await.expect("begin");
     FrontmatterGraphExtractor::new()
-        .extract(store, llm, &cfg, front, "body", &mut stats)
+        .extract(store, &tx, llm, &cfg, front, "body", &mut stats)
         .await
         .expect("graph extract");
+    tx.commit().await.expect("commit");
     stats
 }
 
@@ -3919,14 +3938,12 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
     let note_path_str = note_path.to_string_lossy().into_owned();
     let cfg = BoringConfig::default();
 
-    let mut stats = Stats::default();
     let embedder = CountingEmbed::lenient();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("first ingest");
@@ -3936,14 +3953,12 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
 
     delete_claims_edge(&db, &subject).await;
 
-    let mut stats = Stats::default();
     let strict = CountingEmbed::strict();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, stats) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &strict,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("second ingest");
@@ -3974,6 +3989,105 @@ async fn unchanged_note_reingest_repairs_claim_edge_without_embedding() {
     )
     .await
     .expect("cleanup claim node");
+    store
+        .delete_document(&note_path_str)
+        .await
+        .expect("cleanup document");
+}
+
+async fn document_updated_at(db: &Client, path: &str) -> SystemTime {
+    db.query_one(
+        "SELECT updated_at FROM document WHERE source_path = $1;",
+        &[&path],
+    )
+    .await
+    .expect("read updated_at")
+    .get(0)
+}
+
+/// A byte-identical re-ingest never deletes edges and never writes `updated_at`: a
+/// `clear_semantic_edges` there would reset every edge's `first_seen_at` to the sync time on
+/// every run. The edge's `first_seen_at` is pinned to the past, so a delete+reinsert moves it
+/// to now(). (The heal's insert-only writes still report edges in `stats.edges`, so that count
+/// is not asserted here.)
+#[tokio::test]
+async fn unchanged_note_reingest_leaves_edges_and_updated_at_alone() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = unique_subject("keep");
+    let dir = tempdir().expect("tempdir");
+    let note_path = dir.path().join(format!("{subject}.md"));
+    fs::write(
+        &note_path,
+        format!(
+            "---\norigin: personal\nproject: \"\"\nkind: note\nclaims:\n  - subject: {subject}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\nbody\n"
+        ),
+    )
+    .expect("write note");
+    let note_path_str = note_path.to_string_lossy().into_owned();
+    let cfg = BoringConfig::default();
+
+    let embedder = CountingEmbed::lenient();
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &embedder,
+        &cfg,
+        &note_path_str,
+    )
+    .await
+    .expect("first ingest");
+    assert_eq!(outcome, FileOutcome::New);
+
+    let claim_dst = format!("claim:{subject}:axis");
+    let doc_src = format!("doc:{note_path_str}");
+    let seen_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    db.execute(
+        "UPDATE edge SET first_seen_at = $3 WHERE src = $1 AND dst = $2 AND kind = 'claims';",
+        &[&doc_src, &claim_dst, &seen_at],
+    )
+    .await
+    .expect("pin first_seen_at");
+    let updated_at_before = document_updated_at(&db, &note_path_str).await;
+    let touched = SystemTime::now() + std::time::Duration::from_hours(1);
+    fs::File::options()
+        .write(true)
+        .open(&note_path)
+        .and_then(|f| f.set_modified(touched))
+        .expect("touch mtime");
+
+    let strict = CountingEmbed::strict();
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &strict,
+        &cfg,
+        &note_path_str,
+    )
+    .await
+    .expect("second ingest");
+    assert_eq!(outcome, FileOutcome::Unchanged);
+    assert_eq!(
+        edge_first_seen_at(&db, &doc_src, &claim_dst, "claims").await,
+        Some(seen_at),
+        "an unchanged note keeps its edges' first_seen_at"
+    );
+    assert_eq!(
+        document_updated_at(&db, &note_path_str).await,
+        updated_at_before,
+        "an unchanged note does not move updated_at"
+    );
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+    db.execute("DELETE FROM edge WHERE dst = $1;", &[&claim_dst])
+        .await
+        .expect("cleanup claim edges");
+    db.execute("DELETE FROM node WHERE id = $1;", &[&claim_dst])
+        .await
+        .expect("cleanup claim node");
     store
         .delete_document(&note_path_str)
         .await
@@ -4130,14 +4244,12 @@ async fn undeclared_claim_row_and_node_outlive_their_edge() {
     let note_path_str = note_path.to_string_lossy().into_owned();
     let cfg = BoringConfig::default();
 
-    let mut stats = Stats::default();
     let embedder = CountingEmbed::lenient();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("first ingest");
@@ -4146,13 +4258,11 @@ async fn undeclared_claim_row_and_node_outlive_their_edge() {
     assert_eq!(claims_edge_count(&db, &note_path_str, &subject_x).await, 1);
 
     fs::write(&note_path, note(&claim_yaml(&subject_y))).expect("write note v2");
-    let mut stats = Stats::default();
-    let outcome = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+    let (outcome, _) = ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
         &store,
         &embedder,
         &cfg,
         &note_path_str,
-        &mut stats,
     )
     .await
     .expect("second ingest");
@@ -5833,4 +5943,429 @@ async fn record_supersedes_names_the_paths_it_could_not_link() {
 
     store.delete_document(&path_a).await.expect("cleanup A");
     store.delete_document(&path_b).await.expect("cleanup B");
+}
+
+/// Handing a retired note's fact slot to the next live row compares slots by the canon spelling.
+/// The retired note wrote `Foo_Bar`; the live note holds `foo-bar` (earlier) and `Foo_Bar`
+/// (later, old spelling). The canon-spelled row is the slot's latest, so it is the one promoted
+/// and the old-spelling row stays sealed.
+#[tokio::test]
+async fn fact_promotion_compares_slots_by_canon_so_an_old_spelling_row_stays_sealed() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let tag = unique_subject("canon-promote");
+    let canon_subject = format!("foo-bar-{tag}");
+    let old_subject = format!("Foo_Bar-{tag}");
+    let path_a = unique_path("canon-promote-a");
+    let path_b = unique_path("canon-promote-b");
+    let path_c = unique_path("canon-promote-c");
+    let t = whole_second_now();
+    for (path, sha) in [(&path_a, "sha-a"), (&path_b, "sha-b"), (&path_c, "sha-c")] {
+        store
+            .upsert_document(&dummy_frontmatter(path), sha, t)
+            .await
+            .expect("upsert document");
+    }
+    for (subject, value, path, minute, sealed) in [
+        (&old_subject, "retired", &path_a, 0, false),
+        (&canon_subject, "canon", &path_c, 1, true),
+        (&old_subject, "old spelling", &path_c, 2, true),
+        (&format!("b-{tag}"), "b item", &path_b, 3, false),
+    ] {
+        db.execute(
+            "INSERT INTO claim (subject, predicate, value, source_path, valid_from, superseded_at, kind)
+             VALUES ($1, 'status', $2, $3,
+                     '2026-10-01T00:00Z'::timestamptz + make_interval(mins => $4),
+                     CASE WHEN $5 THEN '2026-10-01T00:09Z'::timestamptz END, 'fact');",
+            &[subject, &value, path, &minute, &sealed],
+        )
+        .await
+        .expect("seed claim");
+    }
+
+    store
+        .record_supersedes(&[[path_b.clone(), path_a.clone()]], None)
+        .await
+        .expect("record supersedes");
+
+    let rows = db
+        .query(
+            "SELECT value FROM claim
+             WHERE subject IN ($1, $2) AND superseded_at IS NULL ORDER BY valid_from;",
+            &[&canon_subject, &old_subject],
+        )
+        .await
+        .expect("read back");
+    let current: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+    assert_eq!(
+        current,
+        vec!["canon".to_owned()],
+        "the slot's one current row is the canon-spelled one"
+    );
+
+    for path in [&path_a, &path_b, &path_c] {
+        db.execute("DELETE FROM claim WHERE source_path = $1;", &[path])
+            .await
+            .expect("cleanup claims");
+        store.delete_document(path).await.expect("cleanup document");
+    }
+}
+
+/// Raises counters, then fails — the shape of a note that errors after part of its graph was written.
+#[derive(Default)]
+struct FailsAfterCounting;
+
+impl GraphExtractor for FailsAfterCounting {
+    async fn extract<E: Embed>(
+        &self,
+        _store: &Store,
+        _tx: &deadpool_postgres::Transaction<'_>,
+        _llm: &E,
+        _cfg: &BoringConfig,
+        _front: &FrontMatter,
+        _body: &str,
+        stats: &mut Stats,
+    ) -> anyhow::Result<()> {
+        std::future::ready(()).await;
+        stats.tools += 3;
+        stats.edges += 5;
+        Err(anyhow::anyhow!("extract failed midway"))
+    }
+}
+
+/// A note that fails after raising counters is rolled back, so the run total does not count
+/// what it raised: the report and the rows agree.
+#[tokio::test]
+async fn run_total_drops_the_counters_a_failed_note_raised() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let vault = tempdir().expect("vault dir");
+    let dirs = vec![vault.path().to_string_lossy().into_owned()];
+    let note_path = vault
+        .path()
+        .join(format!("{}.md", unique_subject("failcount")));
+    fs::write(
+        &note_path,
+        "---\norigin: personal\nproject: \"\"\nkind: note\n---\n\nbody\n",
+    )
+    .expect("write note");
+    let path = note_path.to_string_lossy().into_owned();
+
+    let stats = run_with::<DefaultChunker, FailsAfterCounting, _>(
+        &store,
+        &CountingEmbed::lenient(),
+        &BoringConfig::default(),
+        &dirs,
+    )
+    .await
+    .expect("run survives a failing note");
+
+    store
+        .delete_document(&path)
+        .await
+        .expect("cleanup document");
+    assert_eq!(stats.failed, 1, "the note is counted as failed");
+    assert_eq!(
+        (stats.tools, stats.edges),
+        (0, 0),
+        "its rolled-back counters are not in the total"
+    );
+}
+
+/// A hand-sealed non-fact row that tops its slot stays sealed across `Store::open`. The 09-17
+/// backfill used to re-open it on every start (live: 16 of 19 hand-sealed rows came back).
+#[tokio::test]
+async fn a_hand_sealed_top_of_slot_row_stays_sealed_across_open() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let subject = format!("hand-sealed-probe-{nanos}");
+    let predicate = "next-step".to_string();
+    let path = unique_path("hand-sealed");
+    let t1 = UNIX_EPOCH + Duration::from_secs(u64::try_from(nanos / 1_000_000_000).unwrap());
+    let emb = [0.0_f32; 1024];
+
+    store
+        .upsert_claim(
+            &subject, &predicate, "x", &path, t1, &emb, "next", "certain",
+        )
+        .await
+        .expect("ingest the only row of the slot");
+    db.execute(
+        "UPDATE claim SET superseded_at = now() WHERE subject = $1 AND predicate = $2;",
+        &[&subject, &predicate],
+    )
+    .await
+    .expect("hand-seal the row");
+
+    Store::open(&dsn, 1024).await.expect("open store again");
+
+    let sealed: Option<SystemTime> = db
+        .query_one(
+            "SELECT superseded_at FROM claim WHERE subject = $1 AND predicate = $2;",
+            &[&subject, &predicate],
+        )
+        .await
+        .expect("the row")
+        .get(0);
+    assert!(sealed.is_some(), "Store::open re-opened a hand-sealed row");
+
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("cleanup claim");
+}
+
+/// Rows that tie on rank and `valid_from` come out in `(subject, predicate)` byte order, on the
+/// register read and on the card's read alike. Without a final key pg hands ties back in whatever
+/// order the plan produced them, and the Surreal copy (which sorts by the key) cannot match it.
+#[tokio::test]
+async fn register_ties_come_out_in_subject_predicate_order() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let path = unique_path("register-ties");
+    let project = path.rsplit('/').next().unwrap_or("ties-test").to_owned();
+    let mut front = dummy_frontmatter(&path);
+    front.project = project.clone();
+    store
+        .upsert_document(&front, "sha", SystemTime::now())
+        .await
+        .expect("upsert doc");
+
+    let emb = [0.1_f32; 1024];
+    let at = SystemTime::now();
+    // Inserted newest-subject first, so insertion order is the opposite of the expected one.
+    for subject in ["zeta", "Mid", "alpha"] {
+        store
+            .upsert_claim(
+                subject,
+                "chosen-bound",
+                "max 8 connections with a 30s idle timeout, measured against the 502 spike",
+                &path,
+                at,
+                &emb,
+                "risk",
+                "certain",
+            )
+            .await
+            .expect("claim");
+    }
+
+    let kinds = vec!["risk".to_owned()];
+    let register = store
+        .recent_register_rows(3, Some(&project), Some(&kinds), &[])
+        .await
+        .expect("register rows");
+    let subjects: Vec<&str> = register.rows.iter().map(|r| r.subject.as_str()).collect();
+    assert_eq!(
+        subjects,
+        vec!["Mid", "alpha", "zeta"],
+        "byte order: an upper-case subject sorts before a lower-case one"
+    );
+    let card = store
+        .recent_claims(3, Some(&project), Some(&kinds), &[])
+        .await
+        .expect("card claims");
+    let card_subjects: Vec<&str> = card.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(card_subjects, subjects, "the card orders like the register");
+
+    store.delete_document(&path).await.expect("cleanup");
+}
+
+/// A shown `next` row learns that its slot (same subject and predicate) holds newer open
+/// `next`/`blocked` rows; superseded, stale and other-kind rows do not count, and the row set
+/// stays as it was. The latest day is Seoul's: 11-07 15:30 UTC is already 11-08 there.
+#[tokio::test]
+async fn register_row_counts_newer_open_values_in_its_slot() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+
+    let tag = unique_path("newer-open");
+    let project = format!(
+        "newer-open-{}",
+        tag.len() + tag.bytes().map(usize::from).sum::<usize>()
+    );
+    let subject_a = format!("slot-a{tag}");
+    let subject_b = format!("slot-b{tag}");
+    let t0 = UNIX_EPOCH + Duration::from_hours(498_291);
+    let emb = [0.1_f32; 1024];
+
+    // (subject, value, seconds after t0, kind): each claim sits in its own note, so none replaces another.
+    let claims: [(&String, &str, u64, &str); 7] = [
+        (&subject_a, "old", 0, "next"),
+        (&subject_a, "mid", 3600, "blocked"),
+        // 11-07 16:30 UTC is 11-08 01:30 KST: the day must come from KST, not from UTC.
+        (&subject_a, "new", 2 * 86_400 + 48_600, "next"),
+        (&subject_b, "old", 0, "next"),
+        (&subject_b, "sealed", 3600, "next"),
+        (&subject_b, "stale", 7200, "next"),
+        (&subject_b, "decided", 10_800, "next"),
+    ];
+    let mut paths = Vec::new();
+    for (i, (subject, value, after, kind)) in claims.iter().enumerate() {
+        let path = unique_path(&format!("newer-open-{i}"));
+        let mut front = dummy_frontmatter(&path);
+        front.project = project.clone();
+        store
+            .upsert_document(&front, "sha", SystemTime::now())
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                subject,
+                "follow-up",
+                value,
+                &path,
+                t0 + Duration::from_secs(*after),
+                &emb,
+                kind,
+                "certain",
+            )
+            .await
+            .expect("upsert claim");
+        paths.push(path);
+    }
+    for (value, set) in [
+        ("sealed", "superseded_at = now()"),
+        ("stale", "stale_at = now()"),
+        ("decided", "kind = 'decision'"),
+    ] {
+        db.execute(
+            &format!("UPDATE claim SET {set} WHERE subject = $1 AND value = $2;"),
+            &[&subject_b, &value],
+        )
+        .await
+        .expect("mark the slot-b row");
+    }
+
+    let res = store
+        .recent_register_rows(10, Some(&project), None, &[])
+        .await
+        .expect("recent register rows");
+    let row = |subject: &str, value: &str| {
+        res.rows
+            .iter()
+            .find(|r| r.subject == subject && r.value == value)
+            .expect("row shown")
+    };
+    let mark = row(&subject_a, "old")
+        .newer_open
+        .clone()
+        .expect("old row is marked");
+    assert_eq!((mark.count, mark.latest_day.as_str()), (2, "11-08"));
+    assert_eq!(
+        row(&subject_a, "mid").newer_open.as_ref().map(|m| m.count),
+        Some(1)
+    );
+    assert_eq!(row(&subject_a, "new").newer_open, None);
+    assert_eq!(
+        row(&subject_b, "old").newer_open,
+        None,
+        "superseded, stale and decision rows are not newer open values"
+    );
+    assert_eq!(res.total_matching, 6, "marking must not change the row set");
+
+    db.execute(
+        "DELETE FROM claim WHERE subject = ANY($1);",
+        &[&vec![subject_a.clone(), subject_b.clone()]],
+    )
+    .await
+    .expect("cleanup claims");
+    for path in paths {
+        store.delete_document(&path).await.expect("cleanup doc");
+    }
+}
+
+/// The newer value counts only if its note's origin is allowed: with `company` excluded the
+/// register must not hint at a row it would never show. The empty-exclude call is the control
+/// that proves the newer row exists.
+#[tokio::test]
+async fn newer_open_value_in_an_excluded_origin_is_not_counted() {
+    let Some(dsn) = test_dsn() else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+
+    let tag = unique_path("newer-open-origin");
+    let project = format!(
+        "newer-open-origin-{}",
+        tag.bytes().map(usize::from).sum::<usize>()
+    );
+    let subject = format!("slot-origin{tag}");
+    let t0 = UNIX_EPOCH + Duration::from_hours(498_291);
+    let emb = [0.1_f32; 1024];
+
+    let mut paths = Vec::new();
+    for (origin, value, after) in [("personal", "older", 0_u64), ("company", "newer", 3600)] {
+        let path = unique_path(&format!("newer-open-origin-{origin}"));
+        let mut front = dummy_frontmatter(&path);
+        front.project = project.clone();
+        front.origin = origin.to_owned();
+        store
+            .upsert_document(&front, "sha", SystemTime::now())
+            .await
+            .expect("upsert doc");
+        store
+            .upsert_claim(
+                &subject,
+                "follow-up",
+                value,
+                &path,
+                t0 + Duration::from_secs(after),
+                &emb,
+                "next",
+                "certain",
+            )
+            .await
+            .expect("upsert claim");
+        paths.push(path);
+    }
+
+    let older_in = |excluded: Vec<String>| {
+        let store = &store;
+        let project = &project;
+        async move {
+            store
+                .recent_register_rows(10, Some(project), None, &excluded)
+                .await
+                .expect("recent register rows")
+                .rows
+                .into_iter()
+                .find(|r| r.value == "older")
+                .expect("older row shown")
+                .newer_open
+        }
+    };
+    let control = older_in(Vec::new())
+        .await
+        .expect("control: newer row is counted");
+    assert_eq!(control.count, 1);
+    assert_eq!(older_in(vec!["company".to_owned()]).await, None);
+
+    for path in paths {
+        store.delete_document(&path).await.expect("cleanup doc");
+    }
 }

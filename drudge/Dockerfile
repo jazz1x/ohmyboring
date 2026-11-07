@@ -1,6 +1,6 @@
 # ── Stage 1: builder ─────────────────────────────────────────────────────────
 # 코드네임 고정(trixie) — 런타임과 같은 Debian 릴리스라야 GLIBC 일치(스테이지 drift 방지).
-FROM rust:1-slim-trixie AS builder
+FROM rust:1.99.1-slim-trixie AS builder
 
 # 빌드 의존성 (rustls ring 링커용). tokio-postgres/pgvector 는 순수 Rust — C 의존성 없음.
 RUN apt-get update && apt-get install -y --no-install-recommends \

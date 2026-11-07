@@ -16,10 +16,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-#: 소유자가 카드와 슬랙에서 노트를 부르는 모양 — 소문자 네 자리, 경계 없이(「wiki-22265」도
-#: 앞 네 자리가 그 노트의 이름이다).
-_WIKI_TOKEN = re.compile(r"wiki-\d{4}")
-
+#: 소유자가 카드와 슬랙에서 노트를 부르는 모양 — 소문자, 네 자리 이상. 욕심 매칭이라 숫자가
+#: 끝나는 곳이 오른쪽 경계다: 「wiki-10001」은 wiki-10001, 여섯 자리는 그 번호 그대로 찾다가
+#: 볼트에 없으면 「없음」(앞 자리로 잘라 다른 노트를 주지 않는다).
+_WIKI_TOKEN = re.compile(r"wiki-\d{4,}")
 #: 머리말에서 렌더에 필요한 스칼라 하나만 긁는다 — vault_note 가 쪼개기까지 하고
 #: 매핑(YAML 파싱)은 일부러 안 한다.
 _FRONTMATTER_FIELD = re.compile(r"^([a-z_]+):[ \t]*(.*)$")
@@ -30,8 +30,12 @@ SplitFrontmatter = Callable[[str], tuple[str, str] | None]
 
 
 def named_ids(text: str) -> list[str]:
-    """text 안의 wiki-NNNN 목록 — 나온 순서대로, 중복 없이, 소문자 그대로."""
-    return list(dict.fromkeys(_WIKI_TOKEN.findall(text)))
+    """text 안의 wiki-NNNN 목록 — 나온 순서대로, 소문자 그대로. 번호가 같으면(wiki-9572 과
+    wiki-00000009572) 먼저 나온 표기 하나만."""
+    by_number: dict[int, str] = {}
+    for token in _WIKI_TOKEN.findall(text):
+        by_number.setdefault(int(token[len("wiki-") :]), token)
+    return list(by_number.values())
 
 
 def _frontmatter_value(frontmatter: str, name: str) -> str:

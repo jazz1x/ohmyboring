@@ -5,7 +5,8 @@
 
 page_id:
   # Page ID regex. Both the wiki/<id>.md filename and the frontmatter id must satisfy it.
-  pattern: "^wiki-\\d{4,5}$"
+  # The seed note wiki-0000 is the one exception, allowed in code (SEED_NOTE_STEM).
+  pattern: "^wiki-\\d{11}$"
 
 sources:
   # Allowed prefixes for paths in the sources field.

@@ -64,7 +64,7 @@ class Claim:
 class FrontMatter:
     """render 가 받는 머리말 칸들 — remember 가 정하는 것만 담는다."""
 
-    title: str
+    title: str | None  # 볼트에서 읽은 노트는 title 이 없을 수 있다(Rust Option) — remember 는 늘 str
     kind: str
     origin: str
     project: str

@@ -17,7 +17,7 @@ owner_supersede_refused 는 엔진과 같은 이름·모양, 기록은 문의 �
 대체 봉인만 엔진과 일부러 다르다 — 판정 wiki-2855·2856(오너 확정): 엔진
 (store.rs:2898 seal_superseded_claims)은 옛 노트의 현재 claim 을 통째로 닫지만, 여기서는
 새 노트가 다시 말한 (subject, predicate) 슬롯만 닫고 새 노트가 말하지 않은 옛 사실은
-산다(그래프 그림자의 목표(graph.expected_seal_states)가 정하는 부분 닫기를 실제로 쓴다).
+산다.
 슬롯 명단은 새 노트의 claim 행(캐논화된 슬롯)에서 읽는다. 승계(슬롯을 다음 살아 있는
 행으로)는 없다 — 부분 닫기는 노트를 은퇴시키지 않는다. 엔진 sync 가 이 봉인을 다시
 통째로 닫지 않는다(동일 sha 재수집은 claim_is_unchanged 로 건 너뛰어 봉인 UPDATE 를
@@ -48,13 +48,13 @@ nearest_document 한 건 전체(임베딩+읽기 전용 질의)를, 사건 칸�
 
 from __future__ import annotations
 
-import hashlib
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from ohmyboring.ingest.chunk import fixed_chunks
 from ohmyboring.remember import dedup as _dedup
@@ -68,6 +68,7 @@ from ohmyboring.remember.parse import (
 )
 from ohmyboring.remember.render import render_wiki_note
 from ohmyboring.result import Either, Err, Ok
+from ohmyboring.sync.hash import legacy_sha
 
 #: 스위치가 켜도 대조가 남게 남기는 문 사건 한 줄.
 EVENT_NAME = "remember_written"
@@ -81,6 +82,8 @@ RELATES_TO_DEFERRED = (
 #: 엔진 사건 이름·모양 — mcp.rs:1878 dedup_decision_event, owner.rs:94-115
 #: record_refusal 과 같은 이름과 칸으로 기록한다(기록은 문의 사건 sink).
 DEDUP_DECISION_EVENT = "dedup_decision"
+#: 들어온 노트 claims 를 사건에 싣는 상한 — 증류기 상한과 같다 (C-DEDUPKEEP1 0단계 재료).
+DEDUP_EVENT_MAX_CLAIMS = 8
 OWNER_REFUSED_EVENT = "owner_supersede_refused"
 _DEDUP_COMPONENT = "drudge.mcp.remember"
 _OWNER_COMPONENT = "drudge.owner"
@@ -294,6 +297,16 @@ class WriterDeps:
     note_index: Any | None = None
     embed_dim: int = 1024
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    #: document.sha 로 저장할 해시 — 기본은 파일 전체 sha256(엔진과 같다). 문이
+    #: DOOR_SYNC_OWNER=python 일 때만 파생 칸을 뺀 새 해시(ohmyboring.sync.hash)를 싣는다.
+    content_hash: Callable[[str], str] = field(default=legacy_sha)
+
+
+class EmbedSeam(Protocol):
+    """그래프·조각 단계가 쓰는 면 — 임베딩과 차원뿐. WriterDeps 도 sync 의 면도 만족한다."""
+
+    embed: Callable[[str], Either[list[float], str]]
+    embed_dim: int
 
 
 @dataclass
@@ -633,7 +646,7 @@ def existing_wiki_ids(doc_paths: list[str]) -> set[int]:
                 n = int(stem[5:])
             except ValueError:
                 continue
-            if 0 <= n <= 0xFFFFFFFF:
+            if n >= 0:
                 out.add(n)
     return out
 
@@ -651,11 +664,11 @@ def allocate_wiki_path(wiki_dir: str, db_ids: set[int]) -> tuple[str, str]:
                 n = int(stem[5:])
             except ValueError:
                 continue
-            if 0 <= n <= 0xFFFFFFFF:
+            if n >= 0:
                 used.add(n)
     n = max(used) + 1 if used else 1
     while True:
-        wiki_id = f"wiki-{n:04}"
+        wiki_id = f"wiki-{n:011}"
         path = os.path.join(wiki_dir, f"{wiki_id}.md")
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
@@ -716,6 +729,37 @@ def _judge_refusal(arguments: dict[str, Any], note: RememberNote, deps: WriterDe
     return None
 
 
+_WIKI_FILE_RE = re.compile(r"^(?P<dir>.*/)?wiki-(?P<digits>\d+)\.md$")
+
+
+def wiki_path_spellings(path: str) -> list[str]:
+    """한 노트는 번호다 — 이름의 자릿수는 표기. 받은 경로 먼저, 같은 번호의 4자리·11자리 표기가 뒤."""
+    match = _WIKI_FILE_RE.match(path)
+    if match is None:
+        return [path]
+    head, number = match.group("dir") or "", int(match.group("digits"))
+    out = [path]
+    for width in (4, 11):
+        candidate = f"{head}wiki-{number:0{width}d}.md"
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _resolve_document_paths(cur: Any, paths: list[str]) -> list[str]:
+    """이름한 경로마다 document 에 있는 표기로 — 어느 표기도 없으면 받은 그대로(unknown 으로 센다)."""
+    resolved: list[str] = []
+    for path in paths:
+        found = path
+        for candidate in wiki_path_spellings(path):
+            cur.execute(_GET_DOC_SHA_SQL, {"path": candidate})
+            if cur.fetchone() is not None:
+                found = candidate
+                break
+        resolved.append(found)
+    return resolved
+
+
 def _owner_written_targets(cur: Any, paths: list[str]) -> list[str]:
     """대상 중 오너가 쓴 것(document.author='owner') — owner.rs:64-80 refused_supersedes."""
     if not paths:
@@ -731,8 +775,8 @@ def _supersedes_gate(
     match parse_supersedes(arguments):
         case Err(reason):
             return Err(Refused(-32602, reason))
-        case Ok(supersedes):
-            pass
+        case Ok(named):
+            supersedes = _resolve_document_paths(cur, named)
     if not deps.is_owner:
         refused = _owner_written_targets(cur, supersedes)
         if refused:
@@ -762,7 +806,7 @@ def _pii_gate(note: RememberNote, deps: WriterDeps) -> Either[RememberNote, Refu
 def _gate(
     arguments: dict[str, Any], note: RememberNote, deps: WriterDeps, cur: Any, seams: _TimedSeams
 ) -> tuple[Refused | None, RememberNote, list[str]]:
-    """자격 → supersedes 모양·대상 → PII 게이트 — shadow._gate_decision 순서 그대로.
+    """자격 → supersedes 모양·대상 → PII 게이트 순서.
 
     거절이면 (Refused, 노트, []) — 아니면 (None, 게이트를 지난 노트, 대상 목록)."""
     if refusal := _judge_refusal(arguments, note, deps):
@@ -807,6 +851,13 @@ def _dedup_decision_payload(
         "replace_min_delta": _dedup.DUPLICATE_REPLACE_MIN_DELTA,
         "omb_session_id": note.front.omb_session_id,
         "existing_source_path": match_.source_path if match_ is not None else None,
+        "incoming_title": note.front.title,
+        "incoming_claims": [
+            {"subject": c.subject, "predicate": c.predicate, "value": c.value}
+            for c in note.front.claims[:DEDUP_EVENT_MAX_CLAIMS]
+        ],
+        "incoming_claim_count": len(note.front.claims),
+        "claims_truncated": len(note.front.claims) > DEDUP_EVENT_MAX_CLAIMS,
     }
 
 
@@ -948,7 +999,7 @@ def _claim_slot(claim: Any) -> tuple[str, str] | None:
 
 
 def _upsert_claim(  # noqa: PLR0913
-    cur: Any, deps: WriterDeps, job: _GraphJob, claim: Any, stats: _Stats, timers: _Timers
+    cur: Any, deps: EmbedSeam, job: _GraphJob, claim: Any, stats: _Stats, timers: _Timers
 ) -> None:
     """claim 행 하나 — unchanged 프로브·임베딩(임베딩 칸에 잰다)·upsert·봉인·said_by 거울·노드/간선."""
     slot = _claim_slot(claim)
@@ -1011,7 +1062,7 @@ def _upsert_claim(  # noqa: PLR0913
     stats.edges += _upsert_claim_node(cur, job.front.project, job.path, slot, claim)
 
 
-def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats, timers: _Timers) -> None:
+def _extract_graph(cur: Any, deps: EmbedSeam, job: _GraphJob, stats: _Stats, timers: _Timers) -> None:
     """FrontmatterGraphExtractor(ingest.rs:160-281) — 정해진 간선만 쓰고 봉인은 upsert 안에서."""
     doc = _doc_node_id(job.path)
     cur.execute(_CLEAR_SEMANTIC_SQL, {"doc": doc, "kinds": list(SEMANTIC_EDGE_KINDS)})
@@ -1022,7 +1073,7 @@ def _extract_graph(cur: Any, deps: WriterDeps, job: _GraphJob, stats: _Stats, ti
         _upsert_claim(cur, deps, job, claim, stats, timers)
 
 
-def _embed_chunks(deps: WriterDeps, pieces: list[str], timers: _Timers) -> list[tuple[str, list[float]]]:
+def _embed_chunks(deps: EmbedSeam, pieces: list[str], timers: _Timers) -> list[tuple[str, list[float]]]:
     """chunk 임베딩 — 첫 오류에서 단축(엔진의 try_collect 과 같고, 순서는 유지)."""
     embedded: list[tuple[str, list[float]]] = []
     for piece in pieces:
@@ -1043,11 +1094,8 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
     with open(path, encoding="utf-8") as handle:
         data = handle.read()
     data = data.replace("\x00", "")
-    sha = hashlib.sha256(data.encode("utf-8")).hexdigest()
-    st = os.stat(path)
-    # 뒷시각 = 파일 mtime. 엔진은 SystemTime→timestamptz 를 「잘라내기」로 바꾸니(초+subsec_micros)
-    # 파이썬도 나노초를 밑으로 깎아 같은 값을 내야 sync 의 set_updated_at 이 0 변경으로 선다.
-    mtime = datetime.fromtimestamp(0, tz=UTC) + timedelta(microseconds=st.st_mtime_ns // 1000)
+    sha = deps.content_hash(data)
+    mtime = file_mtime(path)
     front = note.front
     stats = _Stats()
     cur.execute(_GET_DOC_SHA_SQL, {"path": path})
@@ -1057,7 +1105,21 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
         cur.execute(_SET_UPDATED_AT_SQL, {"path": path, "at": mtime})
         _extract_graph(cur, deps, _GraphJob(front, note.body.strip(), path, mtime), stats, timers)
         return stats
-    body = note.body.strip()
+    return ingest_changed(cur, deps, front, note.body.strip(), path, sha, mtime, timers)
+
+
+def file_mtime(path: str) -> datetime:
+    """뒷시각 = 파일 mtime. 엔진은 SystemTime→timestamptz 를 「잘라내기」로 바꾸니(초+subsec_micros)
+    파이썬도 나노초를 밑으로 깎아 같은 값을 내야 sync 의 set_updated_at 이 0 변경으로 선다."""
+    return datetime.fromtimestamp(0, tz=UTC) + timedelta(microseconds=os.stat(path).st_mtime_ns // 1000)
+
+
+def ingest_changed(  # noqa: PLR0913
+    cur: Any, deps: EmbedSeam, front: Any, body: str, path: str, sha: str, mtime: datetime, timers: _Timers
+) -> _Stats:
+    """바뀐(또는 새) 노트 한 장 — 조각 임베딩 → document upsert → chunk upsert → 꼬리 prune → 그래프.
+    remember 와 4시간 sync 가 같이 쓴다(ingest.rs:437-481)."""
+    stats = _Stats()
     pieces = fixed_chunks(body, 1500, 200)
     if all(not piece.strip() for piece in pieces):
         stats.skipped = True
@@ -1082,6 +1144,12 @@ def _ingest(cur: Any, deps: WriterDeps, note: RememberNote, path: str, timers: _
     cur.execute(_PRUNE_CHUNKS_SQL, {"path": path, "from_idx": len(embedded)})
     _extract_graph(cur, deps, _GraphJob(front, body, path, mtime), stats, timers)
     return stats
+
+
+#: sync 가 ingest_changed 의 인자·반환·고장을 이름 붙여 쓰는 면.
+IngestStats = _Stats
+IngestTimers = _Timers
+IngestFailure = _WriteFailure
 
 
 def _record_supersedes(

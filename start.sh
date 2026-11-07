@@ -90,7 +90,8 @@ fi
 # scripts find the engine and use the canonical MCP server name.
 if [ -n "$AGENT" ]; then
   echo "▶ Wiring hermes-agent settings …"
-  python3 agents/shared/agent_wiring.py --install --boring-home "$PWD" || true
+  uv run --locked python --version
+  uv run --locked python agents/shared/agent_wiring.py --install --boring-home "$PWD"
 fi
 
 $COMPOSE $PROFILES up -d --build boring-drudge $AGENT

@@ -40,9 +40,9 @@ live collaborators — a repair row's adopt calls the door's own merge (POST
 /repairs/split-subjects); an advice row's press logs a card_verdict event — card_proposal
 exists only for these rows, and card_live._live_past_verdicts joins the two by (card_ts, idx),
 raising on a verdict with no proposal — then its adopt/reject writes the verdict to the
-engine while its hold leaves no trace beyond the event; a review row's agree leaves only a
-verdict_reviewed event, its flip writes the opposite-kind verdict to the proposing session
-and the same event — the agent's own edge is never deleted. An unanswered row stays
+engine while its hold leaves no trace beyond the event; a review row's agree writes the
+proposed verdict and its flip the opposite kind to the proposing session, each with a
+verdict_reviewed event — the agent's own edge is never deleted. An unanswered row stays
 answerable for card_press.CARD_ANSWERABLE_HOURS: the hermes plugin refuses an older press,
 and _live_past_verdicts widens its proposal read by the same hours so every press it
 accepted still joins its proposal.
@@ -170,6 +170,8 @@ class CardState(TypedDict):
     past_verdicts: card_types.PastCardHistory  # read once in read_history, shared by advise and resolve
     advise_stats: card_types.AdviseStats
     suppressed_count: int
+    unresolved_count: int  # resolve's drop: subject with no note
+    same_note_count: int  # resolve's drop: a second proposal on an already picked note
     advice_revisions: list[
         str
     ]  # the advice step's store_advice: one card_advice_written `revise` tag per row
@@ -214,6 +216,9 @@ class Collaborators(NamedTuple):
     # CARD_RENDER_ONLY: when set, the advice lane is today's already-posted proposals — no
     # search, no model call, no suppression — instead of a fresh advise → resolve.
     posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
+    # note path → its current claims with the sealed value each replaced; defaulting to none
+    # draws no value look, so a caller that never heard of it renders the card it always did.
+    pairs: Callable[[str], list[card_types.ValuePair] | card_types.PairsUnread] = lambda note: []
 
 
 def _live_collaborators() -> Collaborators:
@@ -237,6 +242,7 @@ def _live_collaborators() -> Collaborators:
         held_repairs=card_live._held_repair_subjects,
         repair_judgments=card_live._live_repair_judgments,
         score=card_live._live_score,
+        pairs=card_live._live_pairs,
     )
 
 
@@ -462,27 +468,46 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         the coarser call-saver; this pair-level filter stays the source of truth."""
         picked: list[card_types.Proposal] = []
         seen_notes: set[str] = set()
+        unresolved = 0
+        same_note = 0
         for proposal in state["proposals"]:
             result = _resolve(proposal.subject, proposal.register_)
             if isinstance(result, card_types.Unresolved):
+                unresolved += 1
                 continue
             if result.note in seen_notes:
+                same_note += 1
                 continue
             seen_notes.add(result.note)
             picked.append(proposal.model_copy(update={"note": result.note}))
         kept, dropped = card_verdicts.suppressed(picked, state["past_verdicts"])
-        return {"proposals": kept, "suppressed_count": len(dropped)}
+        return {
+            "proposals": kept,
+            "suppressed_count": len(dropped),
+            "unresolved_count": unresolved,
+            "same_note_count": same_note,
+        }
 
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
+        notes = {p.note for p in state["proposals"]} | {r.note for r in state["reviews"]}
+        looked_up = {note: collabs.pairs(note) for note in sorted(notes) if note}
+
+        def with_pairs(row):
+            match looked_up.get(row.note, []):
+                case card_types.PairsUnread():
+                    return row.model_copy(update={"pairs_unread": True})
+                case found:
+                    return row.model_copy(update={"pairs": found})
+
         fitted = card_view.fit_card(
-            state["proposals"],
+            [with_pairs(p) for p in state["proposals"]],
             confirmation=state["confirmation"],
             repairs=state["repairs"],
             repairs_total_groups=state["repairs_total_groups"],
             merged_yesterday_rows=state["merged_yesterday_rows"],
-            reviews=state["reviews"],
+            reviews=[with_pairs(r) for r in state["reviews"]],
             lang=lang,
             note_links=boring_config.note_links(),
             score=state["score"],
@@ -553,7 +578,8 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         """The advice step's last node: each proposal that survived advise → resolve is
         rewritten once for a first-time reader (card_advice_write.revise) and stored as one
         card_advice_written 사건, rank in the order the card will show them. The run stamp
-        groups one run's rows, so a second run the same morning replaces the first."""
+        groups one run's rows, so a second run the same morning replaces the first. One
+        card_advice_run row closes every run, zero proposals included, with the reasons."""
         run = datetime.now(UTC).isoformat()
         day = card_advice_write.today_kst()
         revisions: list[str] = []
@@ -566,6 +592,19 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
                     revised.proposal, day=day, run=run, rank=rank, revise=revised.revise
                 ),
             )
+        collabs.record(
+            card_advice_write.RUN_EVENT,
+            card_advice_write.run_event_fields(
+                state["advise_stats"],
+                day=day,
+                run=run,
+                candidates=sum(state["per_project_candidates"].values()),
+                unresolved=state["unresolved_count"],
+                same_note=state["same_note_count"],
+                suppressed=state["suppressed_count"],
+                written=len(revisions),
+            ),
+        )
         return {"advice_revisions": revisions}
 
     return {

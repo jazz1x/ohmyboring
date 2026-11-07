@@ -89,8 +89,15 @@ run_job() {
     # launchd's own PATH has no notion of Homebrew (python3 resolves to the PATH-less
     # system stub, which has no langgraph) — PYTHON3 is set in the plist's own
     # EnvironmentVariables at install time so this never depends on launchd's PATH.
+    # Now the plist carries UV_BIN (uv's absolute path) instead. PYTHON3, when set (the
+    # fixture's .env sets it to /bin/sh), still overrides the interpreter; unset, the card
+    # runs under `uv run --locked python` — pyproject.toml's version, not the system's.
     err_log=$(mktemp)
-    "${PYTHON3:-python3}" "$SCRIPT" 2>"$err_log"
+    if [ -n "${PYTHON3:-}" ]; then
+        "$PYTHON3" "$SCRIPT" 2>"$err_log"
+    else
+        "${UV_BIN:-uv}" run --locked python "$SCRIPT" 2>"$err_log"
+    fi
     status=$?
     cat "$err_log" >&2
     if [ "$status" -ne 0 ]; then
@@ -110,10 +117,10 @@ install_macos() {
     plist="$HOME/Library/LaunchAgents/${LABEL}.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
     # Resolved once, here, in the installer's own interactive PATH — launchd's own PATH
-    # never sees Homebrew, so the plist carries the absolute interpreter instead of a name.
-    python3_bin="$(command -v python3 || true)"
-    if [ -z "$python3_bin" ]; then
-        echo "✗ no python3 on PATH — cannot resolve the interpreter to pin into the plist"
+    # never sees Homebrew, so the plist carries the absolute runner (uv) instead of a name.
+    uv_bin="$(command -v uv || true)"
+    if [ -z "$uv_bin" ]; then
+        echo "✗ no uv on PATH — cannot resolve the runner to pin into the plist"
         exit 1
     fi
     cat > "$plist" <<EOF
@@ -131,8 +138,8 @@ install_macos() {
     </array>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>PYTHON3</key>
-        <string>${python3_bin}</string>
+        <key>UV_BIN</key>
+        <string>${uv_bin}</string>
         <key>BORING_HOME</key>
         <string>${BORING_HOME}</string>
     </dict>

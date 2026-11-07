@@ -31,4 +31,4 @@ This writes the hook definitions into `~/.claude/settings.json`.
 
 ## Manual setup
 
-Copy the relevant hook blocks from `settings.json` into your Claude Code settings and point the commands at this directory.
+This directory has no `settings.json` to copy from. Add the hook entries to your Claude Code settings yourself and point their commands at the scripts below (the ones `agent_wiring.py` registers, `_CLAUDE_CODE_ROLE_SCRIPTS`): `hooks/distill-session.py`, `hooks/recall.py`, `hooks/rules.py` (symlinks to the scripts in this directory) and `agents/claude-code/session-start-recall.py`.

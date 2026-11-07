@@ -171,6 +171,24 @@ def dispatch(client, req, *, bot_user_id: str, owner_id: str | None = None) -> N
         print(f"[secretary] event failed: {e}", file=sys.stderr)
 
 
+def check_vault_dir() -> int:
+    """0 when the vault folder secretary_core reads has notes; 4 (with the path on stderr) when not.
+
+    The same default as secretary_core, so the folder checked is the folder used. On the host
+    "/vault" does not exist and a correction note would silently inherit no concepts.
+    """
+    vault = os.environ.get("BORING_VAULT_DIR") or "/vault"
+    wiki = os.path.join(vault, "wiki")
+    has_notes = os.path.isdir(wiki) and any(name.endswith(".md") for name in os.listdir(wiki))
+    if has_notes:
+        return 0
+    print(
+        f"[secretary] vault folder {vault!r} has no wiki/*.md — set BORING_VAULT_DIR to the vault",
+        file=sys.stderr,
+    )
+    return 4
+
+
 def main() -> int:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     bot_token = os.environ.get("SLACK_BOT_TOKEN")
@@ -179,6 +197,9 @@ def main() -> int:
             "[secretary] SLACK_APP_TOKEN and SLACK_BOT_TOKEN must be set (see .env.example)", file=sys.stderr
         )
         return 2
+    vault_code = check_vault_dir()
+    if vault_code != 0:
+        return vault_code
     owner_id = os.environ.get("SECRETARY_OWNER_ID") or None
 
     from threading import Event

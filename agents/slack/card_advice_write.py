@@ -22,6 +22,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -31,13 +32,17 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
 
 import card_advice  # noqa: E402
 import card_types  # noqa: E402
-from card_types import MIN_ADVICE_CHARS, MIN_BOTTLENECK_CHARS, Proposal  # noqa: E402
+from card_types import MIN_ADVICE_CHARS, MIN_BOTTLENECK_CHARS, AdviseStats, Proposal  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from ohmyboring.distill import polish  # noqa: E402
 
 #: The 사건 the card reads.
 EVENT = "card_advice_written"
+
+#: One row per finished run, however many proposals it wrote — what says why a day's EVENT
+#: rows are zero (advise_stats otherwise dies with the run).
+RUN_EVENT = "card_advice_run"
 
 #: How far back the card looks for it — a day is picked by the row's own `day`, this only
 #: bounds the read.
@@ -56,7 +61,7 @@ REVISE_HEAD = "아래 두 문장을 다시 쓴다."
 _L = r"(?<![A-Za-z0-9_\-])"
 _R = r"(?![A-Za-z0-9_\-])"
 _PATTERNS = (
-    re.compile(rf"{_L}wiki-\d{{3,4}}"),
+    re.compile(rf"{_L}wiki-\d{{3,}}"),
     re.compile(r"(?:^|[\s(\"'])(?:/[\w.\-]+){2,}"),
     re.compile(rf"{_L}[\w\-]+(?:/[\w.\-]+)+\.[A-Za-z]{{1,5}}{_R}"),
     re.compile(rf"{_L}[\w\-]+\.(?:py|rs|md|json|toml|sh|ts|yml|yaml){_R}"),
@@ -182,6 +187,29 @@ def event_fields(proposal: Proposal, *, day: str, run: str, rank: int, revise: R
     }
 
 
+def run_event_fields(
+    stats: AdviseStats,
+    *,
+    day: str,
+    run: str,
+    candidates: int,
+    unresolved: int,
+    same_note: int,
+    suppressed: int,
+    written: int,
+) -> dict[str, Any]:
+    return {
+        "day": day,
+        "run": run,
+        "candidates": candidates,
+        **stats.model_dump(),
+        "unresolved": unresolved,
+        "same_note": same_note,
+        "suppressed": suppressed,
+        "written": written,
+    }
+
+
 _PROPOSAL_KEYS = ("register", "project", "subject", "note", "bottleneck", "advice", "evidence")
 
 
@@ -212,6 +240,16 @@ def main() -> int:
         print("[advice-write] BORING_DOOR_URL must be set — 조언은 문을 통해 읽고 쓴다", file=sys.stderr)
         return 2
     import card
+    import card_live
+
+    vault = card_live._vault_dir()
+    note_count = sum(1 for _ in Path(vault).rglob("*.md")) if os.path.isdir(vault) else 0
+    if note_count == 0:
+        print(
+            f"[advice-write] vault {vault!r} 에 노트(.md)가 {note_count}개 — 마운트·BORING_VAULT_DIR 확인",
+            file=sys.stderr,
+        )
+        return 4
 
     try:
         state = card.build_advice_graph().invoke({})

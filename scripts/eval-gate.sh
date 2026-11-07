@@ -18,7 +18,7 @@ log_eval_event() {
   status="$1"
   shift
   if [ -f "$EVENT_LOG" ]; then
-    if ! python3 "$EVENT_LOG" --record eval eval_gate "$status" \
+    if ! uv run --locked python "$EVENT_LOG" --record eval eval_gate "$status" \
       --field "run_id=$eval_run_id" "$@"; then
       echo "⚠ eval event log write failed" >&2
     fi
@@ -78,12 +78,12 @@ echo "▶ Syncing eval corpus …"
 curl -s -m600 -X POST "$URL/sync" >/dev/null
 
 echo "▶ Running eval …"
-python3 data/eval/run_eval.py
+uv run --locked python data/eval/run_eval.py
 
 # BORING_EVAL_EXTRA_URL (set: the door's python /search) — the same golden run, once more
 # against that URL, before cleanup drops the fixtures. Both runs must pass 22/22.
 # Unset: nothing below runs and the script is byte-identical to before.
 if [ -n "${BORING_EVAL_EXTRA_URL:-}" ]; then
   echo "▶ Running eval against $BORING_EVAL_EXTRA_URL (door python /search) …"
-  BORING_URL="$BORING_EVAL_EXTRA_URL" python3 data/eval/run_eval.py
+  BORING_URL="$BORING_EVAL_EXTRA_URL" uv run --locked python data/eval/run_eval.py
 fi

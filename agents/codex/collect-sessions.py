@@ -51,15 +51,18 @@ from ohmyboring.adapters import workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.result import Err, Ok
 
-WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
+match omb_env.collect():
+    case Err(_reason):
+        sys.exit(f"[collect] {_reason}")
+    case Ok(_collect):
+        pass
+WINDOW_H = _collect.window_hours
 LIMIT = int(os.environ.get("COLLECT_LIMIT") or "1")
-MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
+MIN_KB = _collect.min_bytes / 1024
 DISTILL_CLAMP = transcript.codex_distill_clamp()
-STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
-PENDING_TTL = float(os.environ.get("COLLECT_PENDING_TTL") or os.environ.get("INGEST_PENDING_TTL") or "1800")
-RETRY_TTL = float(
-    os.environ.get("COLLECT_RETRY_TTL") or os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL)
-)
+STABLE_AGE_S = _collect.stable_age_seconds
+PENDING_TTL = _collect.pending_ttl_seconds
+RETRY_TTL = _collect.retry_ttl_seconds
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 HOOK = os.path.join(BORING_HOME, "agents/codex/distill-session.py")
 HOST_WORKER_LABEL = "com.ohmyboring.codex-ingest"

@@ -64,8 +64,8 @@ root cause rather than papering over the symptom.
   `type(scope): summary` (e.g. `fix(distill): …`, `feat(ingest): …`,
   `chore: …`). PRs are squash-merged, so the PR title becomes the commit.
 - Fill in the PR template (background / changes / result / review points).
-- A PR must be green on CI before it can merge: the structural gate, release
-  quality gate, secret scan (gitleaks), supply-chain gate (cargo-deny), and
+- A PR must be green on CI before it can merge: the structural gate (includes the
+  release `quality_gate` tests), secret scan (gitleaks), supply-chain gate (cargo-deny), and
   security scan (trivy), compose-config, docker-build, and the behavioral
   eval-gate.
 

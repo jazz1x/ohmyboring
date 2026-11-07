@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use drudge::{
-    ask, audit, code_index, config, frontmatter, graph, ingest, llm, retrieve, serve, store, vault,
+    ask, audit, code_index, config, frontmatter, graph, ingest, llm, retention, retrieve, serve,
+    steward, store, vault, vector::VectorIndex,
 };
 use std::path::PathBuf;
 
@@ -57,11 +58,59 @@ enum Cmd {
         #[arg(long)]
         repository: Option<String>,
     },
+    /// Fill anchor_hash/anchor_symbol of open claims that have an anchor but no hash (roots come from code_index.sources only)
+    AnchorBackfill {
+        /// Judge and print the same report, write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Inspect the isolated source-code corpus
     CodeStatus {
         /// Stable repository id (default: every indexed repository)
         #[arg(long)]
         repository: Option<String>,
+    },
+    /// Copy the vectors from pgvector into SurrealDB (vector.surreal in boring.json), replacing what
+    /// is there, then print per table the row count and key-set hash of both sides
+    VectorFill,
+    /// Read-only (the doctor line): on backend=surreal, compare pgvector and SurrealDB per table
+    /// by row count and key-set hash and fail when they differ; on pgvector say it does not apply
+    VectorCheck,
+    /// On backend=surreal: every enabled source's files on disk against the sha Surreal holds for
+    /// them; fails when a file differs, is not indexed, or is indexed but gone. `code-sync` writes
+    /// Surreal directly. On pgvector it does not apply
+    CodeCheck,
+    /// On backend=surreal: one copy pass of the four log tables (event_log, query_log,
+    /// recall_label, sync_state) from pg into SurrealDB, then every pg row against Surreal's row
+    /// value by value; fails when they differ. The sync loop runs the same pass. On pgvector it
+    /// does not apply
+    LogCopy,
+    /// On backend=surreal: swap-in rebuild of every HNSW index whose rows changed since the last
+    /// swap (define a new-named index, confirm it built, remove the old one); fails when any table
+    /// failed, the old index staying. On pgvector it does not apply
+    VectorSwap,
+    /// Raw session retention: archive old transcripts, delete ancient archives and stale markers
+    /// (dry-run unless --apply; the ~/.cache/boring-distill markers say what was distilled)
+    Retention {
+        /// actually archive/delete instead of printing the plan
+        #[arg(long)]
+        apply: bool,
+        /// with --apply: skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Vault note hygiene: canonical `project:` slug and no placeholder tags, each rewritten note
+    /// backed up to `<note>.md.bak`; owner-written notes are only reported (dry-run unless --fix)
+    Steward {
+        /// vault root (default: $BORING_VAULT_DIR, then $BORING_HOME/vault, then ~/oh-my-boring/vault)
+        #[arg(long)]
+        vault: Option<String>,
+        /// actually rewrite instead of printing the plan
+        #[arg(long)]
+        fix: bool,
+        /// with --fix: skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// Delete orphan semantic nodes (remove edge-unreferenced legacy remnants)
     Gc,
@@ -121,6 +170,9 @@ async fn main() -> Result<()> {
     // BORING_VECTOR: default off = wiki first-class (no Postgres connection, simple). Turn on to enable pgvector (vector+graph).
     // unset/off → don't open Store → start engine/CLI without Postgres. (aligned with the wiki-primary trend)
     let cfg = config::BoringConfig::load(None)?;
+    if let Some(notice) = cfg.vector.effective().backend_error {
+        eprintln!("[config] {notice}");
+    }
 
     let cmd = match cli.cmd {
         Cmd::CodeSync { repository } => {
@@ -143,7 +195,14 @@ async fn main() -> Result<()> {
                     .map_or_else(String::new, |id| format!(" repository '{id}'"))
             );
             let dsn = config::pg_dsn();
-            let mut code_store = code_index::CodeIndexStore::connect(&dsn)?;
+            let surreal = match cfg.vector.effective().backend {
+                config::VectorBackend::Surreal => Some(store::SurrealClient::new(
+                    cfg.vector.surreal.settings(&config::env_set)?,
+                )?),
+                config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
+            };
+            // backend=surreal: sync_repository writes Surreal directly; pg stays untouched.
+            let mut code_store = code_index::CodeIndexStore::connect(&dsn)?.with_surreal(surreal);
             code_store.initialize().await?;
             for source in selected {
                 let report = code_index::sync_repository(&mut code_store, source).await?;
@@ -159,9 +218,42 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::CodeCheck => {
+            let surreal = match cfg.vector.effective().backend {
+                config::VectorBackend::Surreal => Some(store::SurrealClient::new(
+                    cfg.vector.surreal.settings(&config::env_set)?,
+                )?),
+                config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
+            };
+            let Some(client) = surreal else {
+                println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
+                return Ok(());
+            };
+            let sources: Vec<_> = cfg
+                .code_index
+                .sources
+                .iter()
+                .filter(|source| source.enabled())
+                .collect();
+            let report = code_index::code_check(client, &config::pg_dsn(), &sources).await?;
+            for line in &report.lines {
+                println!("{line}");
+            }
+            anyhow::ensure!(
+                report.same,
+                "code-check: 디스크 파일과 surreal 의 sha 가 다름 — code-sync 를 다시 돌릴 것"
+            );
+            return Ok(());
+        }
         Cmd::CodeStatus { repository } => {
             let dsn = config::pg_dsn();
-            let code_store = code_index::CodeIndexStore::connect(&dsn)?;
+            let surreal = match cfg.vector.effective().backend {
+                config::VectorBackend::Surreal => Some(store::SurrealClient::new(
+                    cfg.vector.surreal.settings(&config::env_set)?,
+                )?),
+                config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => None,
+            };
+            let code_store = code_index::CodeIndexStore::connect(&dsn)?.with_surreal(surreal);
             let statuses = code_store.status(repository.as_deref()).await?;
             if let Some(requested) = repository.as_deref() {
                 anyhow::ensure!(
@@ -187,6 +279,16 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::Retention { apply, yes } => {
+            let home = std::env::var("HOME").context("HOME is unset; cannot locate ~/.cache")?;
+            let places = retention::Places::resolve(&cfg.session_end_source_dirs(), &home);
+            let policy = retention::Policy::from_env(&|name| std::env::var(name).ok());
+            return retention::run(&places, &policy, retention::Mode { apply, yes });
+        }
+        Cmd::Steward { vault, fix, yes } => {
+            let wiki = steward::wiki_dir(vault.as_deref(), &|name| std::env::var(name).ok())?;
+            return steward::run(&cfg, &wiki, steward::Mode { fix, yes });
+        }
         Cmd::Version => {
             // Empty means the build could not resolve a commit (no .git, no BUILD_SHA), which is
             // a different statement from a stale sha and must not be dressed up as one.
@@ -206,7 +308,22 @@ async fn main() -> Result<()> {
     let store: Option<store::Store> = if vector_on {
         let dsn = config::pg_dsn();
         // embed_dim (boring.json) sizes the vector columns — the kernel's only model knob.
-        Some(store::Store::open(&dsn, cfg.embed_dim as usize).await?)
+        let opened = store::Store::open(&dsn, cfg.embed_dim as usize).await?;
+        let route = match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                eprintln!(
+                    "[vector] backend=surreal ({}); {}",
+                    settings.url,
+                    config::SURREAL_PINNED_NOTES.join("; ")
+                );
+                store::VectorRoute::Surreal(store::SurrealClient::new(settings)?)
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                store::VectorRoute::Pgvector
+            }
+        };
+        Some(opened.with_vector_route(route))
     } else {
         None
     };
@@ -238,20 +355,19 @@ async fn main() -> Result<()> {
                     source_path: (*id).to_owned(),
                     ..Default::default()
                 };
-                // chunk.source_path REFERENCES document(source_path) — call upsert_document
-                // first to guarantee the parent record so the FK is satisfied.
+                // The ingest write path, so backend=surreal stores where vector_search reads.
+                let mut conn = store.conn().await?;
+                let tx = conn.transaction().await.context("begin selftest write")?;
                 store
-                    .upsert_document(&front, "selftest", std::time::SystemTime::now())
+                    .write_note_on(
+                        &tx,
+                        &front,
+                        "selftest",
+                        std::time::SystemTime::now(),
+                        vec![((*text).to_owned(), emb)],
+                    )
                     .await?;
-                store
-                    .upsert_chunk(&store::Doc {
-                        id: (*id).into(),
-                        content: (*text).into(),
-                        embedding: emb,
-                        front,
-                        chunk_idx: 0,
-                    })
-                    .await?;
+                tx.commit().await.context("commit selftest write")?;
             }
 
             let query = "how to use vectors and graphs in a database";
@@ -265,7 +381,7 @@ async fn main() -> Result<()> {
             }
             // GOAL check: the 'db' document must rank first (semantically closest to the query)
             match hits.first() {
-                Some(h) if h.id == "doc:db" => {
+                Some(h) if h.id == "doc:db#0" => {
                     println!("✅ ranking correct (doc:db #1) — vector search OK");
                 }
                 Some(h) => println!("⚠️ #1 is not doc:db: {} — check embedding/distance", h.id),
@@ -363,7 +479,86 @@ async fn main() -> Result<()> {
                 ss.tools, ss.concepts, ss.uses, ss.about
             );
         }
-        Cmd::CodeSync { .. } | Cmd::CodeStatus { .. } | Cmd::Version => {}
+        Cmd::VectorFill => {
+            let store = store.as_ref().context(VEC_OFF)?;
+            let settings = cfg.vector.surreal.settings(&config::env_set)?;
+            let client = store::SurrealClient::new(settings)?;
+            let tables = client.fill_from(store).await?;
+            for table in &tables {
+                println!("{}", table.line());
+            }
+            anyhow::ensure!(
+                tables.iter().all(store::FillTable::same),
+                "vector-fill: pg 와 surreal 의 행 수 또는 id 집합 해시가 다름"
+            );
+        }
+        Cmd::VectorCheck => match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let store = store.as_ref().context(VEC_OFF)?;
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                let client = store::SurrealClient::new(settings)?;
+                let tables = client.compare(store).await?;
+                for table in &tables {
+                    println!("{}", table.line());
+                }
+                let values = client.claim_row_diff(store).await?;
+                println!("{}", values.line());
+                anyhow::ensure!(
+                    tables.iter().all(store::FillTable::same) && values.same(),
+                    "vector-check: pg 와 surreal 의 행 수 또는 id 집합 해시가 다름 — vector-fill 을 다시 돌릴 것"
+                );
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                println!("backend=pgvector — 해당 없음 (대조는 backend=surreal 일 때만)");
+            }
+        },
+        Cmd::LogCopy => match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let store = store.as_ref().context(VEC_OFF)?;
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                let client = store::SurrealClient::new(settings)?;
+                let started = std::time::Instant::now();
+                for copied in client.copy_logs(store).await? {
+                    println!("{}", copied.line());
+                }
+                println!("pass {} ms", started.elapsed().as_millis());
+                let checks = client.check_logs(store).await?;
+                for check in &checks {
+                    println!("{}", check.line());
+                }
+                anyhow::ensure!(
+                    checks.iter().all(store::LogCheck::same),
+                    "log-copy: pg 와 surreal 의 행 수 또는 값이 다름"
+                );
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                println!("backend=pgvector — 해당 없음 (사본은 backend=surreal 일 때만)");
+            }
+        },
+        Cmd::VectorSwap => match cfg.vector.effective().backend {
+            config::VectorBackend::Surreal => {
+                let settings = cfg.vector.surreal.settings(&config::env_set)?;
+                let swaps = store::SurrealClient::new(settings)?
+                    .swap_if_changed()
+                    .await?;
+                for swap in &swaps {
+                    println!("{}", swap.line());
+                }
+                anyhow::ensure!(
+                    !swaps.iter().any(store::Swap::failed),
+                    "vector-swap: 실패한 테이블이 있음 — 위 줄 참조"
+                );
+            }
+            config::VectorBackend::Pgvector | config::VectorBackend::Unsupported(_) => {
+                println!("backend=pgvector — 해당 없음 (swap 은 backend=surreal 일 때만)");
+            }
+        },
+        Cmd::CodeSync { .. }
+        | Cmd::CodeCheck
+        | Cmd::CodeStatus { .. }
+        | Cmd::Retention { .. }
+        | Cmd::Steward { .. }
+        | Cmd::Version => {}
         Cmd::Link { vault } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault
@@ -376,6 +571,13 @@ async fn main() -> Result<()> {
                 });
             let n = vault::project_links(store, std::path::Path::new(&vault_root), 6).await?;
             println!("graph→obsidian: updated relates_to of {n} wiki notes");
+        }
+        Cmd::AnchorBackfill { dry_run } => {
+            let store = store.as_ref().context(VEC_OFF)?;
+            let sources = &cfg.code_index.sources;
+            let tally = drudge::anchor_backfill::run(store, sources, dry_run).await?;
+            println!("{}", tally.render(dry_run));
+            println!("{}", drudge::anchor_backfill::root_line(sources));
         }
         Cmd::Gc => {
             let store = store.as_ref().context(VEC_OFF)?;
@@ -390,7 +592,10 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Config => {
-            println!("{}", serde_json::to_string_pretty(&cfg)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cfg.settings_view(&config::env_set)?)?
+            );
         }
         Cmd::Serve => {
             let ol = llm::Llm::from_config(&cfg);
@@ -401,7 +606,7 @@ async fn main() -> Result<()> {
             let store = store.as_ref().context(VEC_OFF)?;
             let summary = store.compact().await?;
             println!(
-                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {} claim nodes {} claim edges {}), total {}ms",
+                "compact done — vacuum {}ms, reindex {}ms, prune_query_log {}, gc(tool {} concept {} claim nodes {} claim edges {}), skipped_lock_timeout {:?}, total {}ms",
                 summary.report.vacuum_ms,
                 summary.report.reindex_ms,
                 summary.report.prune_query_log,
@@ -409,6 +614,7 @@ async fn main() -> Result<()> {
                 summary.report.gc_concept,
                 summary.report.gc_claim_nodes,
                 summary.report.gc_claim_edges,
+                summary.report.skipped_lock_timeout,
                 summary.total_ms,
             );
         }

@@ -515,6 +515,28 @@ def test_an_owner_confirmed_correction_is_signed_owner_and_carries_the_token():
     assert "X-boring-owner-token" not in unconfirmed["headers"]
 
 
+def test_startup_stops_with_the_path_when_the_vault_folder_is_missing_or_has_no_notes():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = os.path.join(tmp, "nope")
+        empty = os.path.join(tmp, "empty")
+        os.makedirs(os.path.join(empty, "wiki"))
+        stocked = os.path.join(tmp, "stocked")
+        os.makedirs(os.path.join(stocked, "wiki"))
+        open(os.path.join(stocked, "wiki", "a.md"), "w").close()
+
+        for path in (missing, empty):
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"BORING_VAULT_DIR": path}), mock.patch("sys.stderr", err):
+                code = sec.check_vault_dir()
+            assert code != 0 and path in err.getvalue(), (path, code, err.getvalue())
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"BORING_VAULT_DIR": stocked}), mock.patch("sys.stderr", err):
+            assert sec.check_vault_dir() == 0 and err.getvalue() == ""
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

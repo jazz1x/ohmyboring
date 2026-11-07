@@ -40,6 +40,8 @@ done
 cat > "$home/drudge/target/release/drudge" <<'EOF'
 #!/bin/sh
 echo "drudge-stub-ran $*"
+[ "$1" = "${STUB_DRUDGE_FAIL:-}" ] && exit 2
+exit 0
 EOF
 chmod +x "$home/drudge/target/release/drudge"
 
@@ -151,6 +153,39 @@ else
     fail "a missing token — $bad"
 fi
 
+# (e) the retention step fails (an old drudge binary without the subcommand, a broken boring.json):
+# the run shows one ✗ line for it, goes on to the later steps, and still exits non-zero.
+run_case STUB_DRUDGE_FAIL=retention
+bad=""
+if [ "$rc" = "0" ]; then bad="rc 0 (want non-zero)"; fi
+if ! printf '%s' "$out" | grep -q '^✗ retention'; then
+    bad="${bad:+$bad, }no ✗ retention line in the output"
+fi
+if ! printf '%s' "$out" | grep -qF '=== maintenance finished'; then
+    bad="${bad:+$bad, }the later steps did not run"
+fi
+if [ -z "$bad" ]; then
+    pass "a failing retention step prints a ✗ line, the run finishes, the exit code is non-zero"
+else
+    fail "a failing retention step — $bad"
+fi
+
+# (f) the data-steward step fails (same causes): the same ✗ line, the run finishes, exit non-zero.
+run_case STUB_DRUDGE_FAIL=steward
+bad=""
+if [ "$rc" = "0" ]; then bad="rc 0 (want non-zero)"; fi
+if ! printf '%s' "$out" | grep -q '^✗ data-steward'; then
+    bad="${bad:+$bad, }no ✗ data-steward line in the output"
+fi
+if ! printf '%s' "$out" | grep -qF '=== maintenance finished'; then
+    bad="${bad:+$bad, }the later steps did not run"
+fi
+if [ -z "$bad" ]; then
+    pass "a failing data-steward step prints a ✗ line, the run finishes, the exit code is non-zero"
+else
+    fail "a failing data-steward step — $bad"
+fi
+
 # Scratch mutants run from a directory with the real scripts/lib beside them: the script
 # resolves lib relative to its own path, and a symlink keeps the mutant on the shared files.
 mutant_dir="$tmp/mutant"
@@ -187,11 +222,11 @@ else
     fail "mutation: the run still finished with the abort in place — case (a) proves nothing"
 fi
 
-# (install) the plist carries a PATH that starts at the installer's python3 — launchd's own
-# PATH resolves python3 to Xcode's 3.9, and every nested python3 in run/doctor follows PATH.
+# (install) the plist carries a PATH that starts at the installer's uv — launchd's own
+# PATH resolves the system python to Xcode's 3.9, and the run's `uv run --locked python` follows PATH.
 mkdir -p "$tmp/py/bin"
-printf '#!/bin/sh\n' > "$tmp/py/bin/python3"
-chmod +x "$tmp/py/bin/python3"
+printf '#!/bin/sh\n' > "$tmp/py/bin/uv"
+chmod +x "$tmp/py/bin/uv"
 printf '#!/bin/sh\n[ "${1:-}" = print ] && echo "program = $BORING_HOME"\nexit 0\n' > "$tmp/bin/launchctl"
 printf '#!/bin/sh\necho Darwin\n' > "$tmp/bin/uname"
 chmod +x "$tmp/bin/launchctl" "$tmp/bin/uname"
@@ -200,7 +235,7 @@ out=$(env BORING_HOME="$home" HOME="$home" PATH="$tmp/bin:$tmp/py/bin:/usr/bin:/
     sh "$SCRIPT_UNDER_TEST" install 2>&1) || rc=$?
 plist="$home/Library/LaunchAgents/com.ohmyboring.maintenance.plist"
 if [ "$rc" = "0" ] && grep -A1 '<key>PATH</key>' "$plist" | grep -qF "<string>$tmp/py/bin:"; then
-    pass "install: the plist's PATH starts at the installer's python3 directory"
+    pass "install: the plist's PATH starts at the installer's uv directory"
 else
     fail "install: no PATH starting at $tmp/py/bin in the plist (rc=$rc): $out"
 fi

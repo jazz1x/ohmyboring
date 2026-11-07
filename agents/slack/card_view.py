@@ -34,6 +34,7 @@ import os
 import re
 import sys
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from typing import NamedTuple, assert_never
 from urllib.parse import quote
 
@@ -74,6 +75,8 @@ from card_types import (  # noqa: E402
     ReviewPress,
     Score,
     Scored,
+    SealedValue,
+    ValuePair,
 )
 
 from ohmyboring.config import FileLink, NoteLink, ObsidianLink  # noqa: E402
@@ -142,8 +145,8 @@ def _lane_value(lane: str, data: dict, *, note: str | None = None) -> str:
     return _button_value(_lane_data(lane, data, note=note))
 
 
-def _actions_block(idx: int, proposal: Proposal, strings: dict[str, str]) -> dict:
-    elements = []
+def _advice_buttons(idx: int, proposal: Proposal, strings: dict[str, str]) -> list[tuple[str, dict]]:
+    tagged = []
     for choice in CHOICES:
         button = {
             "type": "button",
@@ -155,8 +158,41 @@ def _actions_block(idx: int, proposal: Proposal, strings: dict[str, str]) -> dic
             button["style"] = "primary"
         elif choice == "drop":
             button["style"] = "danger"
-        elements.append(button)
-    return {"type": "actions", "elements": elements}
+        tagged.append((choice, button))
+    return tagged
+
+
+#: Which choice each carousel card carries — the one place to change that mapping.
+CAROUSEL_CARD_CHOICES = (("new", "do"), ("prior", "drop"))
+
+
+def _draws_carousel(row: Proposal | ProposedVerdict) -> bool:
+    return row.pairs_unread or any(p.prior is not None for p in row.pairs)
+
+
+def _row_buttons(
+    lane: str, tagged: list[tuple[str, dict]], row: Proposal | ProposedVerdict, strings: dict[str, str]
+) -> tuple[dict[str, dict], list[dict]]:
+    """(buttons for the carousel cards by side, buttons for the top-level actions block). A row
+    that draws no carousel keeps every button in the actions block. When the prior could not be
+    read, its card has no button and that choice (drop) is offered nowhere on the row."""
+    if not _draws_carousel(row):
+        return {}, [button for _, button in tagged]
+    side_of = {
+        choice: side for side, choice in CAROUSEL_CARD_CHOICES if not (row.pairs_unread and side == "prior")
+    }
+    cards: dict[str, dict] = {}
+    rest: list[dict] = []
+    for choice, button in tagged:
+        side = side_of.get(choice)
+        if row.pairs_unread and choice == "drop":
+            continue
+        if side is None:
+            rest.append(button)
+        else:
+            label = strings[f"carousel_{lane}_{choice}"]
+            cards[side] = {**button, "text": {**button["text"], "text": label}}
+    return cards, rest
 
 
 def _verdict_block(verdict: ButtonVerdict, strings: dict[str, str]) -> dict:
@@ -223,6 +259,71 @@ def _quote_block(evidence: list[Evidence], strings: dict[str, str]) -> dict:
     return {"type": "rich_text", "elements": [{"type": "rich_text_quote", "elements": elements}]}
 
 
+#: Longest a value shows in its card — the same field cap the kb conflict card keeps.
+VALUE_CARD_CHARS = 200
+
+KST = timezone(timedelta(hours=9))
+
+
+def _kst(at: datetime, fmt: str) -> str:
+    return at.astimezone(KST).strftime(fmt)
+
+
+def _value_card(head: str, value: str, ref: str, button: dict | None) -> dict:
+    card = {
+        "type": "card",
+        "title": {"type": "mrkdwn", "text": head},
+        "body": {"type": "mrkdwn", "text": _mrkdwn_plain(value, VALUE_CARD_CHARS)},
+        "subtext": {"type": "mrkdwn", "text": ref},
+    }
+    return {**card, "actions": [button]} if button is not None else card
+
+
+def _value_blocks(
+    row: Proposal | ProposedVerdict, strings: dict[str, str], card_buttons: dict[str, dict] | None = None
+) -> list[dict]:
+    """The row's value look: new | prior side by side when a pair has a sealed prior (the first
+    such pair — the engine lists newest first), else the first pair's new value alone (Absent),
+    else nothing — a note with no claim has no value to show. A prior that could not be read is
+    its own card, never drawn as Absent; the new value is unknown then, so the new card names
+    the note being judged."""
+    note, pairs = row.note, row.pairs
+    new_ref = strings["value_new_ref"].format(note=note_label(note))
+    buttons = card_buttons or {}
+    if row.pairs_unread:
+        return [
+            {
+                "type": "carousel",
+                "elements": [
+                    _value_card(strings["value_new_head"], note_label(note), new_ref, buttons.get("new")),
+                    _value_card(strings["value_prior_head"], strings["value_unread"], "-", None),
+                ],
+            }
+        ]
+    match next((p for p in pairs if p.prior is not None), None), pairs:
+        case ValuePair(prior=SealedValue() as prior) as pair, _:
+            sealed = _kst(datetime.fromisoformat(prior.superseded_at), "%Y-%m-%d %H:%M")
+            prior_ref = strings["value_prior_ref"].format(note=note_label(prior.note), at=sealed)
+            return [
+                {
+                    "type": "carousel",
+                    "elements": [
+                        _value_card(strings["value_new_head"], pair.value, new_ref, buttons.get("new")),
+                        _value_card(
+                            strings["value_prior_head"], prior.value, prior_ref, buttons.get("prior")
+                        ),
+                    ],
+                }
+            ]
+        case None, [first, *_]:
+            text = "\n".join(
+                (strings["value_new_head"], _mrkdwn_plain(first.value, VALUE_CARD_CHARS), new_ref)
+            )
+            return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+        case _:
+            return []
+
+
 def _proposal_row(
     idx: int,
     total: int,
@@ -238,16 +339,16 @@ def _proposal_row(
     lane's presence); `action_idx` is the shared button-idx space a press reads —
     n_repairs + idx once a repair lane exists, idx alone otherwise."""
     links_text = note_links_text(note_label(proposal.note), note_links, strings)
+    cards, rest = _row_buttons("advice", _advice_buttons(action_idx, proposal, strings), proposal, strings)
     row = [
         {"type": "divider"},
         _tag_block(idx, total, proposal, register_labels, links_text),
         _section_block(proposal),
+        *_value_blocks(proposal, strings, cards if verdict is None else None),
         _quote_block(proposal.evidence, strings),
     ]
     row.append(
-        _verdict_block(verdict, strings)
-        if verdict is not None
-        else _actions_block(action_idx, proposal, strings)
+        _verdict_block(verdict, strings) if verdict is not None else {"type": "actions", "elements": rest}
     )
     return row
 
@@ -576,6 +677,16 @@ def _review_tag_block(
 SAMPLE_CHOICES = ("do", "drop")
 
 
+def _review_buttons(idx: int, strings: dict[str, str]) -> list[tuple[str, dict]]:
+    tagged = [
+        (choice, _bare_button(idx, choice, strings[f"review_button_{choice}"]))
+        for choice in ("do", "drop", "delegate", "defer")
+    ]
+    tagged.append((COMMENT, _bare_button(idx, COMMENT, strings["review_button_comment"])))
+    tagged.append((UNCLEAR, _bare_button(idx, UNCLEAR, strings["button_unclear"])))
+    return tagged
+
+
 def _review_actions_block(
     idx: int, review: ProposedVerdict, strings: dict[str, str], *, sample: bool = False
 ) -> dict:
@@ -591,13 +702,7 @@ def _review_actions_block(
             button["value"] = value
             elements.append(button)
         return {"type": "actions", "elements": elements}
-    elements = [
-        _bare_button(idx, choice, strings[f"review_button_{choice}"])
-        for choice in ("do", "drop", "delegate", "defer")
-    ]
-    elements.append(_bare_button(idx, COMMENT, strings["review_button_comment"]))
-    elements.append(_bare_button(idx, UNCLEAR, strings["button_unclear"]))
-    return {"type": "actions", "elements": elements}
+    return {"type": "actions", "elements": [button for _, button in _review_buttons(idx, strings)]}
 
 
 def _review_row_data(review: ProposedVerdict) -> dict:
@@ -664,11 +769,17 @@ def _review_row(
         {"type": "divider"},
         _review_tag_block(review, strings, note_links, text_max, show_work=show_work),
     ]
-    row.append(
-        _review_verdict_block(review, verdict, strings)
-        if verdict is not None
-        else _review_actions_block(idx, review, strings, sample=sample)
+    cards, rest = (
+        ({}, []) if sample else _row_buttons("review", _review_buttons(idx, strings), review, strings)
     )
+    if not sample:
+        row.extend(_value_blocks(review, strings, cards if verdict is None else None))
+    if verdict is not None:
+        row.append(_review_verdict_block(review, verdict, strings))
+    elif sample:
+        row.append(_review_actions_block(idx, review, strings, sample=True))
+    else:
+        row.append({"type": "actions", "elements": rest})
     return row
 
 
@@ -757,7 +868,7 @@ def mark_pressed(
             out[i] = _review_verdict_block(press, verdict, strings)
         else:
             out[i] = _verdict_block(verdict, strings)
-        return out
+        return [_without_card_buttons(b) if _is_row_carousel(b, press.idx) else b for b in out]
     return Rejected(reason=f"row {press.idx} is not pressable")
 
 
@@ -777,6 +888,41 @@ def status_text(outcome: Outcome, strings: dict[str, str]) -> str:
             return strings["comment_received"].format(head=head)
         case _:
             assert_never(outcome)
+
+
+def _carousel_buttons(block: dict) -> list[dict]:
+    if block.get("type") != "carousel":
+        return []
+    return [button for card in block.get("elements", []) for button in card.get("actions", [])]
+
+
+def _is_row_carousel(block: dict, idx: int) -> bool:
+    """A value carousel whose cards carry row `idx`'s buttons — found by action_id alone."""
+    prefix = f"card:{idx}:"
+    return any(
+        isinstance(el.get("action_id"), str) and el["action_id"].startswith(prefix)
+        for el in _carousel_buttons(block)
+    )
+
+
+def _without_card_buttons(block: dict) -> dict:
+    cards = [{k: v for k, v in card.items() if k != "actions"} for card in block["elements"]]
+    return {**block, "elements": cards}
+
+
+def _pressed_label(blocks: list[dict], idx: int, choice: str) -> str | Rejected:
+    """The text of the button that was pressed — top-level or on a carousel card."""
+    action_id = f"card:{idx}:{choice}"
+    buttons = [
+        el
+        for block in blocks
+        for el in (block.get("elements", []) if block.get("type") == "actions" else _carousel_buttons(block))
+        if isinstance(el, dict)
+    ]
+    found = next((b for b in buttons if b.get("action_id") == action_id), None)
+    if found is None:
+        return Rejected(reason=f"row {idx} is not pressable")
+    return found["text"]["text"]
 
 
 def _is_row_actions(block: dict, idx: int) -> bool:
@@ -820,7 +966,11 @@ def _status_above_buttons(blocks: list[dict], idx: int, status: dict) -> list[di
 
 
 def _is_row_block(block: dict, idx: int) -> bool:
-    return block.get("block_id") == _status_id(idx) or _is_row_actions(block, idx)
+    return (
+        block.get("block_id") == _status_id(idx)
+        or _is_row_actions(block, idx)
+        or _is_row_carousel(block, idx)
+    )
 
 
 def _status_block(idx: int, outcome: Outcome, lang: str) -> dict:
@@ -835,14 +985,15 @@ def row_progress(blocks: list[dict], idx: int, outcome: Outcome, *, lang: str) -
     """Row `idx`'s own blocks once `outcome` shows: the status line alone, or — for a failure —
     the status line above the row's buttons taken from `blocks`, so the owner can press again."""
     actions = next((block for block in blocks if _is_row_actions(block, idx)), None)
-    if actions is None and not any(_is_row_block(block, idx) for block in blocks):
+    carousel = next((block for block in blocks if _is_row_carousel(block, idx)), None)
+    if actions is None and carousel is None and not any(_is_row_block(block, idx) for block in blocks):
         return Rejected(reason=f"row {idx} has no buttons or status to replace")
     status = _status_block(idx, outcome, lang)
     match outcome:
         case Failed() | Received() if actions is not None:
-            return [status, actions]
+            return [*([carousel] if carousel else []), status, actions]
         case _:
-            return [status]
+            return [*([_without_card_buttons(carousel)] if carousel else []), status]
 
 
 def row_pressed(
@@ -851,14 +1002,29 @@ def row_pressed(
     *,
     lang: str,
     repair_result: RepairDone | RepairFailed | RepairUnanswered | None = None,
+    at: datetime,
 ) -> list[dict] | Rejected:
-    """Row `press.idx`'s judged block alone, as mark_pressed renders it in place of the buttons."""
+    """Row `press.idx`'s pressed block alone, in place of the buttons: the judged block as
+    mark_pressed renders it, except on a carousel row, which settles into 「✅ 이름 · 선택 ·
+    HH:MM(KST)」 in its status slot, under its card values with their buttons gone."""
     marked = mark_pressed(blocks, press, lang=lang, repair_result=repair_result)
     match marked:
         case Rejected():
             return marked
-    at = next(i for i, block in enumerate(blocks) if _is_row_actions(block, press.idx))
-    return [marked[at]]
+    carousel = next((block for block in blocks if _is_row_carousel(block, press.idx)), None)
+    match carousel:
+        case None:
+            at_row = next(i for i, block in enumerate(blocks) if _is_row_actions(block, press.idx))
+            return [marked[at_row]]
+        case _:
+            label = _pressed_label(blocks, press.idx, press.choice)
+            match label:
+                case Rejected():
+                    return label
+            line = card_i18n.STRINGS[lang]["pressed_line"].format(
+                name=f"<@{press.user}>", label=label, time=_kst(at, "%H:%M")
+            )
+            return [_without_card_buttons(carousel), _status_block(press.idx, Done(text=line), lang)]
 
 
 def replace_row(current: list[dict], idx: int, segment: list[dict]) -> list[dict] | Rejected:
@@ -930,6 +1096,12 @@ def merged_outcome(done: RepairDone, *, lang: str) -> Done:
         deleted=done.deleted_rows, reread=done.reread_notes
     ) + _owner_held_suffix(done.owner_held, strings)
     return Done(text=text)
+
+
+def merge_unanswered_outcome(reason: str, *, lang: str) -> Done:
+    """The row mark when the engine gave the door no answer to a merge: no counts — the rows may
+    already be gone, so 0 would be a lie (the same mark `RepairUnanswered` shows)."""
+    return Done(text=card_i18n.STRINGS[lang]["repair_verdict_unanswered"].format(reason=reason))
 
 
 def reread_failed_outcome(error: object, *, lang: str) -> Failed:
@@ -1093,7 +1265,8 @@ def build_card(
     # silently. A card that filled all 50 blocks with advice rows used to push the
     # review header past the cap. The first sample's blocks are reserved the same way: it
     # never gives way; the second rides only in what is left.
-    review_tail = ((1 + 3 * len(reviews)) if reviews else 0) + sample_tail
+    review_rows = sum(3 + len(_value_blocks(r, strings)) for r in reviews)
+    review_tail = ((1 + review_rows) if reviews else 0) + sample_tail
     for _project, indices in _project_groups(proposals):
         for idx in indices:
             if shown >= caps.advice:
