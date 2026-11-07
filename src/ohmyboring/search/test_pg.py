@@ -122,7 +122,7 @@ class PgIntegrationTests(unittest.TestCase):
                 "CREATE TABLE claim ("
                 " subject text NOT NULL, predicate text NOT NULL, value text NOT NULL,"
                 " source_path text NOT NULL,"
-                " valid_from timestamptz NOT NULL, superseded_at timestamptz,"
+                " valid_from timestamptz NOT NULL, superseded_at timestamptz, stale_at timestamptz,"
                 " kind text NOT NULL DEFAULT 'fact', confidence text NOT NULL DEFAULT 'certain',"
                 " said_by text);"
             )

@@ -6216,7 +6216,8 @@ async fn register_row_counts_newer_open_values_in_its_slot() {
     let claims: [(&String, &str, u64, &str); 7] = [
         (&subject_a, "old", 0, "next"),
         (&subject_a, "mid", 3600, "blocked"),
-        (&subject_a, "new", 2 * 86_400 + 12_600, "next"),
+        // 11-07 16:30 UTC is 11-08 01:30 KST: the day must come from KST, not from UTC.
+        (&subject_a, "new", 2 * 86_400 + 48_600, "next"),
         (&subject_b, "old", 0, "next"),
         (&subject_b, "sealed", 3600, "next"),
         (&subject_b, "stale", 7200, "next"),
