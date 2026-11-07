@@ -13,14 +13,21 @@ from __future__ import annotations
 import re
 import struct
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 
 from ohmyboring.result import Either, Err, Ok, map_ok
-from ohmyboring.search.pg import PgError, _canonical_confidence, _canonical_kind
+from ohmyboring.search.pg import (
+    NEWER_OPEN_LATERAL_SQL,
+    NewerOpen,
+    PgError,
+    _canonical_confidence,
+    _canonical_kind,
+    newer_open_of,
+)
 from ohmyboring.store import surreal
 from ohmyboring.store.surreal import SurrealClient
 
@@ -82,8 +89,14 @@ MCP_TOOLS = {
 
 #: ── SQL (store.rs 정본 — 최근접 문서 제외 레지스터 전부) ─────────────────────
 _RECENT_REGISTER_ROWS_SQL = (
-    "SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,"
-    " COUNT(*) OVER () AS total"
+    "WITH b AS ("
+    " SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,"
+    " COUNT(*) OVER () AS total,"
+    " ROW_NUMBER() OVER ("
+    " ORDER BY (CASE WHEN length(c.value) < %(informative)s THEN 1 ELSE 0 END)"
+    " + (CASE WHEN c.predicate ~* %(tautological)s THEN 1 ELSE 0 END),"
+    ' c.valid_from DESC, c.subject COLLATE "C", c.predicate COLLATE "C"'
+    " ) AS rn"
     " FROM claim c"
     " JOIN document d ON d.source_path = c.source_path"
     " WHERE c.superseded_at IS NULL"
@@ -91,10 +104,12 @@ _RECENT_REGISTER_ROWS_SQL = (
     " AND (%(kinds)s::text[] IS NULL OR c.kind = ANY(%(kinds)s))"
     " AND NOT (d.origin = ANY(%(exclude_origins)s))"
     " AND d.source_path !~ %(not_user_memory)s"
-    " ORDER BY (CASE WHEN length(c.value) < %(informative)s THEN 1 ELSE 0 END)"
-    " + (CASE WHEN c.predicate ~* %(tautological)s THEN 1 ELSE 0 END),"
-    ' c.valid_from DESC, c.subject COLLATE "C", c.predicate COLLATE "C"'
+    " ORDER BY rn"
     " LIMIT %(limit)s"
+    ")"
+    " SELECT b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from, b.project,"
+    " b.total, nv.cnt, nv.latest_day"
+    " FROM b" + NEWER_OPEN_LATERAL_SQL + " ORDER BY b.rn"
 )
 
 _STALLED_REGISTER_ROWS_SQL = (
@@ -215,6 +230,7 @@ class RegisterRow:
     confidence: str
     valid_from: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=UTC))
     project: str = ""
+    newer_open: NewerOpen | None = None
 
     @property
     def node_id(self) -> str:
@@ -222,7 +238,7 @@ class RegisterRow:
 
     def as_item(self) -> dict[str, Any]:
         """MCP register_json items[] 칸 — 엔진 serde 필드 순서 그대로."""
-        return {
+        item = {
             "node_id": self.node_id,
             "subject": self.subject,
             "predicate": self.predicate,
@@ -232,6 +248,9 @@ class RegisterRow:
             "valid_from": rfc3339(self.valid_from),
             "project": self.project,
         }
+        if self.newer_open is not None:
+            item["newer_open"] = self.newer_open.as_dict()
+        return item
 
     def as_context_item(self) -> dict[str, Any]:
         """ask.rs ContextItem — valid_from·node_id 없이 다섯 칸."""
@@ -403,6 +422,14 @@ def _register_rows_from(rows: list[tuple]) -> RegisterRows:
     return RegisterRows(rows=tuple(_to_register_row(row) for row in rows), total_matching=int(total))
 
 
+def _recent_register_rows_from(rows: list[tuple]) -> RegisterRows:
+    """_RECENT_REGISTER_ROWS_SQL 의 열 — 일곱 칸 + total + (cnt, latest_day)."""
+    return RegisterRows(
+        rows=tuple(replace(_to_register_row(row), newer_open=newer_open_of(row[8], row[9])) for row in rows),
+        total_matching=int(rows[0][7]) if rows else 0,
+    )
+
+
 #: ── Surreal 읽기 (엔진 vector_surreal.rs register_where·claim_reads.rs 를 조건 그대로 옮김) ──────────
 #: 읽는 표는 `claim_row`(열린 행 = `superseded_us = NONE`). `origin != NONE` 은 pg 의 document inner join.
 #: 순서의 끝(subject·predicate 바이트 순)은 pg 쪽 COLLATE "C" 와 같다.
@@ -557,7 +584,7 @@ def recent_register_rows(
         case Err(e):
             return Err(e)
         case Ok(rows):
-            return Ok(_register_rows_from(rows))
+            return Ok(_recent_register_rows_from(rows))
 
 
 def stalled_register_rows(
@@ -794,7 +821,10 @@ def render_register(rows: tuple[RegisterRow, ...], limit_applied: bool, total_ma
     for row in rows:
         kind = _canonical_kind(row.kind, row.value)
         confidence = _canonical_confidence(row.confidence)
-        lines.append(f"* {row.subject} — {row.predicate}: {row.value} (kind={kind}, confidence={confidence})")
+        mark = "" if row.newer_open is None else row.newer_open.mark()
+        lines.append(
+            f"* {row.subject} — {row.predicate}: {row.value} (kind={kind}, confidence={confidence}){mark}"
+        )
     return "\n".join(lines)
 
 
@@ -903,16 +933,15 @@ def context_payload(
     max_items: int,
     lang: str,
 ) -> Either[dict, PgError]:
-    """ask.rs ContextCard — decisions·risks·facts·glossary·next_actions·language 여섯 칸.
+    """ask.rs ContextCard — decisions·risks·facts·glossary·language 다섯 칸.
 
-    한 칸이라도 못 읽으면 Err — 엔진도 다섯 질의를 다 성공해야 답을 낸다."""
+    한 칸이라도 못 읽으면 Err — 엔진도 네 질의를 다 성공해야 답을 낸다."""
     sections: dict[str, tuple[RegisterRow, ...]] = {}
     for name, kinds in (
         ("decisions", DECISION_KINDS),
         ("risks", RISK_KINDS),
         ("facts", FACT_KINDS),
         ("glossary", GLOSSARY_KINDS),
-        ("next_actions", NEXT_ACTION_KINDS),
     ):
         match recent_claims(conn, max_items, project, kinds, exclude_origins):
             case Err(e):
@@ -933,7 +962,6 @@ def context_payload(
             "risks": [row.as_context_item() for row in sections["risks"]],
             "facts": [row.as_context_item() for row in sections["facts"]],
             "glossary": [row.as_context_item() for row in sections["glossary"]],
-            "next_actions": [row.as_context_item() for row in sections["next_actions"]],
             "language": lang,
         }
     )

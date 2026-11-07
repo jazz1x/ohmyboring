@@ -171,7 +171,8 @@ def recall_text(
 
 
 def _claim_line(row: pg.RegisterRow) -> str:
-    return f"  · {row.kind} {row.subject}/{row.predicate}: {row.value}"
+    mark = "" if row.newer_open is None else row.newer_open.mark()
+    return f"  · {row.kind} {row.subject}/{row.predicate}: {row.value}{mark}"
 
 
 def _refined_entry(  # noqa: PLR0913

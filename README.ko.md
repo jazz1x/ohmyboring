@@ -521,7 +521,7 @@ curl -s -X POST http://localhost:7710/mcp \
 
 | 엔드포인트 / MCP tool | 용도 | 벡터 백엔드 |
 |---|---|---|
-| `POST /context` / `context` | 구조화된 context 카드: decisions, risks, facts, glossary, next_actions | 불필요 |
+| `POST /context` / `context` | 구조화된 context 카드: decisions, risks, facts, glossary | 불필요 |
 | `POST /next_actions` / `next_actions` | 다음 행동 대장: 명시된 다음 단계 + 활성 blocker | 필요 |
 | `POST /stalled` / `stalled` | 정체 대장: 오래된 다음 단계와 blocker | 필요 |
 | `POST /recurrences` / `recurrences` | 재발 대장: 과거의 실수를 되풀이하는 최근 risk/blocked claim | 필요 |

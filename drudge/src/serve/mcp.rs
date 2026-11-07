@@ -1142,12 +1142,17 @@ fn refined_entry(
             .lines()
             .map(str::to_owned),
     );
-    out.extend(
-        register
-            .rows
-            .iter()
-            .map(|r| format!("  · {} {}/{}: {}", r.kind, r.subject, r.predicate, r.value)),
-    );
+    out.extend(register.rows.iter().map(|r| {
+        let mark = r
+            .newer_open
+            .as_ref()
+            .map(crate::store::NewerOpen::mark)
+            .unwrap_or_default();
+        format!(
+            "  · {} {}/{}: {}{mark}",
+            r.kind, r.subject, r.predicate, r.value
+        )
+    }));
     let hidden = register.total_matching - i64::try_from(register.rows.len()).unwrap_or(i64::MAX);
     if hidden > 0 {
         out.push(format!("  · … +{hidden} more"));
@@ -1596,7 +1601,6 @@ async fn mcp_context(s: &AppState, args: Option<&Value>) -> Result<Value, (i32, 
             risks: vec![],
             facts: vec![],
             glossary: vec![],
-            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };

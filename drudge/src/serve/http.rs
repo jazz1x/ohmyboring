@@ -376,7 +376,7 @@ pub(crate) async fn handle_recurrences(
     }))
 }
 
-/// Structured context card for agent session start — decisions/risks/facts/glossary/next_actions as claim lists.
+/// Structured context card for agent session start — decisions/risks/facts/glossary as claim lists.
 /// Uses recency ordering (no vector search), so it works when BORING_VECTOR=off.
 pub(crate) async fn handle_context(
     State(s): State<AppState>,
@@ -399,7 +399,6 @@ pub(crate) async fn handle_context(
             risks: vec![],
             facts: vec![],
             glossary: vec![],
-            next_actions: vec![],
             language: s.cfg.note_lang.as_str().to_owned(),
         }
     };

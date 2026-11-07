@@ -190,7 +190,6 @@ CONTEXT_BODY = json.dumps(
         "risks": [],
         "facts": [],
         "glossary": [],
-        "next_actions": [],
         "language": "ko",
     },
     ensure_ascii=False,
