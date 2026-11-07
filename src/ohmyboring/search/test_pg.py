@@ -94,6 +94,7 @@ class PgIntegrationTests(unittest.TestCase):
                 " author text NOT NULL DEFAULT 'unknown',"
                 " project text NOT NULL DEFAULT '',"
                 " updated_at timestamptz NOT NULL DEFAULT now(),"
+                " origin text NOT NULL DEFAULT '',"
                 " sha text NOT NULL DEFAULT '',"
                 " tags text[] NOT NULL DEFAULT '{}');"
             )
@@ -316,7 +317,7 @@ class PgIntegrationTests(unittest.TestCase):
                 self.fail(f"rank_facts: {e}")
 
     def test_current_claims_cut_and_canonical_kind(self):
-        match pg.current_claims(self.conn, ["/own.md"], 1):
+        match pg.current_claims(self.conn, ["/own.md"], 1, ()):
             case Ok(out):
                 rows = out["/own.md"]
                 self.assertEqual([r.predicate for r in rows.rows], ["판정"], "per_doc=1 이면 decision")
@@ -407,8 +408,38 @@ class PgIntegrationTests(unittest.TestCase):
             case Err(e):
                 self.fail(f"_claims: {e}")
 
+    def test_newer_open_value_in_an_excluded_origin_is_not_counted(self):
+        old, new = "/nv-old.md", "/nv-new.md"
+        with self.conn.cursor() as cur:
+            for path, origin, valid_from in (
+                (old, "personal", "2026-11-05T00:00:00+00:00"),
+                (new, "company", "2026-11-05T01:00:00+00:00"),
+            ):
+                cur.execute("INSERT INTO document (source_path, origin) VALUES (%s, %s);", (path, origin))
+                cur.execute(
+                    "INSERT INTO claim (source_path, subject, predicate, value, valid_from, kind)"
+                    " VALUES (%s, 'nv-slot', 'follow', %s, %s, 'next');",
+                    (path, path, valid_from),
+                )
+            cur.execute(
+                "INSERT INTO edge (src, dst, kind) VALUES (%s, 'claim:nv-slot:follow', 'claims');",
+                ("doc:" + old,),
+            )
+        self.addCleanup(self._drop_note, old)
+        self.addCleanup(self._drop_note, new)
+
+        def newer_open(exclude_origins):
+            match pg.current_claims(self.conn, [old], 10, exclude_origins):
+                case Ok(out):
+                    return out[old].rows[0].newer_open
+                case Err(e):
+                    self.fail(f"current_claims: {e}")
+
+        self.assertEqual(newer_open(()), pg.NewerOpen(1, "11-05"), "대조: 더 새 행이 있다")
+        self.assertIsNone(newer_open(("company",)))
+
     def test_current_claims_keeps_facts_and_drops_closed_rows(self):
-        match pg.current_claims(self.conn, ["/own.md"], 10):
+        match pg.current_claims(self.conn, ["/own.md"], 10, ()):
             case Ok(out):
                 rows = out["/own.md"]
                 self.assertEqual(
@@ -504,6 +535,7 @@ class RelatedBySharedGroundTests(unittest.TestCase):
                 " author text NOT NULL DEFAULT 'unknown',"
                 " project text NOT NULL DEFAULT '',"
                 " updated_at timestamptz NOT NULL DEFAULT now(),"
+                " origin text NOT NULL DEFAULT '',"
                 " sha text NOT NULL DEFAULT '',"
                 " tags text[] NOT NULL DEFAULT '{}');"
             )

@@ -871,6 +871,13 @@ class RegisterParityTests(unittest.TestCase):
                 pass
             case other:
                 self.fail(f"context_payload failed: {other!r}")
+        match registers_pg.recent_claims(self.conn, 50, None, registers_pg.NEXT_ACTION_KINDS, ()):
+            case registers_pg.Ok(next_rows):
+                pass
+            case other:
+                self.fail(f"recent_claims failed: {other!r}")
+        next_items = {row.subject: row.as_context_item() for row in next_rows}
+        self.assertEqual(next_items["subj-deny"]["kind"], "fact", "작업 부정 값은 fact 로 정규화")
         fact_subjects = {item["subject"] for item in card["facts"]}
         self.assertIn("subj-fact", fact_subjects)
         self.assertNotIn("subj-empty", fact_subjects, "빈 kind 는 SQL 필터(원시 칸)에 안 걸러 fact 가 아니다")

@@ -7,6 +7,7 @@ drudge/src/store.rs 의 해당 질의를 그대로 옮긴다. 실패는 psycopg 
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 
@@ -461,10 +462,10 @@ _CLAIMS_SQL = (
 
 
 def current_claims(
-    conn: psycopg.Connection, paths: list[str], per_doc: int
+    conn: psycopg.Connection, paths: list[str], per_doc: int, exclude_origins: Sequence[str]
 ) -> Either[dict[str, RegisterRows], PgError]:
     """/search·회상용 — 현재 claims→claim 간선이 잇는 행(fact 포함), tier·최신 순, 한 문서당 per_doc.
-    등록부(registers/pg.py)는 자기 SQL 로 fact 를 뺀다."""
+    등록부(registers/pg.py)는 자기 SQL 로 fact 를 뺀다. exclude_origins 는 newer_open 셈에만 쓰고 행은 거르지 않는다."""
     return _claims_by_doc(conn, _CLAIMS_SQL, paths, per_doc)
 
 

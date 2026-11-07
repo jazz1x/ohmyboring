@@ -1208,6 +1208,7 @@ def _recall_python(arguments: dict) -> recall_shadow.PythonAnswer:
         wiki_dir=Path(_vault_dir()) / "wiki",
         index=_RECALL_WIKI_INDEX,
         now_ns=time.time_ns(),
+        exclude_origins=_policy_origins(),
     )
 
 
@@ -1216,7 +1217,7 @@ def _recall_engine_claims(paths: list[str]) -> Either[dict, str]:
     dsn = os.environ.get("DOOR_PG_DSN")
     if not dsn:
         return Err("DOOR_PG_DSN not set")
-    return recall_answer.claims_of(dsn, paths)
+    return recall_answer.claims_of(dsn, paths, _policy_origins())
 
 
 _RECALL_READER_ENV = "DOOR_RECALL_READER"
@@ -2343,6 +2344,7 @@ async def _search(request: Request) -> Response:
         claims=params.claims,
         related=params.related,
         related_heads=params.related_heads,
+        exclude_origins=_policy_origins(),
     )
     started = time.monotonic()
     match await asyncio.to_thread(_search_execute, retriever, params.query):

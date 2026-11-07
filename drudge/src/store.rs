@@ -2711,6 +2711,7 @@ impl Store {
         &self,
         paths: &[String],
         per_doc: i64,
+        _exclude_origins: &[String],
     ) -> Result<HashMap<String, RegisterRows>> {
         let doc_ids: Vec<String> = paths.iter().map(|p| doc_node_id(p)).collect();
         let sql = format!(
