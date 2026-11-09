@@ -184,7 +184,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             mock.patch.object(sys, "stderr", stderr),
         ):
             ok = run.distill_and_remember(
-                "pure chit-chat",
+                "pure chit-chat about PR #1",
                 "personal",
                 "oh-my-boring",
                 "s-skip",

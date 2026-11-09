@@ -8,7 +8,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from ohmyboring.distill import polish as polish_engine
+from ohmyboring.distill import settings
 from ohmyboring.distill.nodes import draft, language, note, polish, remember, repair, skip, verify
+from ohmyboring.distill.resolution import evidence_tokens_unreachable
 from ohmyboring.distill.state import DistillState
 
 Node = Callable[[DistillState], dict[str, Any]]
@@ -16,6 +18,7 @@ Node = Callable[[DistillState], dict[str, Any]]
 
 @dataclass(frozen=True)
 class Steps:
+    no_evidence: Node
     draft: Node
     skip: Node
     retry_language: Node
@@ -30,6 +33,12 @@ class Steps:
     repair_failed: Node
     give_up: Node
     remember: Node
+
+
+def _at_start(state: DistillState) -> str:
+    if evidence_tokens_unreachable(state["text"], settings.distill_resolution()):
+        return "no_evidence"
+    return "draft"
 
 
 def _after_draft(state: DistillState) -> str:
@@ -72,6 +81,7 @@ def _after_repair_verify(state: DistillState) -> str:
 def build(steps: Steps) -> CompiledStateGraph:
     graph = StateGraph(DistillState)
     for name in (
+        "no_evidence",
         "draft",
         "skip",
         "retry_language",
@@ -89,7 +99,7 @@ def build(steps: Steps) -> CompiledStateGraph:
     ):
         graph.add_node(name, getattr(steps, name))
 
-    graph.add_edge(START, "draft")
+    graph.add_conditional_edges(START, _at_start)
     graph.add_conditional_edges("draft", _after_draft)
     graph.add_edge("retry_language", "prepare")
     graph.add_conditional_edges("prepare", _after_prepare)
@@ -100,13 +110,14 @@ def build(steps: Steps) -> CompiledStateGraph:
     graph.add_conditional_edges("repair_prepare", _after_repair_prepare)
     graph.add_conditional_edges("repair_verify", _after_repair_verify)
     graph.add_edge("repair_passed", "polish")
-    for terminal in ("skip", "repair_failed", "give_up", "remember"):
+    for terminal in ("no_evidence", "skip", "repair_failed", "give_up", "remember"):
         graph.add_edge(terminal, END)
     return graph.compile()
 
 
 graph = build(
     Steps(
+        no_evidence=skip.no_evidence,
         draft=draft.draft,
         skip=skip.skip,
         retry_language=language.retry_language,
