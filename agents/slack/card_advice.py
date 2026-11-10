@@ -135,7 +135,30 @@ def note_title(text: str) -> str | None:
     return None
 
 
-def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict], lang: str) -> str:
+def parse_decision_rows(answer: str) -> list[tuple[str, str]]:
+    """The door's /decisions `answer` text → (subject, row text) per claim row, in the door's
+    order (newest first). The header line and the empty-register sentence carry no `* ` row."""
+    rows = []
+    for line in answer.splitlines():
+        if not line.startswith("* "):
+            continue
+        text = line[2:].strip()
+        subject = text.split(" — ", 1)[0]
+        rows.append((subject, text))
+    return rows
+
+
+def decisions_section(decision_lines: list[str]) -> str:
+    """The 「과거 결정」 block of the prompt: each line already leads with its note number.
+    No lines, no block — the prompt is then byte-identical to the one without decisions."""
+    if not decision_lines:
+        return ""
+    return "「과거 결정」\n" + "\n".join(f"- {line}" for line in decision_lines) + "\n\n"
+
+
+def build_advice_prompt(
+    subject: str, register: RegisterName, hits: list[dict], lang: str, decision_lines: list[str] | None = None
+) -> str:
     """One candidate's whole task: a subject, its register, and up to three past hits
     (`/search` with `claims`) to ground advice in. The model only quotes and reasons —
     parse_advised is the boundary that checks a quote actually appears in its note."""
@@ -156,6 +179,7 @@ def build_advice_prompt(subject: str, register: RegisterName, hits: list[dict], 
     return (
         f"오늘의 후보 주어: {subject!r} (레지스터: {register})\n\n"
         f"과거 기록(검색 결과):\n{hits_text}\n\n"
+        f"{decisions_section(decision_lines or [])}"
         "이 주어가 오늘 조언할 가치가 있으면 아래 JSON 하나만 출력해라:\n"
         '{"result": {"kind": "proposal", '
         f'"bottleneck": "병목 한 문장({MIN_BOTTLENECK_CHARS}자 이상)", '

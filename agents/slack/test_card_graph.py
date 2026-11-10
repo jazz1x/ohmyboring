@@ -41,6 +41,7 @@ CARD_CH = "C1"
 SESSION = f"slack:{CARD_CH}:{CARD_TS}"
 
 FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: 정리하고 재작성할 것", "sources": ["next_action", "loop"]},
     "/risks": {"answer": "risk: 엔진 문 응답 지연", "sources": ["f64_risk", "essential_mode"]},
     "/stalled": {"answer": "stalled: 대기 중인 병합", "sources": ["draft_wiring"]},
@@ -90,6 +91,7 @@ NOTE_TEXTS = {
 # The resting-skip tests' world: three subjects, one per bottleneck register slot,
 # each resolving to its own note, no recurrences, no past approvals.
 SKIP_FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: 없음", "sources": []},
     "/risks": {"answer": "risk: 알파와 베타", "sources": ["alpha_subj", "beta_subj"]},
     "/stalled": {"answer": "stalled: 감마", "sources": ["gamma_subj"]},
@@ -1288,6 +1290,7 @@ PATH_SEARCH_HITS = [
     {"source_path": "/vault/wiki/wiki-0896.md", "snippet": "unrelated", "claims": []},
 ]
 SUFFICIENCY_FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: none", "sources": []},
     "/risks": {"answer": "risk: none", "sources": []},
     "/stalled": {"answer": "stalled: none", "sources": []},
@@ -1329,6 +1332,7 @@ TOPIC_NOTE_TEXTS = {
     "/vault/wiki/note-c.md": "머리말\n세 번째 다른 노트의 본문입니다\n끝",
 }
 TOPIC_FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: none", "sources": []},
     "/risks": {"answer": "risk: 하나", "sources": [TOPIC_SUBJECT]},
     "/stalled": {"answer": "stalled: none", "sources": []},
@@ -2917,6 +2921,40 @@ class AdviceAheadTests(unittest.TestCase):
         self.assertEqual(self.sends, [])
         self.assertEqual(self.handovers, [])
         self.assertEqual([name for name, _ in events if name != aw.EVENT], [aw.RUN_EVENT])
+
+    def test_each_candidate_prompt_carries_the_projects_newest_decisions_read_once(self):
+        subjects = [f"결정{i}" for i in range(5)]
+        rows = "\n".join(
+            f"* {s} — decided: 값{i} (kind=decision, confidence=high)" for i, s in enumerate(subjects)
+        )
+        answer = f"Showing 5 of 5 matching claims (limit_applied=false).\n{rows}"
+        door_calls: list[tuple[str, str]] = []
+
+        def fetch(path: str, project: str = "") -> dict:
+            door_calls.append((path, project))
+            if path == "/decisions":
+                items = [
+                    {"subject": s, "source_path": f"/vault/wiki/wiki-{1000 + i}.md"}
+                    for i, s in enumerate(subjects)
+                ]
+                return {"answer": answer, "sources": subjects, "items": items}
+            return FETCH_DATA[path]
+
+        stubs = Stubs(resolutions=RESOLUTIONS)
+        collabs = self._collabs(stubs)._replace(fetch=fetch)
+        card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        self.assertEqual(len(stubs.propose_calls), 3)
+        self.assertEqual(door_calls.count(("/decisions", "")), 1)
+        # the note numbers ride in /decisions items: no /claim-source round trip per decision row
+        self.assertEqual([c for c in stubs.resolve_calls if c[0] in subjects], [])
+        for prompt in stubs.propose_calls:
+            head, _, rest = prompt.partition("「과거 결정」\n")
+            section = rest.split("\n\n", 1)[0].splitlines()
+            self.assertTrue(rest, prompt)
+            self.assertLessEqual(len(section), 3)
+            for line in section:
+                self.assertRegex(line, r"^- wiki-\d+ — ")
+            self.assertLess(len(head), prompt.index("이 주어가"))
 
     def test_a_run_with_no_proposal_still_leaves_one_row_with_the_reasons(self):
         stubs = Stubs(responses=[NOT_WORTH_JSON] * len(CANDIDATE_QUEUE))

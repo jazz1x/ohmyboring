@@ -91,7 +91,7 @@ MCP_TOOLS = {
 _RECENT_REGISTER_ROWS_SQL = (
     "WITH b AS ("
     " SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,"
-    " COUNT(*) OVER () AS total,"
+    " c.source_path, COUNT(*) OVER () AS total,"
     " ROW_NUMBER() OVER ("
     " ORDER BY (CASE WHEN length(c.value) < %(informative)s THEN 1 ELSE 0 END)"
     " + (CASE WHEN c.predicate ~* %(tautological)s THEN 1 ELSE 0 END),"
@@ -108,7 +108,7 @@ _RECENT_REGISTER_ROWS_SQL = (
     " LIMIT %(limit)s"
     ")"
     " SELECT b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from, b.project,"
-    " b.total, nv.cnt, nv.latest_day"
+    " b.total, nv.cnt, nv.latest_day, b.source_path"
     " FROM b" + newer_open_lateral_sql("%(exclude_origins)s") + " ORDER BY b.rn"
 )
 
@@ -231,6 +231,8 @@ class RegisterRow:
     valid_from: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=UTC))
     project: str = ""
     newer_open: NewerOpen | None = None
+    #: 이 claim 이 적힌 노트. 최근 레지스터 질의(decisions·risks·next_actions)와 surreal 읽기만 채운다.
+    source_path: str = ""
 
     @property
     def node_id(self) -> str:
@@ -423,9 +425,12 @@ def _register_rows_from(rows: list[tuple]) -> RegisterRows:
 
 
 def _recent_register_rows_from(rows: list[tuple]) -> RegisterRows:
-    """_RECENT_REGISTER_ROWS_SQL 의 열 — 일곱 칸 + total + (cnt, latest_day)."""
+    """_RECENT_REGISTER_ROWS_SQL 의 열 — 일곱 칸 + total + (cnt, latest_day) + source_path."""
     return RegisterRows(
-        rows=tuple(replace(_to_register_row(row), newer_open=newer_open_of(row[8], row[9])) for row in rows),
+        rows=tuple(
+            replace(_to_register_row(row), newer_open=newer_open_of(row[8], row[9]), source_path=row[10])
+            for row in rows
+        ),
         total_matching=int(rows[0][7]) if rows else 0,
     )
 
@@ -474,6 +479,7 @@ def _register_row_of(row: dict[str, Any]) -> RegisterRow:
         confidence=row["confidence"],
         valid_from=surreal.micros_to_time(row["valid_from_us"]),
         project=row["project"],
+        source_path=row["source_path"],
     )
 
 
@@ -844,7 +850,9 @@ class RegisterOut:
     total_matching: int
 
     def http_payload(self) -> dict[str, Any]:
-        return {"answer": self.answer, "sources": self.sources}
+        """answer·sources 에 줄마다 노트 경로 `items` 를 더한다 — 카드가 /claim-source 를 줄마다 부르지 않게."""
+        items = [{"subject": row.subject, "source_path": row.source_path} for row in self.items]
+        return {"answer": self.answer, "sources": self.sources, "items": items}
 
     def mcp_payload(self) -> dict[str, Any]:
         return {

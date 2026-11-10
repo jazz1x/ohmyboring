@@ -69,6 +69,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -98,6 +99,8 @@ CONFIRM_SINCE_HOURS = 48
 # The advise loop's call budget: one gemma4 call per candidate, at most this many candidates
 # tried per run — a small local model's context outgrows a whole day's registers otherwise.
 ADVISE_CALL_CAP = 8
+# The 「과거 결정」 block's size: the newest decisions of the candidate's project, at most this many.
+DECISION_LINES = 3
 # The project axis: registers are called once per project active in this window, plus once
 # more for the unassigned bucket (project="").
 PROJECT_ACTIVE_DAYS = 14
@@ -303,6 +306,35 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
             resolve_cache[key] = collabs.resolve(subject, register)
         return resolve_cache[key]
 
+    #: project → its 「과거 결정」 lines, so the door's /decisions is read once per project per run.
+    decisions_cache: dict[str, list[str]] = {}
+
+    def _decision_lines(project: str) -> list[str]:
+        """The newest DECISION_LINES decisions of `project` that resolve to a note, each led
+        by its note number ("wiki-0900"). The door's /decisions items carry each row's note
+        path, so no /claim-source call per row; a row without a path is skipped — a line
+        without a number is no line. A malformed answer raises, like collect_registers."""
+        if project not in decisions_cache:
+            data = collabs.fetch("/decisions", project)
+            answer = data.get("answer")
+            items = data.get("items")
+            if not isinstance(answer, str) or not isinstance(items, list):
+                raise ValueError(
+                    f"register decisions: expected answer text and items, got keys {sorted(data)!r}"
+                )
+            path_of: dict[str, str] = {}
+            for item in items:
+                path_of.setdefault(item["subject"], item["source_path"])
+            lines: list[str] = []
+            for subject, text in card_advice.parse_decision_rows(answer):
+                if len(lines) >= DECISION_LINES:
+                    break
+                note = path_of.get(subject, "")
+                if note:
+                    lines.append(f"{Path(note).stem} — {text}")
+            decisions_cache[project] = lines
+        return decisions_cache[project]
+
     def cross_check(state: CardState) -> dict:
         """The card's head line, before the model picks: yesterday's 「해」, each checked
         against whether its note path still resolves from today's registers — now the union
@@ -419,7 +451,9 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
                     file=sys.stderr,
                 )
                 warned_empty_vault = True
-            prompt = card_advice.build_advice_prompt(subject, register, hits, state["lang"])
+            prompt = card_advice.build_advice_prompt(
+                subject, register, hits, state["lang"], _decision_lines(project)
+            )
             calls += 1
             superseded_by = {
                 h["source_path"]: card_advice.superseded_names(h) for h in hits if h.get("source_path")
