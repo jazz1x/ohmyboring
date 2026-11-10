@@ -43,6 +43,7 @@ CARD_PROGRAMS = {
     "weekly-card": Path("agents") / "slack" / "weekly_card.py",
     "repair-judge": Path("agents") / "slack" / "card_repair_judge.py",
     "advice-write": Path("agents") / "slack" / "card_advice_write.py",
+    "tool-scope": Path("scripts") / "tool_scope.py",
 }
 
 #: the tool prints "[card] posted ts=<slack ts>"; the newest match on stdout is posted_ts.
