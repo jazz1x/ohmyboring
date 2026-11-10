@@ -117,7 +117,18 @@ def unit_of(name, skill=""):
     for pre, tag in (("mcp__claude_ai_", "connector:"), ("mcp__plugin_", "plugin-mcp:"), ("mcp__", "mcp:")):
         if name.startswith(pre):
             return tag + name[len(pre) :].split("__")[0]
-    return "builtin:" + name
+    return canon_unit("builtin:" + name)
+
+
+def canon_unit(unit):
+    """A builtin is one switch whatever case a transcript spells it in (Bash and bash, 21337)."""
+    kind, _, name = unit.partition(":")
+    return f"builtin:{name.lower()}" if kind == "builtin" else unit
+
+
+def ledger_key(subject):
+    """How drudge files a claim subject (drudge/src/ingest.rs canon): lowercase, runs of space/_/- → -."""
+    return re.sub(r"[\s_-]+", "-", subject.lower()).strip("-")
 
 
 def _blob_text(row):
@@ -267,6 +278,10 @@ def scan_file(path):
     return out
 
 
+#: Prefixed onto each index stamp so entries counted under case-split builtin units are re-read once.
+UNIT_BASIS = "u2"
+
+
 def build_index(files, cached):
     index, scanned = {}, 0
     for path in files:
@@ -274,7 +289,7 @@ def build_index(files, cached):
             st = path.stat()
         except OSError:
             continue
-        stamp = f"{st.st_size}:{int(st.st_mtime)}"
+        stamp = f"{UNIT_BASIS}:{st.st_size}:{int(st.st_mtime)}"
         prior = cached.get(str(path))
         if prior and prior.get("stamp") == stamp:
             index[str(path)] = prior
@@ -402,7 +417,10 @@ def build_table(sess, profiles):
                 if s["first"]:
                     first_on[u] = min(filter(None, (first_on.get(u), s["first"])))
             repo = usage._repo_of(s["cwd"]) or "-"
-            for u, n in s["calls"].items():
+            # a Skill call is counted under its skill:<name>; the Skill tool itself is what made them all
+            used = collections.Counter(s["calls"])
+            used["builtin:skill"] += sum(n for u, n in s["calls"].items() if u.startswith("skill:"))
+            for u, n in (+used).items():
                 calls[u] += n
                 sessions[u] += 1
                 repos[u].add(repo)
@@ -492,9 +510,13 @@ def compare(table, prior, prior_at, sess, profiles):
         }
     now = {r["id"]: r for r in table}
     before = judged(prior["table"])
+
+    def now_id(r):
+        return f"{r['profile']}|{canon_unit(r['unit'])}"
+
     prior_off = [r for r in before if r["rule_a"] == "끔"]
-    wrong = [r["id"] for r in prior_off if (now.get(r["id"]) or {}).get("calls")]
-    gone = [r for r in before if r["id"] not in now]
+    wrong = [r["id"] for r in prior_off if (now.get(now_id(r)) or {}).get("calls")]
+    gone = [r for r in before if now_id(r) not in now]
     new_sessions = sum(1 for s in sess.values() if s["prof"] in profiles and s["first"] > prior_at)
     return {
         "prior_read": len(before),
@@ -538,6 +560,15 @@ def claims_by_profile(table, gone):
             }
         )
     return out
+
+
+def key_clashes(claims):
+    """{ledger key: subjects} for subjects the ledger would fold into one row — one would silently overwrite."""
+    by_key = collections.defaultdict(list)
+    for rows in claims.values():
+        for c in rows:
+            by_key[ledger_key(c["subject"])].append(c["subject"])
+    return {k: subs for k, subs in by_key.items() if len(subs) > 1}
 
 
 def remember_scopes(claims, prior_notes, stamp, client):
@@ -709,6 +740,16 @@ def main(argv=None):
     comp = compare(table, prior, prior_at, sess, profiles)
     stamp = time.strftime("%Y%m%dT%H%M%S")
     claims = claims_by_profile(table, comp["gone"])
+    clashes = key_clashes(claims)
+    if clashes:
+        for key, subjects in clashes.items():
+            print(f"[tool-scope] 장부 키 겹침 {key} ← {', '.join(subjects)}", file=sys.stderr)
+        n = sum(len(c) for c in claims.values())
+        print(
+            f"[tool-scope] 적재 안 함 — claim {n} 개가 장부 {n - sum(len(s) - 1 for s in clashes.values())} 칸으로 접힌다",
+            file=sys.stderr,
+        )
+        return 6
     match remember_scopes(claims, (prior or {}).get("notes") or {}, stamp, DrudgeClient(timeout=120)):
         case Err(reason):
             print(
