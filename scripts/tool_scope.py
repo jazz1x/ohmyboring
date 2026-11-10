@@ -5,8 +5,9 @@ A unit is what can be switched on or off: one built-in tool, one MCP server, one
 connector, one plugin MCP, one skill (a plugin's skills are one unit), one hook. Datadog (2)'s
 ~300 tool names are one row.
 
-The engine counts; hermes picks a scope per row with numbers as its reason; the owner changes
-settings. Nothing here writes a setting.
+The engine counts and picks each row's scope by rule A; the owner changes settings. Nothing here
+writes a setting. A model step (gemma4:12b) was tried and removed: on the 318 rows with 0 calls it
+answered something other than 끔 on 188, contradicting the numbers it cited (judge 21027).
 
 - calls: assistant `tool_use` blocks, one per id. A line regex counts the same id twice
   (Datadog (2): 14 by regex vs 10 by id, 11-10), so rows are JSON-parsed.
@@ -21,9 +22,8 @@ settings. Nothing here writes a setting.
   repos 4–5 → 판별 못 함 · session share < 1% → 필요할 때만 · else (repos 1–3, ≥ 1%) → 프로젝트 범위.
   Hooks have no calls to count, so no rule scope.
 
-`table` prints the engine table only (no model). With no arguments (the card program run by
-card_runner) it builds the table, asks hermes's model per batch of rows, checks every quoted
-number against the table, and writes the result under $BORING_TOOL_SCOPE_OUT.
+`table` prints the table as TSV. With no arguments (the card program run by card_runner) it
+writes the table as JSON under $BORING_TOOL_SCOPE_OUT.
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ import re
 import statistics
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -48,18 +47,6 @@ PROFILES_DIR = Path(
     or Path.home() / "Library" / "Application Support" / "orca" / "claude-profiles"
 )
 DEFAULT_PROFILES = ("a0faa78e", "fe5c62d7", "791c085b")
-SCOPES = ("유저 범위", "프로젝트 범위", "로컬", "필요할 때만", "끔", "판별 못 함")
-CITE_FIELDS = (
-    "calls",
-    "sessions",
-    "repos",
-    "den",
-    "share_pct",
-    "enabled_sessions",
-    "front_tok",
-    "deferred_tok",
-)
-BATCH = 12
 
 _PROF = re.compile(r"claude-profiles/([0-9a-f]{8})[0-9a-f-]*/home/CLAUDE\.md")
 _CWD = re.compile(r'"cwd":"([^"]+)"')
@@ -448,126 +435,6 @@ def build_table(sess, profiles):
     return rows
 
 
-# ---- quote check ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class QuoteCheck:
-    missing: list = field(default_factory=list)  # table rows with no answer
-    extra: list = field(default_factory=list)  # answers for rows not in the table
-    mismatches: list = field(default_factory=list)  # (row id, field, cited, table)
-    uncited: list = field(default_factory=list)  # answers citing no number
-
-    @property
-    def ok(self):
-        return not (self.missing or self.extra or self.mismatches or self.uncited)
-
-
-def check_quotes(table, answers):
-    """Every row answered once, and every number an answer cites equals the table's value."""
-    by_id = {r["id"]: r for r in table}
-    missing = [r["id"] for r in table if r["id"] not in answers]
-    extra = [a for a in answers if a not in by_id]
-    mismatches, uncited = [], []
-    for row_id, ans in answers.items():
-        row = by_id.get(row_id)
-        if row is None:
-            continue
-        cites = ans.get("cites") or {}
-        if not cites:
-            uncited.append(row_id)
-        for key, value in cites.items():
-            if row.get(key) != value:
-                mismatches.append((row_id, key, value, row.get(key)))
-    return QuoteCheck(missing, extra, mismatches, uncited)
-
-
-# ---- hermes judge ---------------------------------------------------------------------------
-
-PROMPT = """너는 도구 정리 판정자다. 아래 표의 행마다 켜는 범위를 하나 고르고, 표에 있는 숫자로 이유를 댄다.
-
-범위는 이 여섯 중 하나: {scopes}
-- 유저 범위: 여러 저장소에서 자주 쓴다 · 프로젝트 범위: 몇 저장소에서만 쓴다 · 로컬: 그 저장소 나만 쓴다
-- 필요할 때만: 드물게 쓰는데 싣는 값이 있다 · 끔: 부른 적이 없다 · 판별 못 함: 숫자로 가를 수 없다(이유 적기)
-- calls·sessions·repos 가 null 인 행(훅)은 호출을 셀 수 없다. 그래도 front_tok·enabled_sessions 중 하나를 인용한다.
-
-칸 뜻: calls 호출 수 · sessions 부른 세션 수 · repos 부른 저장소 수 · den 그 프로필 세션 수 · share_pct 세션 비율(%) ·
-enabled_sessions 첫 요청에 실린 세션 수 · front_tok 앞에 싣는 정의 추정 토큰(중앙) · deferred_tok 이름만 싣는 미룬 도구 추정 토큰(중앙).
-
-규칙: cites 에는 이유에 쓴 숫자를 표의 칸 이름과 값 그대로 넣는다(값을 바꾸거나 계산하지 마라). 표에 없는 칸은 쓰지 마라.
-JSON 하나만 답한다: {{"rows":[{{"id":"<행 id>","scope":"<범위>","reason":"<한 줄>","cites":{{"<칸>":<값>}}}}]}}
-
-표:
-{rows}
-"""
-
-
-def _prompt_rows(rows):
-    keep = (
-        "id",
-        "kind",
-        "calls",
-        "sessions",
-        "repos",
-        "den",
-        "share_pct",
-        "enabled_sessions",
-        "front_tok",
-        "deferred_tok",
-        "reach",
-    )
-    return "\n".join(json.dumps({k: r.get(k) for k in keep}, ensure_ascii=False) for r in rows)
-
-
-def make_judge(model=None):
-    """hermes's card model through the same ChatOllama seam the cards use; returns (text, tokens in, out)."""
-    from langchain_ollama import ChatOllama
-
-    llm = ChatOllama(
-        model=model or os.environ.get("CARD_MODEL") or "gemma4:12b",
-        format="json",
-        temperature=0,
-        reasoning=False,
-        num_ctx=16384,
-    )
-
-    def invoke(prompt):
-        msg = llm.invoke(prompt)
-        meta = getattr(msg, "usage_metadata", None) or {}
-        return str(msg.content), int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0)
-
-    return invoke
-
-
-def parse_answer(raw):
-    """Model text → {row id: answer}; text that is not the asked shape answers nothing."""
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}
-    rows = data.get("rows") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return {}
-    out = {}
-    for a in rows:
-        if isinstance(a, dict) and isinstance(a.get("id"), str) and a.get("scope") in SCOPES:
-            cites = a.get("cites") if isinstance(a.get("cites"), dict) else {}
-            out[a["id"]] = {"scope": a["scope"], "reason": str(a.get("reason", "")), "cites": cites}
-    return out
-
-
-def judge_table(table, invoke):
-    answers, tin, tout = {}, 0, 0
-    for i in range(0, len(table), BATCH):
-        chunk = table[i : i + BATCH]
-        text, a, b = invoke(PROMPT.format(scopes=" · ".join(SCOPES), rows=_prompt_rows(chunk)))
-        tin += a
-        tout += b
-        ids = {r["id"] for r in chunk}
-        answers.update({k: v for k, v in parse_answer(text).items() if k in ids})
-    return answers, tin, tout
-
-
 # ---- entry ----------------------------------------------------------------------------------
 
 
@@ -624,8 +491,8 @@ def print_table(table, meta):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="켜고 끄는 단위별 호출·싣는 값 표, 그리고 hermes 범위 판단")
-    ap.add_argument("mode", nargs="?", default="judge", choices=("judge", "table"))
+    ap = argparse.ArgumentParser(description="켜고 끄는 단위별 호출·싣는 값 표와 규칙 A 범위")
+    ap.add_argument("mode", nargs="?", default="write", choices=("write", "table"))
     ap.add_argument("--profiles", default=",".join(DEFAULT_PROFILES))
     args = ap.parse_args(argv)
     profiles = [p for p in args.profiles.split(",") if p]
@@ -638,46 +505,16 @@ def main(argv=None):
         print_table(table, meta)
         return 0
 
-    t0 = time.monotonic()
-    answers, tin, tout = judge_table(table, make_judge())
-    elapsed = round(time.monotonic() - t0, 1)
-    check = check_quotes(table, answers)
-    judged = [r for r in table if r["id"] in answers and r["rule_a"] != "-"]
-    agree = sum(1 for r in judged if answers[r["id"]]["scope"] == r["rule_a"])
-    stamp = time.strftime("%Y%m%dT%H%M%S")
     out = out_dir()
     out.mkdir(parents=True, exist_ok=True)
-    result = {
-        "meta": {**meta, "judge_s": elapsed, "tokens_in": tin, "tokens_out": tout, "batch": BATCH},
-        "table": [
-            {
-                **r,
-                **{
-                    "scope": answers.get(r["id"], {}).get("scope"),
-                    "reason": answers.get(r["id"], {}).get("reason"),
-                    "cites": answers.get(r["id"], {}).get("cites"),
-                },
-            }
-            for r in table
-        ],
-        "check": {
-            "missing": check.missing,
-            "extra": check.extra,
-            "mismatches": check.mismatches,
-            "uncited": check.uncited,
-        },
-        "rule_a_agree": [agree, len(judged)],
-    }
-    path = out / f"tool-scope-{stamp}.json"
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(
-        f"[tool-scope] 행 {len(table)} · 답 {len(answers)} · 빠짐 {len(check.missing)} · 인용 불일치 {len(check.mismatches)} · 인용 없음 {len(check.uncited)}"
+    path = out / f"tool-scope-{time.strftime('%Y%m%dT%H%M%S')}.json"
+    path.write_text(
+        json.dumps({"meta": meta, "table": table}, ensure_ascii=False, indent=1), encoding="utf-8"
     )
-    print(
-        f"[tool-scope] 규칙 A 일치 {agree}/{len(judged)} (훅 행 제외) · 모델 {elapsed}s · 토큰 입력 {tin} 출력 {tout} · 훑기 {meta['scan_s']}s"
-    )
+    scopes = collections.Counter(r["rule_a"] for r in table)
+    print(f"[tool-scope] 행 {len(table)} · 규칙 A {dict(scopes)} · 훑기 {meta['scan_s']}s")
     print(f"[tool-scope] {path}")
-    return 0 if check.ok else 4
+    return 0
 
 
 if __name__ == "__main__":
