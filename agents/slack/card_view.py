@@ -1265,8 +1265,11 @@ def build_card(
     # silently. A card that filled all 50 blocks with advice rows used to push the
     # review header past the cap. The first sample's blocks are reserved the same way: it
     # never gives way; the second rides only in what is left.
-    review_rows = sum(3 + len(_value_blocks(r, strings)) for r in reviews)
-    review_tail = ((1 + review_rows) if reviews else 0) + sample_tail
+    # only the reviews the caller lets through reserve room: capping the review lane has to
+    # free blocks for the advice rows above it (+1: the overflow line a capped lane adds)
+    review_rows = sum(3 + len(_value_blocks(r, strings)) for r in reviews[: caps.reviews])
+    review_capped = 1 if len(reviews) > caps.reviews else 0
+    review_tail = ((1 + review_rows + review_capped) if reviews else 0) + sample_tail
     for _project, indices in _project_groups(proposals):
         for idx in indices:
             if shown >= caps.advice:
@@ -1496,12 +1499,12 @@ def _fit_attempts(n: RowCaps, n_samples: int = 0) -> Iterable[tuple[int, RowCaps
     kept = min(n_samples, SAMPLES_KEPT)
     if kept < n_samples:
         yield floor, RowCaps(), kept
-    for k in range(n.advice - 1, -1, -1):
-        yield floor, RowCaps(advice=k), kept
-    for k in range(n.repairs - 1, -1, -1):
-        yield floor, RowCaps(advice=0, repairs=k), kept
     for k in range(n.reviews - 1, -1, -1):
-        yield floor, RowCaps(advice=0, repairs=0, reviews=k), kept
+        yield floor, RowCaps(reviews=k), kept
+    for k in range(n.repairs - 1, -1, -1):
+        yield floor, RowCaps(reviews=0, repairs=k), kept
+    for k in range(n.advice - 1, -1, -1):
+        yield floor, RowCaps(reviews=0, repairs=0, advice=k), kept
 
 
 def fit_card(proposals: list[Proposal], *, samples: Iterable[ProposedVerdict] = (), **kwargs) -> Fitted:

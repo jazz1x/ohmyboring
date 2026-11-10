@@ -1010,8 +1010,8 @@ class GraphTests(unittest.TestCase):
         self.assertNotIn("card_row", [e for e, _ in stubs.records])
 
     def test_every_row_the_card_left_out_leaves_one_whole_card_row_and_no_record_that_it_was_seen(self):
-        # 4,500 chars leaves a row out of every lane: the repair, all three advice rows, the
-        # third review, the second sample. Each is kept whole in card_row (shown False) so the
+        # 4,500 chars leaves a row out of every lane: the repair, the third advice row (advice
+        # gives way last), all three reviews, the second sample. Each is kept whole in card_row (shown False) so the
         # [더보기] page can draw it; "seen" records (card_proposal, verdict_sample_shown, the
         # handover's paths) exist only for what rode, so a row nobody opened is tomorrow's candidate.
         reviews = [
@@ -1031,16 +1031,20 @@ class GraphTests(unittest.TestCase):
         left = [f for e, f in stubs.records if e == "card_row" and f["shown"] is False]
         self.assertEqual(
             [(f["idx"], f["lane"]) for f in left],
-            [(0, "repair"), (1, "advice"), (2, "advice"), (3, "advice"), (6, "review"), (8, "sample")],
+            [(0, "repair"), (3, "advice"), (4, "review"), (5, "review"), (6, "review"), (8, "sample")],
         )
         self.assertEqual({f["card_ts"] for f in left}, {CARD_TS})
         self.assertTrue(all(f["detail"]["item"] and "total" in f["detail"] for f in left))
         self.assertEqual(
             [f["detail"]["item"]["session_id"] for f in left if f["lane"] in ("review", "sample")],
-            ["sr2", self._sample(2).session_id],
+            ["sr0", "sr1", "sr2", self._sample(2).session_id],
         )
-        self.assertNotIn("card_proposal", [e for e, _ in stubs.records])
-        self.assertEqual(self.handovers[-1][2], [])
+        shown_notes = EXPECTED_NOTES[:2]
+        self.assertEqual(
+            [f["note"] for e, f in stubs.records if e == "card_proposal"],
+            shown_notes,
+        )
+        self.assertEqual(self.handovers[-1][2], shown_notes)
         seen = [f["session_id"] for e, f in stubs.records if e == "verdict_sample_shown"]
         self.assertEqual(seen, [self._sample(1).session_id])
         lines = [b["block_id"] for b in self.sends[-1] if b["type"] == "section" and "accessory" in b]

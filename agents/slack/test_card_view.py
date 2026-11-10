@@ -861,19 +861,19 @@ class CardBudgetTests(unittest.TestCase):
             self.assertGreaterEqual(len(line), 70, line)
             self.assertIn(re.search(r"(\S+)…", line).group(1).lstrip("「*`_"), words, line)
 
-    def test_lanes_give_up_the_second_sample_then_rows_advice_first_then_repairs_then_reviews(self):
+    def test_lanes_give_up_the_second_sample_then_rows_reviews_first_then_repairs_then_advice(self):
         self.assertEqual(
             list(cv._fit_attempts(cv.RowCaps(repairs=2, advice=2, reviews=2), 2))[len(cv.TEXT_MAX_STEPS) :],
             [
                 (cv.TEXT_FLOOR, caps, 1)
                 for caps in (
                     cv.RowCaps(),
-                    cv.RowCaps(advice=1),
-                    cv.RowCaps(advice=0),
-                    cv.RowCaps(advice=0, repairs=1),
-                    cv.RowCaps(advice=0, repairs=0),
-                    cv.RowCaps(advice=0, repairs=0, reviews=1),
-                    cv.RowCaps(advice=0, repairs=0, reviews=0),
+                    cv.RowCaps(reviews=1),
+                    cv.RowCaps(reviews=0),
+                    cv.RowCaps(reviews=0, repairs=1),
+                    cv.RowCaps(reviews=0, repairs=0),
+                    cv.RowCaps(reviews=0, repairs=0, advice=1),
+                    cv.RowCaps(reviews=0, repairs=0, advice=0),
                 )
             ],
         )
@@ -903,6 +903,31 @@ class CardBudgetTests(unittest.TestCase):
         self.assertIn(
             card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted.blocks)
         )
+
+    def test_advice_rows_survive_a_review_heavy_card_over_budget(self):
+        proposals = [
+            cc.Proposal(
+                subject=f"주어{i}",
+                note=f"/vault/wiki/wiki-{900 + i:04d}.md",
+                register="stalled",
+                bottleneck="막힌 지점을 설명하는 열 자 넘는 문장",
+                advice=f"조언문{i} 을 열 자 넘게 적은 문장",
+                evidence=[
+                    cc.Evidence(
+                        note=f"/vault/wiki/wiki-{900 + i:04d}.md", quote="근거 인용문 열두자 이상", line=1
+                    )
+                ],
+            )
+            for i in range(3)
+        ]
+        reviews = self._reviews(12)
+        floor = cv.build_blocks(proposals, reviews=reviews, lang="ko", text_max=cv.TEXT_FLOOR)
+        self.assertGreater(cv.card_chars(floor), cv.CARD_CHARS_BUDGET)
+        fitted = cv.fit_card(proposals, reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), cv.CARD_CHARS_BUDGET)
+        self.assertEqual(fitted.report.left_out.advice, 0)
+        for i in range(3):
+            self.assertIn(f"조언문{i}", _blocks_text(fitted.blocks))
 
     def test_a_card_under_budget_is_left_as_built(self):
         reviews = self._reviews(1)
