@@ -30,12 +30,14 @@ use crate::frontmatter::{Claim, FrontMatter};
 
 mod code_copy_surreal;
 mod log_copy_surreal;
+mod relates_projection;
 mod vector_pg;
 mod vector_route;
 mod vector_surreal;
 
 pub use code_copy_surreal::{CODE_TX_BYTES, CodeFileRow, code_upsert_stmt};
 pub use log_copy_surreal::{LogCheck, LogCopy};
+pub use relates_projection::{FullReason, ProjectionScope, ProjectionVia};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
     ClaimRowDiff, ClaimWrite, FillTable, GraphOp, KeySet, NoteChunk, NoteWrite, ProjectTable,
@@ -1116,6 +1118,11 @@ fn schema_steps(slot_subject: &str, slot_predicate: &str) -> Vec<SchemaStep> {
         ),
         column(
             "document",
+            "ingested_at",
+            "ALTER TABLE document ADD COLUMN IF NOT EXISTS ingested_at timestamptz NOT NULL DEFAULT now()",
+        ),
+        column(
+            "document",
             "author",
             "ALTER TABLE document ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown'",
         ),
@@ -1480,6 +1487,15 @@ impl Store {
                      key   text PRIMARY KEY,
                      value timestamptz NOT NULL
                  );
+                 -- Last projected `relates_to` links per wiki note (src/dst = source_path), so the
+                 -- periodic projection can tell which notes a change can reach (store/relates_projection.rs).
+                 CREATE TABLE IF NOT EXISTS relates_projection (
+                     src text NOT NULL,
+                     dst text NOT NULL,
+                     via text NOT NULL,
+                     PRIMARY KEY (src, dst)
+                 );
+                 CREATE INDEX IF NOT EXISTS relates_projection_dst ON relates_projection(dst);
                  "
             ))
             .await
@@ -2873,7 +2889,8 @@ impl Store {
                  ON CONFLICT (source_path) DO UPDATE SET
                      origin = EXCLUDED.origin, project = EXCLUDED.project, kind = EXCLUDED.kind,
                      title = EXCLUDED.title, tags = EXCLUDED.tags, sha = EXCLUDED.sha,
-                     updated_at = EXCLUDED.updated_at, author = EXCLUDED.author;",
+                     updated_at = EXCLUDED.updated_at, author = EXCLUDED.author,
+                     ingested_at = now();",
                 &[
                     path,
                     &front.origin,

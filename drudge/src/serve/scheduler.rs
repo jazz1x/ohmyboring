@@ -94,7 +94,7 @@ pub(crate) async fn do_sync(
     // Auxiliary stage — on failure it does not break the core ingest, just logs.
     if let Some(vd) = vault_dir {
         let clock = StageClock::start("project_links");
-        match vault::project_links(store, vd, 6).await {
+        match vault::project_links(store, vd, 6, false).await {
             Ok(n) => eprintln!("[scheduler] graph→obsidian: updated {n} wiki relates_to"),
             Err(e) => eprintln!("[scheduler] project_links warning (ignored): {e:#}"),
         }

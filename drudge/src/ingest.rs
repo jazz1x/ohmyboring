@@ -345,10 +345,17 @@ async fn heal_claim_edges(
 ) -> Result<()> {
     let path = &front.source_path;
     lock_speaker_node(lookup, tx, front).await?;
+    let mut inserted = 0;
     for ((subject, predicate), cl) in sorted_claims(front) {
-        stats.edges +=
+        inserted +=
             Store::upsert_claim_node_on(lookup, tx, path, &front.project, &subject, &predicate, cl)
                 .await?;
+    }
+    stats.edges += inserted;
+    // New edges can change which notes share nodes with this one, while `updated_at` (file mtime)
+    // stays put; the relates_to projection keys on `ingested_at`. Surreal always projects in full.
+    if inserted > 0 && matches!(lookup, DocLookup::Pg) {
+        Store::touch_ingested_at_on(tx, path).await?;
     }
     Ok(())
 }

@@ -121,6 +121,9 @@ enum Cmd {
         /// vault root (default: $BORING_VAULT_DIR or $HOME/oh-my-boring/vault)
         #[arg(long)]
         vault: Option<String>,
+        /// visit every wiki note instead of only the ones a change can reach
+        #[arg(long)]
+        full: bool,
     },
     /// HTTP resident daemon — ingest/ask/graph/audit API + background scheduler
     Serve,
@@ -559,7 +562,7 @@ async fn main() -> Result<()> {
         | Cmd::Retention { .. }
         | Cmd::Steward { .. }
         | Cmd::Version => {}
-        Cmd::Link { vault } => {
+        Cmd::Link { vault, full } => {
             let store = store.as_ref().context(VEC_OFF)?;
             let vault_root = vault
                 .or_else(|| config::env_set("BORING_VAULT_DIR"))
@@ -569,7 +572,7 @@ async fn main() -> Result<()> {
                         std::env::var("HOME").unwrap_or_default()
                     )
                 });
-            let n = vault::project_links(store, std::path::Path::new(&vault_root), 6).await?;
+            let n = vault::project_links(store, std::path::Path::new(&vault_root), 6, full).await?;
             println!("graph→obsidian: updated relates_to of {n} wiki notes");
         }
         Cmd::AnchorBackfill { dry_run } => {
