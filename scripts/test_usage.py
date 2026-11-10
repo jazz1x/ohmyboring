@@ -83,5 +83,18 @@ class Incremental(unittest.TestCase):
             self.assertEqual(sum(c["output_tokens"] for c in folded.values()), 100)
 
 
+class DayBucket(unittest.TestCase):
+    def test_a_day_is_the_owners_calendar_day(self):
+        """15:30Z is 00:30 KST the next day; with or without fractional seconds."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            plain, fractional = _row("a", 1), _row("b", 1)
+            plain["timestamp"] = "2026-11-03T15:30:00Z"
+            fractional["timestamp"] = "2026-11-03T15:30:00.123Z"
+            _write(f, [plain, fractional])
+            days = {key.split("|", 1)[0] for key in usage.scan_file(f)}
+            self.assertEqual(days, {"2026-11-04"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

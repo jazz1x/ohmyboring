@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agents" / "shar
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import distill_core  # noqa: E402
+import verdict_core  # noqa: E402
 
 from ohmyboring import config as boring_config  # noqa: E402
 
@@ -145,7 +146,7 @@ def scan_file(path):
                 if request_id in seen:
                     continue
                 seen.add(request_id)
-            day = str(row.get("timestamp") or "")[:10]
+            day = verdict_core.window_day(str(row.get("timestamp") or ""))
             key = "|".join(
                 (
                     day,
@@ -164,6 +165,11 @@ def scan_file(path):
     return {k: dict(v) for k, v in totals.items()}
 
 
+#: Prefixed onto each index stamp: entries written when days were UTC slices carry no prefix, so
+#: they miss once and get re-read on the WINDOW_TZ basis instead of serving stale day totals.
+DAY_BASIS = "kst1"
+
+
 def build_index(files, cached, rescan=False):
     """Rescan only what changed, keyed by size and mtime.
 
@@ -177,7 +183,7 @@ def build_index(files, cached, rescan=False):
             stat = path.stat()
         except OSError:
             continue
-        stamp = f"{stat.st_size}:{int(stat.st_mtime)}"
+        stamp = f"{DAY_BASIS}:{stat.st_size}:{int(stat.st_mtime)}"
         prior = cached.get(str(path))
         if not rescan and prior and prior.get("stamp") == stamp:
             index[str(path)] = prior
@@ -220,8 +226,8 @@ def _fmt(n):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Token and model usage, read from local transcripts.")
     ap.add_argument("--group", default="model", help="day,model,repo,lane (comma separated)")
-    ap.add_argument("--since", help="ISO date, inclusive")
-    ap.add_argument("--until", help="ISO date, inclusive")
+    ap.add_argument("--since", help="ISO date on the WINDOW_TZ (UTC+9) calendar, inclusive")
+    ap.add_argument("--until", help="ISO date on the WINDOW_TZ (UTC+9) calendar, inclusive")
     ap.add_argument("--rescan", action="store_true", help="ignore the cached index")
     ap.add_argument("--limit", type=int, default=20)
     args = ap.parse_args(argv)
