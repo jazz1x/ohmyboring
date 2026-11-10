@@ -379,6 +379,11 @@ REACH = {
 }
 
 
+#: Loaded like a tool but not one: it stands in for the deferred tools, which are called under their own
+#: names — so it is never called and nothing turns it off (판정 21392).
+NOT_A_SWITCH = {"builtin:deferredtoolplaceholder"}
+
+
 def rule_a(calls, repos, share_pct, kind):
     if kind == "hook":
         return "-"
@@ -466,7 +471,11 @@ def build_table(sess, profiles):
                     f"호출 셀 수 없음 · 싣는 값은 같은 이벤트 훅 {per_event[event]}개 합(첫 요청) · "
                     "머리 없이 붙는 주입(📚 Project context 등)은 어느 훅인지 몰라 빠짐"
                 )
-            row["rule_a"] = rule_a(row["calls"] or 0, row["repos"] or 0, row["share_pct"] or 0.0, kind)
+            row["rule_a"] = (
+                "-"
+                if u in NOT_A_SWITCH
+                else rule_a(row["calls"] or 0, row["repos"] or 0, row["share_pct"] or 0.0, kind)
+            )
             rows.append(row)
     return rows
 
