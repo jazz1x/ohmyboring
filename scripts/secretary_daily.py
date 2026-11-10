@@ -83,6 +83,21 @@ def tokens_by_model(day):
     return per_model(day, day), per_model(shift(day, -7), shift(day, -1))
 
 
+MODEL_FAMILIES = ("haiku", "sonnet", "opus", "fable")
+
+
+def model_family(model_id):
+    """claude-opus-5-5 → opus. An id outside the four families (<synthetic>) stays its own row."""
+    return next((f for f in MODEL_FAMILIES if f in model_id), model_id)
+
+
+def tokens_by_family(per_version):
+    out = collections.Counter()
+    for model_id, tokens in per_version.items():
+        out[model_family(model_id)] += tokens
+    return out
+
+
 # ---- (나) closed claims ------------------------------------------------------------------------
 
 
@@ -492,7 +507,9 @@ def main(argv=None):
     t0 = time.monotonic()
     lo, hi, start_epoch = day_bounds(day)
 
-    today, week = tokens_by_model(day)
+    today_by_version, week_by_version = tokens_by_model(day)
+    # compared by family: a version bump (opus-5 → opus-5-5) is not a deviation (21432)
+    today, week = tokens_by_family(today_by_version), tokens_by_family(week_by_version)
     closed, closed_nd = closed_claims(lo, hi)
     week_closed = [closed_claims(*day_bounds(shift(day, -k))[:2])[0] for k in range(1, 8)]
     files, received, runs = scan_day(lo, hi, start_epoch)
@@ -527,6 +544,7 @@ def main(argv=None):
         )
     secs = round(time.monotonic() - t0, 1)
     detail = {
+        "(가) 판 단위 토큰": dict(sorted(today_by_version.items())),
         "(나) next·decision": closed_nd,
         "(다) 받는 쪽 토큰 중앙값": int(statistics.median([m["tok"] for m in received]))
         if received
@@ -558,7 +576,9 @@ def main(argv=None):
 
     out_rows = [r for r in rows if r["state"] == "벗어남"]
     print(f"[secretary] {day} · 전사 {len(files)} · {secs}s · 벗어남 {len(out_rows)} / 지표 {len(rows)}")
-    print(f"[secretary] (가) 토큰 합 {metrics['(가) 토큰 합']:,} · 모델 {len(today)}")
+    print(
+        f"[secretary] (가) 토큰 합 {metrics['(가) 토큰 합']:,} · 계열 {len(today)} (판 {len(today_by_version)})"
+    )
     print(f"[secretary] (나) 닫힘 {closed} (next·decision {closed_nd}) · (마) 못 셈")
     print(
         f"[secretary] (다) 받은 메시지 {len(received)} · 쓰기 0 {len(no_write)} · (라) 재실행 {len(reruns)} / 실행 {len(executed)}"
