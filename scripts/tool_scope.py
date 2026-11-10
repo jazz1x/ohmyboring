@@ -22,8 +22,14 @@ answered something other than 끔 on 188, contradicting the numbers it cited (ju
   repos 4–5 → 판별 못 함 · session share < 1% → 필요할 때만 · else (repos 1–3, ≥ 1%) → 프로젝트 범위.
   Hooks have no calls to count, so no rule scope.
 
-`table` prints the table as TSV. With no arguments (the card program run by card_runner) it
-writes the table as JSON under $BORING_TOOL_SCOPE_OUT.
+`table` prints the table as TSV. With no arguments it is the monthly run (contract 21265):
+- keep: each profile's verdicts go to the ledger as claims `tool-scope:<profile>:<unit>` / `scope`
+  (project tool-scope, so the session-start card stays clear), superseding the previous run's note;
+  a unit missing from this run is written `없어짐 — 마지막 관찰 <date>`.
+- use: candidates = 끔·필요할 때만 rows that are on now, by carried tokens, as JSON and an HTML page.
+- refine: against the previous run's JSON — prior_read (rows read), wrong_off (끔 that got calls since)
+  and the number of new sessions, so a flip from more transcripts reads apart from a wrong rule.
+Run the engine directly; run-tool-scope.py goes through card_runner, which needs the Slack token.
 """
 
 from __future__ import annotations
@@ -40,7 +46,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import usage  # noqa: E402
+import usage  # noqa: E402  (also puts agents/shared and src on sys.path)
+import verdict_core  # noqa: E402
+
+from ohmyboring.adapters.engine import DrudgeClient  # noqa: E402
+from ohmyboring.result import Err, Ok  # noqa: E402
 
 PROFILES_DIR = Path(
     os.environ.get("BORING_CLAUDE_PROFILES_DIR")
@@ -69,9 +79,7 @@ def index_path():
 
 
 def out_dir():
-    return Path(
-        os.environ.get("BORING_TOOL_SCOPE_OUT") or Path.home() / ".cache" / "boring-distill" / "tool-scope"
-    )
+    return Path(os.environ.get("BORING_TOOL_SCOPE_OUT") or html_dir() / "runs")
 
 
 def transcript_files():
@@ -386,7 +394,13 @@ def build_table(sess, profiles):
             collections.Counter(),
         )
         hook_tok = collections.defaultdict(list)
+        first_on = {}
+        loaded = [s for s in mine.values() if s["load"] and s["first"]]
+        latest = max(loaded, key=lambda s: s["first"])["load"] if loaded else {}
         for s in mine.values():
+            for u in s["load"] or {}:
+                if s["first"]:
+                    first_on[u] = min(filter(None, (first_on.get(u), s["first"])))
             repo = usage._repo_of(s["cwd"]) or "-"
             for u, n in s["calls"].items():
                 calls[u] += n
@@ -422,6 +436,10 @@ def build_table(sess, profiles):
                 "deferred_tok": int(statistics.median(deferred[u])) if deferred[u] else 0,
                 "reach": reach,
                 "reenable": reenable,
+                # transcript stamps are UTC cut to 19 chars (_TS); the day is the owner's
+                "first_on": verdict_core.window_day(first_on[u] + "Z") if u in first_on else "",
+                # on now = in the first request of the profile's newest session that recorded one
+                "on_now": u in latest,
             }
             if kind == "hook":
                 tok = hook_tok.get(event, [])
@@ -433,6 +451,185 @@ def build_table(sess, profiles):
             row["rule_a"] = rule_a(row["calls"] or 0, row["repos"] or 0, row["share_pct"] or 0.0, kind)
             rows.append(row)
     return rows
+
+
+# ---- use, keep, refine (C-TOOLLEAK1 3단계, 계약 21265 over 21252) ---------------------------
+
+CANDIDATE_SCOPES = ("끔", "필요할 때만")
+
+
+def html_dir():
+    return Path(
+        os.environ.get("BORING_TOOL_SCOPE_HTML_DIR")
+        or Path.home() / "Documents" / "ohmyboring" / "tool-scope"
+    )
+
+
+def read_prior(out):
+    """The previous run: the newest tool-scope-<ts>.json in out_dir and when it was written; None on a first run."""
+    files = sorted(out.glob("tool-scope-*.json"))
+    if not files:
+        return None, ""
+    newest = files[-1]
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(newest.stat().st_mtime))
+    return json.loads(newest.read_text(encoding="utf-8")), stamp
+
+
+def judged(table):
+    return [r for r in table if r["kind"] != "hook"]
+
+
+def compare(table, prior, prior_at, sess, profiles):
+    """What the previous run's verdicts say about this run: rows read, 끔 that got called, units gone."""
+    if prior is None:
+        return {
+            "prior_read": 0,
+            "first_run": True,
+            "wrong_off": [],
+            "prior_off": 0,
+            "new_sessions": 0,
+            "gone": [],
+        }
+    now = {r["id"]: r for r in table}
+    before = judged(prior["table"])
+    prior_off = [r for r in before if r["rule_a"] == "끔"]
+    wrong = [r["id"] for r in prior_off if (now.get(r["id"]) or {}).get("calls")]
+    gone = [r for r in before if r["id"] not in now]
+    new_sessions = sum(1 for s in sess.values() if s["prof"] in profiles and s["first"] > prior_at)
+    return {
+        "prior_read": len(before),
+        "first_run": False,
+        "wrong_off": wrong,
+        "prior_off": len(prior_off),
+        "new_sessions": new_sessions,
+        "gone": [
+            {"id": r["id"], "profile": r["profile"], "unit": r["unit"], "last_seen": r["window"][-10:]}
+            for r in gone
+        ],
+    }
+
+
+def scope_value(r):
+    tok = r["front_tok"] + r["deferred_tok"]
+    return (
+        f"{r['rule_a']} — 호출 {r['calls']} · 저장소 {r['repos']} · 세션 {r['sessions']}/{r['den']} · "
+        f"토큰 {tok} · 켜진 세션 {r['enabled_sessions']} · 첫 켜짐 {r['first_on'] or '-'}"
+    )
+
+
+def claims_by_profile(table, gone):
+    out = collections.defaultdict(list)
+    for r in judged(table):
+        out[r["profile"]].append(
+            {
+                "subject": f"tool-scope:{r['profile']}:{r['unit']}",
+                "predicate": "scope",
+                "value": scope_value(r),
+                "kind": "fact",
+            }
+        )
+    for g in gone:
+        out[g["profile"]].append(
+            {
+                "subject": f"tool-scope:{g['profile']}:{g['unit']}",
+                "predicate": "scope",
+                "value": f"없어짐 — 마지막 관찰 {g['last_seen']}",
+                "kind": "fact",
+            }
+        )
+    return out
+
+
+def remember_scopes(claims, prior_notes, stamp, client):
+    """One note per profile on the remember path; each names the previous run's notes for that profile
+    as superseded (that also takes it past the duplicate gate). Returns {profile: source_path} or the failure."""
+    notes = {}
+    for prof, rows in sorted(claims.items()):
+        scopes = collections.Counter(c["value"].split(" — ")[0] for c in rows)
+        payload = {
+            "title": f"도구 범위 판정 {prof} {stamp}",
+            "body": (
+                f"tool_scope.py 실행 {stamp} 의 프로필 {prof} 판정 {len(rows)}행(규칙 A, 훅 제외). "
+                f"범위별 {dict(scopes)}. 값 형식: <범위> — 호출 · 저장소 · 세션/프로필 세션 · 실리는 토큰(추정) · "
+                "켜진 세션 · 첫 켜짐. 읽는 법: claims(project=tool-scope) 또는 recall(project=tool-scope)."
+            ),
+            "concepts": ["tool-leak-triage"],
+            "tags": ["tool-scope"],
+            "repo": "tool-scope",
+            "author": "agent:tool-scope",
+            "claims": rows,
+        }
+        if prior_notes.get(prof):
+            payload["supersedes"] = [prior_notes[prof]]
+        match client.request("POST", "/remember", payload, timeout=120):
+            case Ok(resp):
+                notes[prof] = resp["source_path"]
+            case Err(failure):
+                return Err(f"remember {prof}: {failure}")
+    return Ok(notes)
+
+
+def candidates(table):
+    rows = [r for r in judged(table) if r["rule_a"] in CANDIDATE_SCOPES and r["on_now"]]
+    return sorted(rows, key=lambda r: (r["profile"], -(r["front_tok"] + r["deferred_tok"]), r["unit"]))
+
+
+_CSS = (
+    "body{margin:0;background:#FBFAF7;color:#1A1A1A;font-family:'Noto Serif KR',Georgia,serif;line-height:1.7}"
+    "main{max-width:1000px;margin:0 auto;padding:40px 24px 80px}h1{font-size:32px;margin:0 0 8px}"
+    "h2{font-size:22px;margin:48px 0 8px}.abstract{border-top:1px solid #1A1A1A;border-bottom:1px solid #1A1A1A;padding:16px 0}"
+    "table{width:100%;border-collapse:collapse;font-family:'Noto Sans KR',Arial,sans-serif;font-size:13px}"
+    "th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #E4E1D8;vertical-align:top}"
+    "th{font-size:12px;color:#6B6B66;border-bottom:1px solid #1A1A1A}.m{color:#6B6B66}"
+)
+
+
+def write_html(path, cands, undecided, comp, meta):
+    e = __import__("html").escape
+    by = collections.defaultdict(list)
+    for r in cands:
+        by[r["profile"]].append(r)
+    head = " · ".join(
+        f"프로필 {p[:4]} 후보 {len(rs)}개 약 {sum(r['front_tok'] + r['deferred_tok'] for r in rs):,} 토큰"
+        for p, rs in sorted(by.items())
+    )
+    refine = (
+        "첫 실행 — 비교할 이전 판정 없음"
+        if comp["first_run"]
+        else f"이전 판정 {comp['prior_read']}행 읽음 · 틀린 끔 {len(comp['wrong_off'])} / 이전 끔 {comp['prior_off']} · "
+        f"그 뒤 새 세션 {comp['new_sessions']} · 없어짐 {len(comp['gone'])}"
+    )
+    parts = [
+        f"<!doctype html><html lang='ko'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>도구 범위 후보</title><style>{_CSS}</style></head><body><main>",
+        f"<h1>지금 켜져 있는데 끄거나 필요할 때만 켤 도구</h1><p class='m'>{e(meta['run_at'])} UTC · 전사 {meta['files']:,} · 세션 {meta['sessions']:,} · 규칙 A</p>",
+        f"<div class='abstract'><p>{e(head)}.</p><p class='m'>{e(refine)}</p></div>",
+    ]
+    for p, rs in sorted(by.items()):
+        parts.append(
+            f"<h2>프로필 {p[:4]} — {len(rs)}개</h2><table><thead><tr><th>도구</th><th>범위</th><th>호출</th><th>세션</th>"
+            "<th>저장소</th><th>켜진 세션</th><th>첫 켜짐</th><th>실리는 토큰(추정)</th><th>바꿀 자리</th><th>다시 켜는 법</th></tr></thead><tbody>"
+        )
+        parts += [
+            f"<tr><td>{e(r['unit'])}</td><td>{e(r['rule_a'])}</td><td>{r['calls']}</td><td>{r['sessions']}/{r['den']}</td>"
+            f"<td>{r['repos']}</td><td>{r['enabled_sessions']}</td><td>{e(r['first_on'])}</td><td>{r['front_tok'] + r['deferred_tok']:,}</td>"
+            f"<td class='m'>{e(r['reach'])}</td><td class='m'>{e(r['reenable'])}</td></tr>"
+            for r in rs
+        ]
+        parts.append("</tbody></table>")
+    parts.append(
+        f"<h2>판별 못 함 — {len(undecided)}개</h2><p class='m'>규칙 A 저장소 4~5. 그대로 두고 판정 자리가 본다.</p><table><tbody>"
+    )
+    parts += [
+        f"<tr><td>{r['profile'][:4]}</td><td>{e(r['unit'])}</td><td>호출 {r['calls']} · 저장소 {r['repos']} · 세션 {r['sessions']}/{r['den']}</td></tr>"
+        for r in undecided
+    ]
+    if comp["wrong_off"]:
+        parts.append(f"</tbody></table><h2>틀린 끔 — {len(comp['wrong_off'])}개</h2><table><tbody>")
+        parts += [f"<tr><td>{e(i)}</td></tr>" for i in comp["wrong_off"]]
+    parts.append("</tbody></table></main></body></html>")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(parts), encoding="utf-8")
 
 
 # ---- entry ----------------------------------------------------------------------------------
@@ -459,8 +656,9 @@ def load_table(profiles):
         "scanned": scanned,
         "scan_s": round(time.monotonic() - t0, 1),
         "sessions": len(sess),
+        "run_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
     }
-    return table, meta
+    return table, meta, sess
 
 
 TSV_COLS = (
@@ -497,7 +695,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     profiles = [p for p in args.profiles.split(",") if p]
 
-    table, meta = load_table(profiles)
+    table, meta, sess = load_table(profiles)
     if not table:
         print("[tool-scope] 표가 비었다 — 프로필 세션 0", file=sys.stderr)
         return 1
@@ -507,13 +705,47 @@ def main(argv=None):
 
     out = out_dir()
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"tool-scope-{time.strftime('%Y%m%dT%H%M%S')}.json"
-    path.write_text(
-        json.dumps({"meta": meta, "table": table}, ensure_ascii=False, indent=1), encoding="utf-8"
+    prior, prior_at = read_prior(out)
+    comp = compare(table, prior, prior_at, sess, profiles)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    claims = claims_by_profile(table, comp["gone"])
+    match remember_scopes(claims, (prior or {}).get("notes") or {}, stamp, DrudgeClient(timeout=120)):
+        case Err(reason):
+            print(
+                f"[tool-scope] 적재 실패 — {reason}; 결과 파일을 안 써서 다음 실행이 같은 이전 판정과 비교한다",
+                file=sys.stderr,
+            )
+            return 5
+        case Ok(notes):
+            pass
+    cands = candidates(table)
+    undecided = [r for r in judged(table) if r["rule_a"] == "판별 못 함"]
+    path = out / f"tool-scope-{stamp}.json"
+    result = {
+        "meta": meta,
+        "table": table,
+        "candidates": [r["id"] for r in cands],
+        "notes": notes,
+        **comp,
+    }
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    page = html_dir() / f"{verdict_core.window_day(meta['run_at'] + 'Z')}.html"
+    write_html(page, cands, undecided, comp, meta)
+    per = collections.Counter(r["profile"] for r in cands)
+    toks = collections.Counter()
+    for r in cands:
+        toks[r["profile"]] += r["front_tok"] + r["deferred_tok"]
+    print(
+        f"[tool-scope] 행 {len(table)} · 판정 행(훅 제외) {len(judged(table))} · claim {sum(len(c) for c in claims.values())} · 노트 {len(notes)}"
     )
-    scopes = collections.Counter(r["rule_a"] for r in table)
-    print(f"[tool-scope] 행 {len(table)} · 규칙 A {dict(scopes)} · 훑기 {meta['scan_s']}s")
+    print(
+        "[tool-scope] "
+        + ("첫 실행 · prior_read=0" if comp["first_run"] else f"prior_read={comp['prior_read']}")
+        + f" · wrong_off={len(comp['wrong_off'])}/{comp['prior_off']} {comp['wrong_off']} · 새 세션 {comp['new_sessions']} · 없어짐 {len(comp['gone'])}"
+    )
+    print(f"[tool-scope] 후보 {dict(per)} · 토큰 {dict(toks)}")
     print(f"[tool-scope] {path}")
+    print(f"[tool-scope] {page}")
     return 0
 
 
