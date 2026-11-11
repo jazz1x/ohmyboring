@@ -28,6 +28,8 @@ mod note_index;
 pub(crate) mod owner;
 #[cfg(test)]
 mod pg_failure_tests;
+#[cfg(test)]
+mod register_http_tests;
 mod remember_defer;
 #[cfg(test)]
 mod remember_defer_tests;

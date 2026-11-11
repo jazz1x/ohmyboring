@@ -1467,6 +1467,7 @@ pub(super) fn register_where(ask: &RegisterAsk<'_>) -> String {
 fn register_select(ask: &RegisterAsk<'_>) -> String {
     format!(
         "SELECT subject, predicate, value, kind, confidence, valid_from_us, project ?? '' AS project,
+                source_path,
                 (IF string::len(value) < {informative} {{ 1 }} ELSE {{ 0 }})
                 + (IF string::matches(predicate, <regex> {taut}) {{ 1 }} ELSE {{ 0 }}) AS rank
            FROM claim_row WHERE {conds}
@@ -1494,6 +1495,7 @@ struct RegisterHit {
     confidence: String,
     valid_from_us: i64,
     project: String,
+    source_path: String,
 }
 
 #[derive(Deserialize)]
@@ -2285,7 +2287,8 @@ impl SurrealClient {
                     h.confidence,
                     std::time::UNIX_EPOCH + Duration::from_micros(micros),
                     h.project,
-                ))
+                )
+                .with_source_path(h.source_path))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(RegisterRows {

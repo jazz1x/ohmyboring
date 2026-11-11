@@ -1716,7 +1716,8 @@ fn recurrences_value(resp: &crate::serve::RecurrencesResp) -> Result<Value, (i32
         .map_err(|e| (-32603_i32, format!("recurrences: {e}")))
 }
 
-fn register_json(out: &ask::RegisterOut) -> Value {
+/// One shape for both doors: HTTP `/decisions`·`/risks`·`/next_actions` answer these keys too.
+pub(crate) fn register_json(out: &ask::RegisterOut) -> Value {
     json!({
         "answer": out.answer,
         "sources": out.sources,

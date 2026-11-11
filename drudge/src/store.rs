@@ -885,6 +885,10 @@ pub struct RegisterRow {
     pub project: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub newer_open: Option<NewerOpen>,
+    /// The note this claim was written in. Only the recent registers (decisions, risks,
+    /// next_actions) fill it; a search hit already sits under its own document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
 }
 
 /// A `next`/`blocked` row's slot (same subject and predicate) also holds newer open
@@ -965,12 +969,21 @@ impl RegisterRow {
             valid_from,
             project,
             newer_open: None,
+            source_path: None,
         }
     }
 
     #[must_use]
     pub fn with_newer_open(self, newer_open: Option<NewerOpen>) -> Self {
         Self { newer_open, ..self }
+    }
+
+    #[must_use]
+    pub fn with_source_path(self, source_path: String) -> Self {
+        Self {
+            source_path: Some(source_path),
+            ..self
+        }
     }
 
     /// The plain claim this row carries (no `said_by`: a register row never held one).
@@ -2701,7 +2714,7 @@ impl Store {
         let sql = format!(
             "WITH b AS (
                  SELECT c.subject, c.predicate, c.value, c.kind, c.confidence, c.valid_from, d.project,
-                        COUNT(*) OVER () AS total,
+                        c.source_path, COUNT(*) OVER () AS total,
                         ROW_NUMBER() OVER (
                             ORDER BY (CASE WHEN length(c.value) < $6 THEN 1 ELSE 0 END)
                                    + (CASE WHEN c.predicate ~* $7 THEN 1 ELSE 0 END),
@@ -2718,7 +2731,7 @@ impl Store {
                   LIMIT $1
              )
              SELECT b.subject, b.predicate, b.value, b.kind, b.confidence, b.valid_from, b.project,
-                    b.total, nv.cnt, nv.latest_day
+                    b.total, nv.cnt, nv.latest_day, b.source_path
                FROM b
                {NEWER_OPEN_LATERAL_SQL}
               ORDER BY b.rn;"
@@ -2743,7 +2756,11 @@ impl Store {
         Ok(RegisterRows {
             rows: rows
                 .iter()
-                .map(|r| register_row(r).with_newer_open(NewerOpen::from_sql(r.get(8), r.get(9))))
+                .map(|r| {
+                    register_row(r)
+                        .with_newer_open(NewerOpen::from_sql(r.get(8), r.get(9)))
+                        .with_source_path(r.get(10))
+                })
                 .collect(),
             total_matching: rows.first().map_or(0, |r| r.get::<_, i64>(7)),
         })

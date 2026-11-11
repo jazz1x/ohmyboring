@@ -225,7 +225,7 @@ pub(crate) async fn handle_project_status(
 pub(crate) async fn handle_decisions(
     State(s): State<AppState>,
     crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::DecisionsReq>,
-) -> Result<Json<AskResp>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
@@ -245,18 +245,14 @@ pub(crate) async fn handle_decisions(
         out.answer.chars().take(280).collect(),
         started.elapsed(),
     );
-    Ok(Json(AskResp {
-        answer: out.answer,
-        sources: out.sources,
-        injected_claims: Vec::new(),
-    }))
+    Ok(Json(crate::serve::mcp::register_json(&out)))
 }
 
 /// Risk register — recent risk/assumption/blocked claims.
 pub(crate) async fn handle_risks(
     State(s): State<AppState>,
     crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::RisksReq>,
-) -> Result<Json<AskResp>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
@@ -276,18 +272,14 @@ pub(crate) async fn handle_risks(
         out.answer.chars().take(280).collect(),
         started.elapsed(),
     );
-    Ok(Json(AskResp {
-        answer: out.answer,
-        sources: out.sources,
-        injected_claims: Vec::new(),
-    }))
+    Ok(Json(crate::serve::mcp::register_json(&out)))
 }
 
 /// Next-action register — recent `next` claims plus active `blocked` claims.
 pub(crate) async fn handle_next_actions(
     State(s): State<AppState>,
     crate::serve::RegisterJson(req): crate::serve::RegisterJson<crate::serve::NextActionsReq>,
-) -> Result<Json<AskResp>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let started = Instant::now();
     let store = s.store.as_ref().ok_or_else(vector_disabled)?;
     let limit = register_limit(req.limit.as_ref()).map_err(AppError::bad_request)?;
@@ -307,11 +299,7 @@ pub(crate) async fn handle_next_actions(
         out.answer.chars().take(280).collect(),
         started.elapsed(),
     );
-    Ok(Json(AskResp {
-        answer: out.answer,
-        sources: out.sources,
-        injected_claims: Vec::new(),
-    }))
+    Ok(Json(crate::serve::mcp::register_json(&out)))
 }
 
 /// Stalled register — `next`/`blocked` claims older than N days (default 7).
