@@ -16,56 +16,36 @@ prepended (query 안의 wiki-NNNN 마다 볼트 노트 블록이 content 앞에 
 검색이라 번호를 못 풀어 문이 이름을 푼다; see _augment_mcp_recall). Anything that is
 not exactly that gate — no numbers, another tool, isError, non-JSON, a stream —
 travels byte-for-byte. A POST /mcp tools/call `remember` (and POST /remember)
-travels byte-for-byte — after the answer leaves, a background shadow runs
-the same request through the python write path without writing and asks whether
-python would make the same decision the engine made (PII gate block/mask, the
-duplicate gate's five branches and the replace scoring, owner refusal), then —
-only when a note was actually stored — compares that note field-by-field with
-the note the engine wrote, leaving one remember_shadow event whose every
-mismatch carries a reason that sorts it into python-defect / engine-difference /
-unknown (E3a-2; a skipped request is compared by decision only — nothing was
-written, so there are no fields to match; the response never waits on the shadow
-and a shadow failure cannot change the answer — one log line and a status=error
-event). The seven register reads get the same treatment one migration step later
-(E4-1): POST /decisions·/risks·/next_actions·/stalled·/recurrences·/context·/status
-and the MCP tools decisions·risks·next_actions·stalled·recurrences·context·
-project_status pass through byte-for-byte as today — after the answer leaves, a
-read shadow recomputes the same request through the python read path
-(ohmyboring.registers, a read-only session) and compares the response field by
-field (register answer text·sources·items·totals, recurrence rows, the context
-card's five sections, status sources plus the empty-path message — the generated
-status text itself is not compared), leaving one read_shadow event per request
-whose every mismatch carries the remember vocabulary: (가) python-defect,
-(나) engine-differs-from-intent (today: plan-dependent tie order),
-(다) unknown (unreadable engine answer, python compute failure, or a race the
-one rerun confirms); the response never waits on the shadow. The register read
-switch: DOOR_REGISTER_READER=python hands these seven reads to the python read
-path inside the door (default engine leaves every byte untouched; turning it on
-is the orchestrator's call once production shadow numbers show 가=0·다=0). The
-one switch on this behavior: DOOR_REMEMBER_WRITER=python hands the
-remember decision·write·answer to the python write path inside the door
-(E3c-1, ohmyboring.remember.writer — the same decision chain the shadow
-validates, writing for real through a writable DOOR_PG_DSN; default engine
-leaves every byte above untouched; the python path hands its two events,
-dedup_decision·remember_written, to a background dispatcher in receive order so
-a slow engine /events sink never stretches the write — E3c-2). The duplicate scan's vault read runs off an in-process note index
-(E3b-2): prefilled in the background at startup (the log line quotes how long
-the warm-up took), refreshed per write by a directory listing and stat only,
-re-reading and re-parsing just the changed notes; until the prefill finishes the
-shadow falls back to a full disk scan — the same decision either way, and the
-event's elapsed columns (total, embedding, DB, vault, parse, nearest, event)
-sum to the total — embedding covers chunk+claim embeds, DB covers connect+commit,
-vault covers numbering+file write+the duplicate scan, nearest is the whole
-nearest-document probe, event is the event-sink time). The recall answer gets a
-shadow too (E4-2): after the answer leaves, ohmyboring.recall recomputes the same
-recall (wiki first, vector only when the wiki is empty, read-only session) and
-compares its text with the engine text as it was before the numbered-note blocks
-were prepended, leaving one recall_shadow event (status ok|tie|mismatch|error, reader, path,
-line counts, first differing line, skipped wiki files — never the query); the answer stays the engine's.
+travels byte-for-byte to the engine and nothing compares it afterwards: the
+shadows that compared the engine's remember, register and recall answers with
+the python paths were removed (C-PYRETIRE1, 5653c04). The seven register reads —
+POST /decisions·/risks·/next_actions·/stalled·/recurrences·/context·/status and
+the MCP tools decisions·risks·next_actions·stalled·recurrences·context·
+project_status — pass through byte-for-byte unless the register read switch
+DOOR_REGISTER_READER=python hands them to the python read path inside the door
+(ohmyboring.registers, a read-only session; default engine leaves every byte
+untouched). No shadow compares the two answers, so a shape difference between
+the engine and the python read path shows up only in a test. The remember write
+switch: DOOR_REMEMBER_WRITER=python hands the remember decision·write·answer to
+the python write path inside the door (E3c-1, ohmyboring.remember.writer, writing
+through a writable DOOR_PG_DSN; default engine leaves every byte above untouched;
+the python path hands its two events, dedup_decision·remember_written, to a
+background dispatcher in receive order so a slow engine /events sink never
+stretches the write — E3c-2). The python writer's duplicate scan reads the vault
+off an in-process note index (E3b-2): prefilled in the background at startup (the
+log line quotes how long the warm-up took), refreshed per write by a directory
+listing and stat only, re-reading and re-parsing just the changed notes; until the
+prefill finishes the scan falls back to a full disk read — the same decision
+either way. The remember_written event's elapsed columns (total, embedding, DB,
+vault, parse, nearest, event) sum to the total — embedding covers chunk+claim
+embeds, DB covers connect+commit, vault covers numbering+file write+the duplicate
+scan, nearest is the whole nearest-document probe, event is the event-sink time.
 The recall read switch: DOOR_RECALL_READER=python (compose default engine) answers POST /mcp tools/call
 recall from inside the door — same numbered-note blocks, the engine's JSON-RPC errors (-32602/-32603),
-and the session_id handover written once by the python path; the shadow then runs the other way, a
-background call to the engine without session_id, event reader=python (engine = rollback).
+and the session_id handover written once by the python path. Only on this switch a shadow runs: after
+the answer leaves, a background call to the engine without session_id is compared with the python text
+(ohmyboring.recall.shadow), leaving one recall_shadow event (status ok|tie|mismatch|error, reader=python,
+path, line counts, first differing line, skipped wiki files — never the query); engine = rollback.
 The verdict write switch: DOOR_VERDICT_WRITER=python (compose default engine) answers POST /handover, POST
 /consumption and MCP tools/call verdict from inside the door (E4-5, ohmyboring.verdict) — the engine's validation
 wording and status codes, response field order and counters, one DB transaction per request, the owner
@@ -75,7 +55,7 @@ POST /events, GET /events and MCP tools/call events from inside the door (E4-6a,
 engine's batch limit (100, exact wording) and empty-batch acceptance, the EventLogReq filters and limit clamp,
 entry field order with key-sorted nested otel objects and chrono-style observed_at, MCP's trimmed/ignored
 argument rules and -32602/-32603 envelope, one DB transaction per request (the engine auto-commits per event);
-the door's own writer events (recall_shadow, read_shadow, remember_shadow, owner_supersede_refused) loop back
+the door's own writer events (recall_shadow, owner_supersede_refused) loop back
 into the door's own /events through the background writer queue — DB work runs via asyncio.to_thread so the
 event loop never blocks on its own event; a body that is not JSON still goes to the engine (engine = rollback).
 An answer whose content-type is
