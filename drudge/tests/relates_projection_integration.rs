@@ -1,12 +1,14 @@
 //! `vault::project_links` visits only the notes a change can reach, and writes what a full pass
-//! would write. Needs a scratch Postgres via `BORING_TEST_DATABASE_URL`; run serially:
+//! would write. Needs a scratch Postgres via `BORING_TEST_DATABASE_URL`:
 //!   `BORING_TEST_DATABASE_URL=postgresql://boring:boring@localhost:5432/<scratch> \`
-//!   `  cargo test -p drudge --test relates_projection_integration -- --test-threads=1 --nocapture`
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+//!   `  cargo test -p drudge --test relates_projection_integration -- --nocapture`
+//! The tests share one database's projection state, so each holds `SERIAL` for its whole run.
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::await_holding_lock)]
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::FrontMatter;
@@ -17,16 +19,25 @@ use tokio_postgres::NoTls;
 
 const DAY: Duration = Duration::from_hours(24);
 
+/// `relates_projection`, its watermark and the dirty query span the whole database, so two
+/// tests running at once reset or consume each other's state. Each `#[tokio::test]` runs on its
+/// own thread and current-thread runtime, so a blocking std lock held across `.await` only
+/// parks the other tests' threads.
+static SERIAL: Mutex<()> = Mutex::new(());
+
 struct Fixture {
     store: Store,
     vault: TempDir,
     nonce: u64,
+    _serial: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
     /// Fresh vault + a projection state that never ran (no rows, no watermark).
     async fn new() -> Option<Self> {
         let dsn = std::env::var("BORING_TEST_DATABASE_URL").ok()?;
+        // A test that panicked while holding the lock left nothing to undo: the next one resets.
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let store = Store::open(&dsn, 1024).await.expect("open store");
         let (client, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
         tokio::spawn(conn);
@@ -50,6 +61,7 @@ impl Fixture {
             store,
             vault,
             nonce,
+            _serial: serial,
         })
     }
 
