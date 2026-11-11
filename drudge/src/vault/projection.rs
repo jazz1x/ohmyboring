@@ -6,9 +6,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::store::{ProjectionScope, ProjectionVia, Store};
+use crate::store::{ProjectionBound, ProjectionScope, ProjectionVia, Store};
 use crate::vault::{is_seed_note, set_relates_to, split_frontmatter, wiki_stem};
-use crate::vector::VectorIndex;
 
 const PROGRESS_EVERY: usize = 1_000;
 
@@ -95,6 +94,9 @@ fn push_new(out: &mut Vec<Neighbour>, path: &str, via: ProjectionVia) {
     }
 }
 
+/// How many semantic neighbours `project_note` asks for; the recorded k-th bound is this one.
+const SEMANTIC_LIMIT: i64 = 4;
+
 /// Project ONE wiki note's `relates_to` from the graph + semantic + project-recency fallbacks.
 /// `Ok(true)` when the file was rewritten. The single-note unit shared by the full pass
 /// (`project_links`) and the `remember` fast path — so the logic (incl. the seed-note id-leak guard
@@ -125,15 +127,26 @@ pub async fn project_note(store: &Store, path: &Path, limit: i64) -> Result<bool
     };
     let src_path = path.to_string_lossy().into_owned();
     let mut found: Vec<Neighbour> = Vec::new();
-    for p in store.related_docs(&src_path, limit).await? {
-        push_new(&mut found, &p, ProjectionVia::Graph);
+    let graph_raw = store.related_docs_scored(&src_path, limit).await?;
+    for (p, _) in &graph_raw {
+        push_new(&mut found, p, ProjectionVia::Graph);
     }
     // Semantic blend: the graph above only links docs sharing >=2 EXACT concept/tool slugs, so it
     // misses notes about the same thing in DIFFERENT words (and older / cross-project notes). Add the
     // meaning-nearest docs by chunk-embedding cosine (>=~0.6 → distance <= 0.40), deduped with the above.
-    for p in store.semantic_related_docs(&src_path, 4, 0.40).await? {
-        push_new(&mut found, &p, ProjectionVia::Semantic);
+    let semantic_raw = store
+        .semantic_related_docs_scored(&src_path, SEMANTIC_LIMIT, 0.40)
+        .await?;
+    for (p, _) in &semantic_raw {
+        push_new(&mut found, p, ProjectionVia::Semantic);
     }
+    let bound = ProjectionBound::from_raw(
+        &graph_raw,
+        usize::try_from(limit).unwrap_or(0),
+        &semantic_raw,
+        usize::try_from(SEMANTIC_LIMIT).unwrap_or(0),
+        |p| found.iter().any(|n| n.path == p),
+    );
     // isolation prevention: STILL fewer than 2 links → supplement with the same project's latest docs.
     if found.len() < 2 {
         for p in store.recent_project_docs(&src_path, 2).await? {
@@ -151,7 +164,7 @@ pub async fn project_note(store: &Store, path: &Path, limit: i64) -> Result<bool
     // relation-pass (shared tools/concepts) already set — an empty graph must not clobber it to [].
     if links.is_empty() {
         store
-            .replace_projection_links(&src_path, &remembered)
+            .replace_projection_links(&src_path, &remembered, &bound)
             .await?;
         return Ok(false);
     }
@@ -161,7 +174,7 @@ pub async fn project_note(store: &Store, path: &Path, limit: i64) -> Result<bool
         std::fs::write(path, new_content)?;
     }
     store
-        .replace_projection_links(&src_path, &remembered)
+        .replace_projection_links(&src_path, &remembered, &bound)
         .await?;
     Ok(rewritten)
 }

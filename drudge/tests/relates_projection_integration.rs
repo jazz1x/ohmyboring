@@ -44,6 +44,7 @@ impl Fixture {
         client
             .batch_execute(
                 "DELETE FROM relates_projection;
+                 DELETE FROM relates_projection_bound;
                  DELETE FROM sync_state WHERE key = 'relates_projection_watermark';",
             )
             .await
@@ -94,6 +95,18 @@ impl Fixture {
         vector_seed: u64,
         age: Duration,
     ) {
+        self.put_note_vec(id, project, concepts, self.embedding(vector_seed), age)
+            .await;
+    }
+
+    async fn put_note_vec(
+        &self,
+        id: u32,
+        project: &str,
+        concepts: &[&str],
+        embedding: Vec<f32>,
+        age: Duration,
+    ) {
         let path = self.path(id);
         let src = path.to_string_lossy().into_owned();
         std::fs::write(
@@ -118,7 +131,7 @@ impl Fixture {
             .upsert_chunk(&Doc {
                 id: format!("{src}#0"),
                 content: format!("body of note {id}"),
-                embedding: self.embedding(vector_seed),
+                embedding,
                 front,
                 chunk_idx: 0,
             })
@@ -417,4 +430,230 @@ async fn sync_without_changes_leaves_ingested_at_alone() {
     sync().await.expect("third sync");
     let edited = ingested_after(&client, fx.vault.path(), mark).await;
     assert_eq!(edited, vec![fx.path(2).to_string_lossy().into_owned()]);
+}
+
+/// A changed note that lands BEHIND a note's k-th neighbour (4 semantic, 6 graph) cannot change
+/// that note's links, so it must not make the note dirty; one that lands in a note with fewer
+/// than k neighbours must. Either way the changed-only run equals a full pass.
+#[tokio::test]
+async fn changed_note_behind_the_kth_neighbour_does_not_dirty_the_note() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    // Semantic: five notes on one vector (4 neighbours each, all at distance 0).
+    for id in 101..=105 {
+        fx.put_note(id, "proj-sem", &[], 7, DAY).await;
+    }
+    // Graph: seven notes sharing three concepts (6 neighbours each, 3 shared).
+    for id in 121..=127 {
+        fx.put_note(id, "proj-graph", &["k1", "k2", "k3"], u64::from(id), DAY)
+            .await;
+    }
+    // Semantic with fewer than 4 neighbours: a pair on one vector.
+    for id in 111..=112 {
+        fx.put_note(id, "proj-pair", &[], 9, DAY).await;
+    }
+    fx.project(false).await;
+
+    let nearby = |seed: u64| {
+        let mut v = fx.embedding(seed);
+        for x in v.iter_mut().take(100) {
+            *x = -*x; // 100 of 1024 signs flipped: cosine distance ~0.195 < 0.40
+        }
+        v
+    };
+    fx.put_note_vec(900, "proj-x1", &[], nearby(7), Duration::ZERO)
+        .await;
+    fx.put_note_vec(901, "proj-x2", &[], nearby(9), Duration::ZERO)
+        .await;
+    fx.put_note(902, "proj-x3", &["k1", "k2"], 902, Duration::ZERO)
+        .await;
+
+    let scope = fx.store.projection_scope(false).await.expect("scope");
+    let dirty = match scope {
+        drudge::store::ProjectionScope::Changed(dirty) => Ok(dirty),
+        full @ drudge::store::ProjectionScope::Full(_) => Err(full),
+    }
+    .expect("a populated projection with a watermark scopes to a changed set");
+    let dirty_ids: Vec<u32> = dirty
+        .iter()
+        .filter(|p| p.starts_with(fx.vault.path().to_string_lossy().as_ref()))
+        .filter_map(|p| p.rsplit("wiki-").next()?.strip_suffix(".md")?.parse().ok())
+        .collect();
+    eprintln!("dirty ids: {dirty_ids:?}");
+    for behind in (101..=105).chain(121..=127) {
+        assert!(
+            !dirty_ids.contains(&behind),
+            "note {behind} has k closer neighbours than the changed note"
+        );
+    }
+    for short in [111, 112] {
+        assert!(
+            dirty_ids.contains(&short),
+            "note {short} has fewer than k neighbours, the changed note can join them"
+        );
+    }
+
+    let before = fx.contents();
+    fx.project(false).await;
+    let by_changed = fx.contents();
+    fx.restore(&before);
+    fx.project(true).await;
+    assert_eq!(by_changed, fx.contents(), "changed-only run == full pass");
+    assert!(
+        relates_to_of(&by_changed["wiki-0111.md"]).contains("wiki-0901"),
+        "the short note took the new neighbour"
+    );
+}
+
+impl Fixture {
+    /// A document that is not a wiki note (`project_note` never links it): same rows as
+    /// `put_note_vec`, at `rel` under the vault (any name, any directory).
+    async fn put_other(&self, rel: &str, concepts: &[&str], embedding: Vec<f32>) -> String {
+        let file = self.vault.path().join(rel);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        let src = file.to_string_lossy().into_owned();
+        let front = FrontMatter {
+            origin: "personal".into(),
+            project: "proj-other".into(),
+            kind: "note".into(),
+            source_path: src.clone(),
+            ..Default::default()
+        };
+        self.store
+            .upsert_document(&front, "sha", SystemTime::now() - DAY)
+            .await
+            .expect("upsert document");
+        self.store
+            .upsert_chunk(&Doc {
+                id: format!("{src}#0"),
+                content: format!("other {rel}"),
+                embedding,
+                front,
+                chunk_idx: 0,
+            })
+            .await
+            .expect("upsert chunk");
+        self.store
+            .clear_semantic_edges(&src)
+            .await
+            .expect("clear edges");
+        for c in concepts {
+            let slug = format!("{c}-{}", self.nonce);
+            self.store.upsert_concept(&slug, c).await.expect("concept");
+            self.store
+                .relate_doc_concept(&src, &slug)
+                .await
+                .expect("edge");
+        }
+        src
+    }
+
+    /// Delete `victim`, then check that the changed-only run (which sees `wiki-0900` as the one
+    /// new note) writes what a full pass writes, and that note `b` is among the notes it visits.
+    async fn assert_incremental_equals_full_and_visits(&self, b: u32) {
+        let before = self.contents();
+        let scope = self.store.projection_scope(false).await.expect("scope");
+        let dirty = match scope {
+            drudge::store::ProjectionScope::Changed(dirty) => Ok(dirty),
+            full @ drudge::store::ProjectionScope::Full(_) => Err(full),
+        }
+        .expect("a changed set");
+        assert!(
+            dirty.contains(&self.path(b).to_string_lossy().into_owned()),
+            "note {b} must be dirty: a new note belongs in its top-k"
+        );
+        self.project(false).await;
+        let by_changed = self.contents();
+        self.restore(&before);
+        self.project(true).await;
+        assert_eq!(by_changed, self.contents(), "changed-only run == full pass");
+        assert!(relates_to_of(&by_changed[&format!("wiki-{b:04}.md")]).contains("wiki-0900"));
+    }
+}
+
+/// Semantic: B's raw top-4 holds a non-wiki document. It was never one of B's links, so deleting
+/// it frees a slot that a note beyond the old 4th distance now fills.
+#[tokio::test]
+async fn deleted_non_wiki_semantic_neighbour_frees_a_slot() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    for id in 101..=104 {
+        fx.put_note(id, "proj-sem", &[], 7, DAY).await;
+    }
+    let other = fx.put_other("notes-sem.md", &[], fx.embedding(7)).await;
+    fx.project(false).await;
+
+    fx.store.delete_document(&other).await.expect("delete");
+    let mut near = fx.embedding(7);
+    for x in near.iter_mut().take(100) {
+        *x = -*x;
+    }
+    fx.put_note_vec(900, "proj-x", &[], near, Duration::ZERO)
+        .await;
+    fx.assert_incremental_equals_full_and_visits(101).await;
+}
+
+/// Graph: B's raw top-6 holds a non-wiki document with a higher shared count.
+#[tokio::test]
+async fn deleted_non_wiki_graph_neighbour_frees_a_slot() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    fx.put_note(121, "proj-graph", &["k1", "k2", "k3", "k4"], 121, DAY)
+        .await;
+    for id in 122..=126 {
+        fx.put_note(id, "proj-graph", &["k1", "k2", "k3"], u64::from(id), DAY)
+            .await;
+    }
+    let other = fx
+        .put_other(
+            "notes-graph.md",
+            &["k1", "k2", "k3", "k4"],
+            fx.embedding(555),
+        )
+        .await;
+    fx.project(false).await;
+
+    fx.store.delete_document(&other).await.expect("delete");
+    fx.put_note(900, "proj-x", &["k1", "k2", "k3"], 900, Duration::ZERO)
+        .await;
+    fx.assert_incremental_equals_full_and_visits(121).await;
+}
+
+/// Semantic: B's raw top-4 holds a copy of a neighbour under another directory. `push_new`
+/// keeps the first of two paths with one stem, so the other is in the top-4 but not in B's links;
+/// moving it away must not leave a bound that hides a note which now belongs in the top-4.
+#[tokio::test]
+async fn moved_duplicate_stem_neighbour_frees_a_slot() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let flipped = |flips: usize| {
+        let mut v = fx.embedding(7);
+        for x in v.iter_mut().take(flips) {
+            *x = -*x;
+        }
+        v
+    };
+    fx.put_note_vec(101, "proj-sem", &[], flipped(0), DAY).await;
+    fx.put_other("copy/wiki-0102.md", &[], flipped(0)).await;
+    fx.put_note_vec(102, "proj-sem", &[], flipped(10), DAY)
+        .await;
+    fx.put_note_vec(103, "proj-sem", &[], flipped(20), DAY)
+        .await;
+    fx.put_note_vec(104, "proj-sem", &[], flipped(30), DAY)
+        .await;
+    fx.project(false).await;
+
+    fx.put_note(102, "proj-sem", &[], 4242, Duration::ZERO)
+        .await;
+    fx.put_note_vec(900, "proj-x", &[], flipped(100), Duration::ZERO)
+        .await;
+    fx.assert_incremental_equals_full_and_visits(101).await;
 }

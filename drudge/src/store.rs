@@ -37,7 +37,7 @@ mod vector_surreal;
 
 pub use code_copy_surreal::{CODE_TX_BYTES, CodeFileRow, code_upsert_stmt};
 pub use log_copy_surreal::{LogCheck, LogCopy};
-pub use relates_projection::{FullReason, ProjectionScope, ProjectionVia};
+pub use relates_projection::{FullReason, ProjectionBound, ProjectionScope, ProjectionVia};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
     ClaimRowDiff, ClaimWrite, FillTable, GraphOp, KeySet, NoteChunk, NoteWrite, ProjectTable,
@@ -1520,6 +1520,15 @@ impl Store {
                      PRIMARY KEY (src, dst)
                  );
                  CREATE INDEX IF NOT EXISTS relates_projection_dst ON relates_projection(dst);
+                 -- Per projected note: the raw k-th bound of each neighbour query (NULL = fewer than
+                 -- k came back). Its own table because a note with zero links, or whose k-th
+                 -- neighbour was truncated away, has no relates_projection row to carry it.
+                 CREATE TABLE IF NOT EXISTS relates_projection_bound (
+                     src text PRIMARY KEY,
+                     sem_kth_dist float8,
+                     graph_kth_shared int,
+                     graph_kth_src text
+                 );
                  "
             ))
             .await
@@ -1814,6 +1823,20 @@ impl Store {
     /// `project:`/`topic:` are excluded — the same project / common tags would link everything and create a hairball.
     /// Requires at least 2 shared nodes to link (cuts the noise of an accidental single overlap).
     async fn related_docs_pg(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
+        Ok(self
+            .related_docs_scored_pg(source_path, limit)
+            .await?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    /// `related_docs_pg` with each neighbour's shared-node count.
+    pub(crate) async fn related_docs_scored_pg(
+        &self,
+        source_path: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, i64)>> {
         let doc_id = doc_node_id(source_path);
         let rows = self
             .db()
@@ -1839,7 +1862,10 @@ impl Store {
             .iter()
             .map(|r| {
                 let id: String = r.get(0);
-                id.strip_prefix("doc:").unwrap_or(&id).to_owned()
+                (
+                    id.strip_prefix("doc:").unwrap_or(&id).to_owned(),
+                    r.get::<_, i64>(1),
+                )
             })
             .collect())
     }

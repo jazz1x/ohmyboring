@@ -25,18 +25,14 @@ impl std::ops::Deref for Pg<'_> {
     }
 }
 
-impl VectorIndex for Pg<'_> {
-    /// Documents semantically nearest to `source_path` by chunk-embedding cosine — the MEANING-based
-    /// complement to `related_docs`. `related_docs` only links docs sharing >=2 EXACT concept/tool slugs,
-    /// so it misses notes about the same thing in DIFFERENT words (and older / cross-project notes). For
-    /// each other doc this takes its single closest chunk to any of this doc's chunks, keeps docs within
-    /// `max_dist` (pgvector cosine DISTANCE = 1 - cosine_sim), and returns the nearest `limit`, first.
-    async fn semantic_related_docs(
+impl Pg<'_> {
+    /// `semantic_related_docs` with each neighbour's distance.
+    pub(super) async fn semantic_related_docs_scored(
         &self,
         source_path: &str,
         limit: i64,
         max_dist: f64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, f64)>> {
         let rows = self
             .db()
             .await?
@@ -55,7 +51,31 @@ impl VectorIndex for Pg<'_> {
             )
             .await
             .context("semantic related docs")?;
-        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<_, String>(0), r.get::<_, f64>(1)))
+            .collect())
+    }
+}
+
+impl VectorIndex for Pg<'_> {
+    /// Documents semantically nearest to `source_path` by chunk-embedding cosine — the MEANING-based
+    /// complement to `related_docs`. `related_docs` only links docs sharing >=2 EXACT concept/tool slugs,
+    /// so it misses notes about the same thing in DIFFERENT words (and older / cross-project notes). For
+    /// each other doc this takes its single closest chunk to any of this doc's chunks, keeps docs within
+    /// `max_dist` (pgvector cosine DISTANCE = 1 - cosine_sim), and returns the nearest `limit`, first.
+    async fn semantic_related_docs(
+        &self,
+        source_path: &str,
+        limit: i64,
+        max_dist: f64,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .semantic_related_docs_scored(source_path, limit, max_dist)
+            .await?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
     }
 
     /// Recurrence register: current risk/blocked claims from the last `days` whose value is
