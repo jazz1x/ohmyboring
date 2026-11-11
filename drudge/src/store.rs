@@ -587,11 +587,18 @@ impl DocLookup<'_> {
     /// the pg SQL on `c`, on `backend=surreal` one Surreal transaction and nothing on pg (`c` is
     /// unused there; since bundle 3 the claim rows of the same request are Surreal's too).
     pub async fn graph(self, c: &impl GenericClient, ops: &[GraphOp]) -> Result<()> {
+        self.graph_edges_written(c, ops).await.map(|_| ())
+    }
+
+    /// `graph`, returning how many `edge` rows the write inserted or changed. Only pg says; the
+    /// Surreal write does not, so it reports 0 and a caller acting on the count is pg-only.
+    pub async fn graph_edges_written(self, c: &impl GenericClient, ops: &[GraphOp]) -> Result<u64> {
         match self {
             Self::Pg => Store::graph_ops_pg(c, ops).await,
             Self::Surreal(client) => client
                 .graph_write(ops)
                 .await
+                .map(|()| 0)
                 .map_err(|e| anyhow::anyhow!("{SURREAL_GRAPH_FAILED} (surreal: {e:#})")),
         }
     }
@@ -729,7 +736,8 @@ impl DocLookup<'_> {
 
 impl Store {
     /// The graph ops on a pg connection or transaction: the SQL the helpers below always ran.
-    async fn graph_ops_pg(c: &impl GenericClient, ops: &[GraphOp]) -> Result<()> {
+    async fn graph_ops_pg(c: &impl GenericClient, ops: &[GraphOp]) -> Result<u64> {
+        let mut edges_written = 0;
         for op in ops {
             match op {
                 GraphOp::Node {
@@ -743,7 +751,10 @@ impl Store {
                     dst,
                     kind,
                     judge,
-                } => Self::upsert_edge_on(c, src, dst, kind, judge.as_deref()).await?,
+                } => {
+                    edges_written +=
+                        Self::upsert_edge_on(c, src, dst, kind, judge.as_deref()).await?;
+                }
                 GraphOp::DeleteEdgesFrom { src, kinds } => {
                     c.execute(
                         "DELETE FROM edge WHERE src = $1 AND kind = ANY($2);",
@@ -757,7 +768,7 @@ impl Store {
                 }
             }
         }
-        Ok(())
+        Ok(edges_written)
     }
 
     /// The document reader of the backend this process runs on.
@@ -2377,6 +2388,22 @@ impl Store {
         predicate: &str,
         claim: &crate::frontmatter::Claim,
     ) -> Result<usize> {
+        Self::upsert_claim_node_counted_on(lookup, c, path, project, subject, predicate, claim)
+            .await
+            .map(|(edges, _)| edges)
+    }
+
+    /// `upsert_claim_node_on` that also says how many edge rows pg actually inserted — the
+    /// first number counts the edges the claim has, this one the edges that were not there yet.
+    pub async fn upsert_claim_node_counted_on(
+        lookup: DocLookup<'_>,
+        c: &impl GenericClient,
+        path: &str,
+        project: &str,
+        subject: &str,
+        predicate: &str,
+        claim: &crate::frontmatter::Claim,
+    ) -> Result<(usize, u64)> {
         let claim_id = format!("claim:{subject}:{predicate}");
         let label = format!("{predicate}: {}", claim.value);
         let kind = claim.kind();
@@ -2416,11 +2443,14 @@ impl Store {
         if let Some(said_by) = claim.said_by {
             ops.extend(Self::said_ops(said_by, path, subject, predicate));
         }
-        lookup.graph(c, &ops).await?;
+        let inserted = lookup.graph_edges_written(c, &ops).await?;
 
-        Ok(1 + usize::from(kind != "fact")
-            + usize::from(!project.is_empty())
-            + 2 * usize::from(claim.said_by.is_some()))
+        Ok((
+            1 + usize::from(kind != "fact")
+                + usize::from(!project.is_empty())
+                + 2 * usize::from(claim.said_by.is_some()),
+            inserted,
+        ))
     }
 
     /// Top-k **current** claims (superseded_at IS NULL) for the session-start card and the
@@ -3947,7 +3977,7 @@ impl Store {
         dst: &str,
         kind: &str,
         judge: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let sql = format!(
             "INSERT INTO edge (src, dst, kind, judge) VALUES ($1, $2, $3, $4)
              ON CONFLICT (src, dst, kind) DO UPDATE SET judge = EXCLUDED.judge
@@ -3957,8 +3987,7 @@ impl Store {
         );
         c.execute(&sql, &[&src, &dst, &kind, &judge])
             .await
-            .context("upsert edge")?;
-        Ok(())
+            .context("upsert edge")
     }
 
     /// The only writer of `supersedes` edges: what one note replaced another is read out of the

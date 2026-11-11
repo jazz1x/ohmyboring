@@ -345,16 +345,28 @@ async fn heal_claim_edges(
 ) -> Result<()> {
     let path = &front.source_path;
     lock_speaker_node(lookup, tx, front).await?;
-    let mut inserted = 0;
+    let mut claim_edges = 0;
+    let mut newly_inserted = 0;
     for ((subject, predicate), cl) in sorted_claims(front) {
-        inserted +=
-            Store::upsert_claim_node_on(lookup, tx, path, &front.project, &subject, &predicate, cl)
-                .await?;
+        let (edges, inserted) = Store::upsert_claim_node_counted_on(
+            lookup,
+            tx,
+            path,
+            &front.project,
+            &subject,
+            &predicate,
+            cl,
+        )
+        .await?;
+        claim_edges += edges;
+        newly_inserted += inserted;
     }
-    stats.edges += inserted;
+    stats.edges += claim_edges;
     // New edges can change which notes share nodes with this one, while `updated_at` (file mtime)
-    // stays put; the relates_to projection keys on `ingested_at`. Surreal always projects in full.
-    if inserted > 0 && matches!(lookup, DocLookup::Pg) {
+    // stays put; the relates_to projection keys on `ingested_at`. Only edges that were not there
+    // count: an unchanged note re-running its claims inserts none, and touching it anyway made
+    // every document dirty on every sync. Surreal always projects in full.
+    if newly_inserted > 0 && matches!(lookup, DocLookup::Pg) {
         Store::touch_ingested_at_on(tx, path).await?;
     }
     Ok(())

@@ -317,3 +317,92 @@ async fn changed_only_and_full_rewrite_the_same_files() {
         "meaning-only neighbour reached"
     );
 }
+
+struct ZeroEmbed;
+
+impl drudge::ingest::Embed for ZeroEmbed {
+    fn embed(
+        &self,
+        _text: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<f32>>> + Send {
+        std::future::ready(Ok(vec![0.0_f32; 1024]))
+    }
+}
+
+/// Paths under `vault` whose `document.ingested_at` is later than `since`, i.e. the rows the
+/// projection's dirty query would take as changed.
+async fn ingested_after(
+    client: &tokio_postgres::Client,
+    vault: &Path,
+    since: SystemTime,
+) -> Vec<String> {
+    let like = format!("{}/%", vault.to_string_lossy());
+    let mut paths: Vec<String> = client
+        .query(
+            "SELECT source_path FROM document WHERE source_path LIKE $1 AND ingested_at > $2;",
+            &[&like, &since],
+        )
+        .await
+        .expect("query ingested_at")
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// A periodic sync of an untouched vault must not mark any document as re-ingested; one edited
+/// note marks exactly itself. Otherwise every run's dirty set is the whole corpus.
+#[tokio::test]
+async fn sync_without_changes_leaves_ingested_at_alone() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").unwrap();
+    let (client, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    let note = |id: u32, body: &str| {
+        let text = format!(
+            "---\norigin: personal\nproject: p{nonce}\nkind: note\nclaims:\n  - subject: s{nonce}x{id}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\n{body}\n",
+            nonce = fx.nonce
+        );
+        std::fs::write(fx.path(id), text).expect("write note");
+    };
+    for id in 1..=3 {
+        note(id, &format!("body {id}"));
+    }
+    let dirs = vec![fx.vault.path().to_string_lossy().into_owned()];
+    let cfg = drudge::config::BoringConfig::default();
+    let sync = || {
+        drudge::ingest::run_with::<
+            drudge::ingest::DefaultChunker,
+            drudge::ingest::FrontmatterGraphExtractor,
+            _,
+        >(&fx.store, &ZeroEmbed, &cfg, &dirs)
+    };
+    sync().await.expect("first sync");
+
+    let mark: SystemTime = client
+        .query_one("SELECT clock_timestamp();", &[])
+        .await
+        .expect("clock")
+        .get(0);
+    sync().await.expect("second sync");
+    let untouched = ingested_after(&client, fx.vault.path(), mark).await;
+    assert_eq!(
+        untouched,
+        Vec::<String>::new(),
+        "no-change sync re-ingested documents"
+    );
+
+    note(2, "body 2 edited");
+    let mark: SystemTime = client
+        .query_one("SELECT clock_timestamp();", &[])
+        .await
+        .expect("clock")
+        .get(0);
+    sync().await.expect("third sync");
+    let edited = ingested_after(&client, fx.vault.path(), mark).await;
+    assert_eq!(edited, vec![fx.path(2).to_string_lossy().into_owned()]);
+}
