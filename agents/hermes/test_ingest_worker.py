@@ -124,6 +124,27 @@ class IngestWorkerTest(unittest.TestCase):
         drained = [e for e in self._events() if e["event"] == "ingest_queue" and e.get("session_id") == "s1"]
         self.assertEqual(drained[-1]["status"], "ok")
 
+    @unittest.expectedFailure  # C-CLAIMTIME1 commit A: red until the fix commit removes this line
+    def test_the_engine_receives_the_timestamp_of_the_slices_last_transcript_line(self):
+        root = Path(self.sessions_root) / "proj"
+        root.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "cwd": self.tmp.name,
+                "timestamp": "2026-11-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "q" * 300},
+            },
+            {
+                "cwd": self.tmp.name,
+                "timestamp": "2026-11-01T10:05:30.000Z",
+                "message": {"role": "assistant", "content": "a" * 300},
+            },
+        ]
+        (root / "s-until.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+        _stdout, run = self._run_main()
+        last = datetime(2026, 11, 1, 10, 5, 30, tzinfo=UTC).timestamp()
+        self.assertEqual(run.call_args.kwargs["session_until"], last)
+
     def test_the_worker_takes_origin_and_repo_from_the_host_table(self):
         self._write_session("s-host")
         ingest_worker.repo_table.write(self.tmp.name, "company", "ds-governance")
