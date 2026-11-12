@@ -236,7 +236,12 @@ def _within_backstop(text):
 
 def _distill(item):
     return distill_run.distill_and_remember(
-        _within_backstop(item.text), item.origin, item.repo, item.session_id, item.since
+        _within_backstop(item.text),
+        item.origin,
+        item.repo,
+        item.session_id,
+        item.since,
+        session_until=item.until,
     )
 
 
@@ -416,7 +421,8 @@ def main(argv=None):
         origin, repo, repo_source = _origin_repo(cwd)
         # The shared queue replaces the old printed prompt: enqueue() marks the session pending,
         # and the drain below runs it through the engine in the same tick.
-        distill_queue.enqueue(distill_queue.QueueItem(sid, agent, origin, repo, text))
+        until = transcript.last_timestamp(p)
+        distill_queue.enqueue(distill_queue.QueueItem(sid, agent, origin, repo, text, until=until))
         offered += 1
         _log_worker_event(
             "ingest_offer",

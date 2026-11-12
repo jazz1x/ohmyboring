@@ -450,7 +450,18 @@ def _read_remember_reply(data: Any) -> RememberOutcome:
 
 
 def call_remember(  # noqa: PLR0913
-    title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None, session_since=None
+    title,
+    body,
+    origin,
+    repo,
+    tags,
+    tools,
+    concepts,
+    claims,
+    session_id="",
+    sources=None,
+    session_since=None,
+    session_until=None,
 ):
     """Call ohmyboring's remember MCP tool.
 
@@ -474,6 +485,8 @@ def call_remember(  # noqa: PLR0913
         arguments["omb_session_id"] = session_id
     if session_since is not None:
         arguments["omb_session_since"] = str(int(session_since))
+    if session_until is not None:
+        arguments["omb_session_until"] = str(int(session_until))
     req = _remember_request(arguments)
 
     max_retries = int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2")

@@ -153,7 +153,8 @@ def main() -> int:
         clamped=was_clamped,
     )
 
-    if distill_queue.enqueue(distill_queue.QueueItem(session_id, "codex", origin, repo, text)):
+    until = transcript.last_timestamp(transcript_path)
+    if distill_queue.enqueue(distill_queue.QueueItem(session_id, "codex", origin, repo, text, until=until)):
         print("[omb-distill-codex] queued for hermes", file=sys.stderr)
     return 0
 

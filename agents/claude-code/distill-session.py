@@ -120,7 +120,15 @@ def main() -> int:
         print(f"[omb-distill] transcript clamped to {len(text)} chars", file=sys.stderr)
 
     if distill_queue.enqueue(
-        distill_queue.QueueItem(session_id, "claude-code", origin, repo, text, since=since)
+        distill_queue.QueueItem(
+            session_id,
+            "claude-code",
+            origin,
+            repo,
+            text,
+            since=since,
+            until=transcript.last_timestamp(transcript_path, since),
+        )
     ):
         print("[omb-distill] queued for hermes", file=sys.stderr)
     return 0

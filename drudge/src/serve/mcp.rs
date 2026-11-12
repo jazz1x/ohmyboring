@@ -3020,6 +3020,7 @@ fn parse_remember_note(
         .collect();
 
     let omb_session_since = parse_session_since(&get_str("omb_session_since"))?;
+    let omb_session_until = parse_session_until(&get_str("omb_session_until"))?;
     let author = parse_author(args)?;
 
     let front = FrontMatter {
@@ -3036,9 +3037,26 @@ fn parse_remember_note(
         claims,
         omb_session_id,
         omb_session_since,
+        omb_session_until,
         author,
     };
     Ok(RememberNote { front, body })
+}
+
+/// The moment a note's conversation slice ended, epoch seconds as digits; empty means absent.
+fn parse_session_until(raw: &str) -> Result<Option<u64>, (i32, String)> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || (-32602, format!("invalid omb_session_until: {raw}"));
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    raw.parse::<u64>()
+        .ok()
+        .filter(|n| *n <= crate::frontmatter::MAX_SESSION_UNTIL_SECS)
+        .map(Some)
+        .ok_or_else(invalid)
 }
 
 /// The moment a continued session's note starts, epoch seconds as digits; empty means absent.

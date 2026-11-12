@@ -26,7 +26,28 @@ pub struct FrontMatter {
         skip_serializing_if = "Option::is_none"
     )]
     pub omb_session_since: Option<u64>,
+    /// Epoch seconds at which the distilled conversation slice ended, written by the worker from
+    /// the transcript, never by the model. A session note's claims are valid from this moment
+    /// instead of from when the file was written.
+    #[serde(
+        deserialize_with = "session_until_from_yaml",
+        serialize_with = "session_since_as_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub omb_session_until: Option<u64>,
     pub author: Author,
+}
+
+/// Year 9999: later than any real slice end, and early enough that adding it to the epoch
+/// cannot overflow a `SystemTime`.
+pub const MAX_SESSION_UNTIL_SECS: u64 = 253_402_300_799;
+
+fn session_until_from_yaml<'de, D>(de: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let secs = session_since_from_yaml(de)?;
+    Ok(secs.filter(|n| *n <= MAX_SESSION_UNTIL_SECS))
 }
 
 /// Notes carry the moment as a quoted string of digits; anything else (a bare number, text)

@@ -142,6 +142,31 @@ def _after(obj: dict, since: float) -> bool:
         return False
 
 
+def last_timestamp(path: str, since: float | None = None) -> float | None:
+    """Epoch seconds of the last transcript row that carries a timestamp (after `since`, when given).
+
+    That row is where the conversation slice ends, which is when what the note says was true.
+    None when no row qualifies; the engine then dates the note's claims by its file write time.
+    """
+    last = None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = obj.get("timestamp") if isinstance(obj, dict) else None
+            if not isinstance(ts, str):
+                continue
+            try:
+                at = datetime.fromisoformat(ts).timestamp()
+            except ValueError:
+                continue
+            if since is None or at > since:
+                last = at
+    return last
+
+
 def _extract_claude_jsonl(path: str, since: float | None = None) -> str:
     """Extract user/assistant text and allowlisted tool actions from a Claude Code JSONL transcript.
 

@@ -31,6 +31,8 @@ class QueueItem:
     enqueued_at: float = field(default_factory=time.time)
     # text holds only the turns after this transcript time; None means from the session start.
     since: float | None = None
+    # Transcript time of the last row in the text: the moment the note's claims were true.
+    until: float | None = None
 
 
 def queue_dir() -> str:

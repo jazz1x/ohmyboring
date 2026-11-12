@@ -6,7 +6,9 @@ from ohmyboring.adapters import llm
 from ohmyboring.distill.graph import graph
 
 
-def distill_and_remember(text, origin, repo, session_id="", session_since=None):
+def distill_and_remember(  # noqa: PLR0913
+    text, origin, repo, session_id="", session_since=None, session_until=None
+):
     """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
     llm.reset_run_usage()
     final = graph.invoke(
@@ -16,6 +18,7 @@ def distill_and_remember(text, origin, repo, session_id="", session_since=None):
             "repo": repo,
             "session_id": session_id,
             "session_since": session_since,
+            "session_until": session_until,
             "verifier_status": "pass",
             "ok": False,
         }

@@ -13,7 +13,7 @@ use futures_util::stream::{self, StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 
 use crate::config;
@@ -28,6 +28,32 @@ const EMBED_CONCURRENCY: usize = 8;
 const NOISE_SUBSTR: [&str; 1] = ["tool-results"]; // exclude general noise (tool-output dumps)
 const EXTS: [&str; 3] = ["md", "markdown", "txt"];
 const PRUNE_SKIPPED_SAMPLE: usize = 20;
+
+/// The moment a note's claims count from. A session note says when its conversation slice ended;
+/// every other note has only the time its file was written.
+enum ClaimTime {
+    /// Epoch seconds, at most `frontmatter::MAX_SESSION_UNTIL_SECS` (parsed at the boundary).
+    SliceEnd(u64),
+    NoteWritten(SystemTime),
+}
+
+impl ClaimTime {
+    /// A claim row's key is (subject, predicate, valid_from) and an equal key overwrites the other
+    /// note's row. A slice end is whole seconds, so the microseconds come from the note's path:
+    /// stable across re-ingests and arrival order, and still inside the slice-end second.
+    fn valid_from(&self, path: &str) -> SystemTime {
+        match self {
+            Self::NoteWritten(written) => *written,
+            Self::SliceEnd(secs) => {
+                let digest = Sha256::digest(path.as_bytes());
+                let mut head = [0_u8; 8];
+                head.copy_from_slice(&digest[..8]);
+                let micros = u64::from_be_bytes(head) % 1_000_000;
+                SystemTime::UNIX_EPOCH + Duration::from_secs(*secs) + Duration::from_micros(micros)
+            }
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Chunker trait + default character-based chunker
@@ -196,9 +222,13 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         }
 
         // temporal-fact claims — (subject,predicate)→value, a new value supersedes the old.
-        // valid_from = document mtime (chronological ordering). value embedding via bge-m3 (no generation).
+        // valid_from = when the claim became true (chronological ordering). value embedding via bge-m3 (no generation).
         if !front.claims.is_empty() {
-            let valid_from = store.doc_lookup().updated_at(tx, path).await?;
+            let claim_time = match front.omb_session_until {
+                Some(secs) => ClaimTime::SliceEnd(secs),
+                None => ClaimTime::NoteWritten(store.doc_lookup().updated_at(tx, path).await?),
+            };
+            let valid_from = claim_time.valid_from(path);
             let note_anchors = if front.project.is_empty() {
                 Vec::new()
             } else {

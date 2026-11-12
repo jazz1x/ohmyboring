@@ -124,7 +124,6 @@ class IngestWorkerTest(unittest.TestCase):
         drained = [e for e in self._events() if e["event"] == "ingest_queue" and e.get("session_id") == "s1"]
         self.assertEqual(drained[-1]["status"], "ok")
 
-    @unittest.expectedFailure  # C-CLAIMTIME1 commit A: red until the fix commit removes this line
     def test_the_engine_receives_the_timestamp_of_the_slices_last_transcript_line(self):
         root = Path(self.sessions_root) / "proj"
         root.mkdir(parents=True, exist_ok=True)
@@ -192,7 +191,7 @@ class IngestWorkerTest(unittest.TestCase):
         os.utime(pending, (stale, stale))
         stdout, run = self._run_main()
         # the drain ran the pre-queued item; the scan did not overwrite it
-        run.assert_called_once_with("preset-text", "personal", "repo", "s-q", None)
+        run.assert_called_once_with("preset-text", "personal", "repo", "s-q", None, session_until=None)
         self.assertEqual(self._offer_events("s-q"), [])
 
     def test_scan_tops_up_queue_to_one_ticks_worth(self):
@@ -381,7 +380,7 @@ class IngestWorkerTest(unittest.TestCase):
         self._queue("q-a-boom")
         self._queue("q-b-good")
 
-        def graph(text, origin, repo, sid, since):
+        def graph(text, origin, repo, sid, since, session_until=None):
             if sid == "q-a-boom":
                 raise TypeError("expected string or bytes-like object, got 'int'")
             return True
@@ -498,7 +497,7 @@ class IngestWorkerTest(unittest.TestCase):
     def test_queue_success_marks_done_and_removes_file(self):
         self._queue("q-ok")
         run = self._drain_with(True)
-        run.assert_called_once_with("text", "personal", "repo", "q-ok", None)
+        run.assert_called_once_with("text", "personal", "repo", "q-ok", None, session_until=None)
         self.assertTrue(self._done_exists("q-ok"))
         self.assertFalse(ingest_worker.distill_queue.is_queued("q-ok"))
         self.assertEqual(self._last_event()["status"], "ok")
