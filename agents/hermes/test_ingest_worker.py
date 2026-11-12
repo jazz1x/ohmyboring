@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -414,11 +414,23 @@ class IngestWorkerTest(unittest.TestCase):
             ingest_worker.event_log, "recent_engine_events", return_value=[row, row]
         ) as read:
             run = self._drain_with(True)
-        self.assertEqual(read.call_args.kwargs["since_hours"], 48)
+        self.assertIn(read.call_args.kwargs["since_hours"], range(1, 25))
         run.assert_not_called()
         self.assertTrue(ingest_worker.distill_queue.is_queued("q-over-budget"))
         self.assertEqual(self._last_event()["status"], "deferred")
         self.assertIn("daily budget: $1.50 >= $1.00", self._last_event()["reason"])
+
+    def test_budget_read_reaches_back_to_todays_window_midnight_not_utc_midnight(self):
+        kst = timezone(timedelta(hours=9))
+        cases = [
+            (datetime(2026, 11, 12, 0, 30, tzinfo=kst), 1),
+            (datetime(2026, 11, 12, 23, 59, tzinfo=kst), 24),
+            # 2026-11-11T23:00Z: the UTC date is a day behind the KST date.
+            (datetime(2026, 11, 12, 8, 0, tzinfo=kst), 8),
+        ]
+        for now, hours in cases:
+            with self.subTest(now=now.isoformat()):
+                self.assertEqual(ingest_worker._hours_since_window_midnight(now), hours)
 
     def test_a_clamped_engine_event_read_defers_the_drain_even_when_its_cost_is_small(self):
         self._queue("q-clamped")

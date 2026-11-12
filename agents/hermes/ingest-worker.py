@@ -30,6 +30,7 @@ hermes-agent container at /host/.cache/boring-distill.
 
 import glob
 import json
+import math
 import os
 import socket
 import sys
@@ -139,7 +140,6 @@ PENDING_TTL = _collect.pending_ttl_seconds
 # A retry-marker is a backoff signal, not a terminal state. Once it is stale, Hermes may re-offer it.
 RETRY_TTL = _collect.retry_ttl_seconds
 QUEUE_PER_TICK = _schedule.queue_per_tick
-BUDGET_READ_HOURS = 48
 # Engine clamps /events at 1000 (drudge/src/serve/http.rs EVENT_LOG_MAX_LIMIT) and marks a page truncated when entries >= the requested limit (~L897): getting this many back means the read may be cut.
 BUDGET_READ_LIMIT = 1000
 
@@ -307,6 +307,12 @@ def _log_queue(status, reason="", **fields):
     event_log.try_append_event("hermes-ingest-worker", "ingest_queue", status, reason=reason, **fields)
 
 
+def _hours_since_window_midnight(now):
+    """Whole hours (rounded up, at least 1) from today's WINDOW_TZ midnight to `now`."""
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(1, math.ceil((now - midnight).total_seconds() / 3600))
+
+
 def _budget_state():
     """Today's (WINDOW_TZ) distillation spend against the daily limit."""
     match boring_config.distill_budget():
@@ -316,20 +322,20 @@ def _budget_state():
             pass
     # Engine store only: the local events.ndjson is a failure spool, so reading it would turn an
     # unreachable engine into a $0 day.
-    # 48h covers any WINDOW_TZ day whatever the hour; judge_day_budget picks today out of it.
+    # Only today (WINDOW_TZ) is summed, so read back to its midnight: a fixed 48h reaches the 1000-row clamp at ~500 rows/day.
+    now = datetime.now(verdict_core.WINDOW_TZ)
     rows = event_log.recent_engine_events(
         BUDGET_READ_LIMIT,
         component="distill-session",
         event_name="distill_resolution",
-        since_hours=BUDGET_READ_HOURS,
+        since_hours=_hours_since_window_midnight(now),
     )
     if rows is None:
         return distill_budget.Unmeasured("engine events unreadable")
     # A full page may hide older rows of the day, so it must not be summed as if it were the whole day.
     if len(rows) >= BUDGET_READ_LIMIT:
         return distill_budget.Unmeasured(f"events read clamped at {BUDGET_READ_LIMIT}")
-    today = datetime.now(verdict_core.WINDOW_TZ).date()
-    return distill_budget.judge_day_budget(rows, today, verdict_core.WINDOW_TZ, budget)
+    return distill_budget.judge_day_budget(rows, now.date(), verdict_core.WINDOW_TZ, budget)
 
 
 def _budget_defer_reason(state):
