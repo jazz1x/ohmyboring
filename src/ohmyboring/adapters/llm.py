@@ -80,6 +80,21 @@ _SYSTEM_PROMPT = "You emit only compact, valid JSON. No prose outside JSON."
 DISTILL_PROVIDER = omb_env.distill_provider()
 
 
+# call_llm returns only the parsed JSON and is called from four nodes, so the run's spend is summed
+# here instead of widening every return type. distill_and_remember resets it at the start of a run;
+# the openai_compat path never adds to it, so its events carry 0 (no usage to report, none invented).
+_run_usage = {"llm_calls": 0, "llm_input_tokens": 0, "llm_output_tokens": 0}
+
+
+def reset_run_usage() -> None:
+    for key in _run_usage:
+        _run_usage[key] = 0
+
+
+def run_usage_fields() -> dict[str, int]:
+    return dict(_run_usage)
+
+
 def _anthropic_text(prompt: str) -> str | None:
     """Anthropic Messages API (official SDK) → the reply text, or None (failure announced on stderr)."""
     import anthropic  # lazy: the local path does not need the SDK
@@ -113,6 +128,9 @@ def _anthropic_text(prompt: str) -> str | None:
         print(f"[distill-session] LLM connection failed: {e}", file=sys.stderr)
         return None
 
+    _run_usage["llm_calls"] += 1
+    _run_usage["llm_input_tokens"] += resp.usage.input_tokens
+    _run_usage["llm_output_tokens"] += resp.usage.output_tokens
     print(
         f"[distill-session] usage input_tokens={resp.usage.input_tokens} "
         f"output_tokens={resp.usage.output_tokens}",

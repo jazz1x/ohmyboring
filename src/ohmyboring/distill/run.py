@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from ohmyboring.adapters import llm
 from ohmyboring.distill.graph import graph
 
 
 def distill_and_remember(text, origin, repo, session_id="", session_since=None):
     """Distill the transcript text via local LLM and write it through ohmyboring's remember tool."""
+    llm.reset_run_usage()
     final = graph.invoke(
         {
             "text": text,

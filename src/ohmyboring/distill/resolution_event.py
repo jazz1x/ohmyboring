@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from ohmyboring.adapters import events, workflow_contract
+from ohmyboring.adapters import events, llm, workflow_contract
 from ohmyboring.distill import polish
 
 
@@ -39,6 +39,7 @@ def log_resolution_event(  # noqa: PLR0913
             remember_status=remember_status,
             polish_status=polish_status,
             polish_reason=polish_reason,
+            **llm.run_usage_fields(),
             **workflow_contract.resolution_fields(verifier_status, remember_status),
         )
     except OSError as e:

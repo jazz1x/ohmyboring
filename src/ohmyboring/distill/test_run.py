@@ -9,12 +9,14 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from ohmyboring import config as omb_env  # noqa: E402
 from ohmyboring.adapters import engine, events  # noqa: E402
 from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
 from ohmyboring.distill import resolution_event, run, settings  # noqa: E402
@@ -24,6 +26,7 @@ from ohmyboring.distill.nodes import note as note_node  # noqa: E402
 from ohmyboring.distill.prompts.draft import build_prompt  # noqa: E402
 from ohmyboring.distill.prompts.repair import build_repair_prompt  # noqa: E402
 from ohmyboring.distill.resolution import verify_note_resolution  # noqa: E402
+from ohmyboring.result import Ok  # noqa: E402
 
 SHALLOW_NOTE = {
     "title": "작업 정리",
@@ -332,6 +335,47 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertEqual(event["polish_reason"], "already readable")
         self.assertEqual(event["workflow_node"], "remember_requested")
         self.assertEqual(event["workflow_outcome"], "duplicate")
+
+    def test_event_carries_the_anthropic_tokens_summed_over_every_call_of_the_run(self):
+        # SDK is not a locked dependency, so a stand-in module answers each call with 7 in / 3 out.
+        sdk = types.ModuleType("anthropic")
+
+        class _Block:
+            type = "text"
+            text = json.dumps(RICH_NOTE)
+
+        class _Resp:
+            stop_reason = "end_turn"
+            content = [_Block()]
+
+            class usage:
+                input_tokens = 7
+                output_tokens = 3
+
+        class _Client:
+            def __init__(self, **kwargs):
+                self.messages = types.SimpleNamespace(create=lambda **kw: _Resp())
+
+        sdk.Anthropic = _Client
+        with (
+            mock.patch.object(llm_adapter, "DISTILL_PROVIDER", Ok(omb_env.AnthropicProvider())),
+            mock.patch.dict(sys.modules, {"anthropic": sdk}),
+            mock.patch.object(
+                engine, "call_remember", return_value=engine.RememberOutcome(True, "remembered")
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            run.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s.",
+                "personal",
+                "oh-my-boring",
+                "s-usage",
+            )
+
+        event = _read_last_event()
+        self.assertGreaterEqual(event["llm_calls"], 1)
+        self.assertEqual(event["llm_input_tokens"], 7 * event["llm_calls"])
+        self.assertEqual(event["llm_output_tokens"], 3 * event["llm_calls"])
 
     def test_polished_body_replaces_the_note_before_remember_and_the_event_says_polished(self):
         # padded body: wall-line 으로 퇴고 대상이 되고, 다듬은 본문이 remember 에 들간다.
