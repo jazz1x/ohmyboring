@@ -46,7 +46,8 @@ def log_resolution_event(  # noqa: PLR0913
         print(f"[distill-session] event log write failed: {e}", file=sys.stderr)
 
 
-def log_skip_event(session_id, origin, repo, resolution, reason):
+def log_skip_event(session_id, origin, repo, resolution, reason, llm_usage=None):  # noqa: PLR0913
+    """llm_usage: only the in-graph skip passes it; skips before any LLM call carry no llm_* fields."""
     events.try_append_event(
         "distill-session",
         "distill_resolution",
@@ -62,5 +63,6 @@ def log_skip_event(session_id, origin, repo, resolution, reason):
         numbers_kept=0,
         remember_status="skipped",
         reason=reason,
+        **(llm_usage or {}),
         **workflow_contract.skip_fields(),
     )

@@ -336,6 +336,25 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
         self.assertEqual(event["workflow_node"], "remember_requested")
         self.assertEqual(event["workflow_outcome"], "duplicate")
 
+    def test_llm_skip_event_carries_the_run_tokens_but_an_out_of_graph_skip_does_not(self):
+        llm_adapter.reset_run_usage()
+        llm_adapter._run_usage.update(llm_calls=1, llm_input_tokens=11, llm_output_tokens=5)
+        with (
+            mock.patch.object(llm_adapter, "call_llm", return_value={"skip": True}),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            run.distill_and_remember("short but long enough text " * 20, "personal", "r", "s-llmskip")
+        in_graph = _read_last_event()
+        resolution_event.log_skip_event("s-toshort", "personal", "r", "none", "too_short")
+        out_of_graph = _read_last_event()
+
+        self.assertEqual(in_graph["reason"], "llm_skip")
+        self.assertEqual(
+            in_graph["llm_calls"], 0
+        )  # call_llm is mocked: reset at run start, then nothing added
+        self.assertEqual(out_of_graph["reason"], "too_short")
+        self.assertNotIn("llm_calls", out_of_graph)
+
     def test_event_carries_the_anthropic_tokens_summed_over_every_call_of_the_run(self):
         # SDK is not a locked dependency, so a stand-in module answers each call with 7 in / 3 out.
         sdk = types.ModuleType("anthropic")
