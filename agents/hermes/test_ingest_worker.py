@@ -409,8 +409,11 @@ class IngestWorkerTest(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         # 2.5M input x $0.10 + 1M output x $0.50 per 1M = $0.75 per row; two rows = $1.50 > $1.00.
         row = {"ts": now, "llm_input_tokens": 2_500_000, "llm_output_tokens": 1_000_000}
-        with mock.patch.object(ingest_worker.event_log, "recent_engine_events", return_value=[row, row]):
+        with mock.patch.object(
+            ingest_worker.event_log, "recent_engine_events", return_value=[row, row]
+        ) as read:
             run = self._drain_with(True)
+        self.assertEqual(read.call_args.kwargs["since_hours"], 48)
         run.assert_not_called()
         self.assertTrue(ingest_worker.distill_queue.is_queued("q-over-budget"))
         self.assertEqual(self._last_event()["status"], "deferred")

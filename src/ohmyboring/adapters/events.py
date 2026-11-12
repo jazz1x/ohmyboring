@@ -276,12 +276,14 @@ def _fetch_engine_events(
     component: str | None = None,
     event_name: str | None = None,
     status: str | None = None,
+    since_hours: int | None = None,
 ) -> list[dict[str, Any]] | None:
     url = _event_sink_url()
     if not url:
         return None
     params = {
         "limit": str(limit),
+        "since_hours": None if since_hours is None else str(since_hours),
         "component": component,
         "event": event_name,
         "status": status,
@@ -335,10 +337,11 @@ def recent_engine_events(
     component: str | None = None,
     event_name: str | None = None,
     status: str | None = None,
+    since_hours: int | None = None,
 ) -> list[dict[str, Any]] | None:
     """The engine store only; None = it could not be read. Unlike `recent_events` there is no
     fallback to the local log, which holds rows only when the DB sink failed."""
-    return _fetch_engine_events(limit, component, event_name, status)
+    return _fetch_engine_events(limit, component, event_name, status, since_hours)
 
 
 def recent_events(

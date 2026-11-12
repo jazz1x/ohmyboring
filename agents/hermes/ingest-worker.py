@@ -140,6 +140,7 @@ PENDING_TTL = _collect.pending_ttl_seconds
 # A retry-marker is a backoff signal, not a terminal state. Once it is stale, Hermes may re-offer it.
 RETRY_TTL = _collect.retry_ttl_seconds
 QUEUE_PER_TICK = _schedule.queue_per_tick
+BUDGET_READ_HOURS = 48
 
 
 def _repo_slug(cwd):
@@ -314,8 +315,12 @@ def _budget_state():
             pass
     # Engine store only: the local events.ndjson is a failure spool, so reading it would turn an
     # unreachable engine into a $0 day.
+    # 48h covers any WINDOW_TZ day whatever the hour; judge_day_budget picks today out of it.
     rows = event_log.recent_engine_events(
-        EVENT_LOG_MAX_LIMIT, component="distill-session", event_name="distill_resolution"
+        EVENT_LOG_MAX_LIMIT,
+        component="distill-session",
+        event_name="distill_resolution",
+        since_hours=BUDGET_READ_HOURS,
     )
     if rows is None:
         return distill_budget.Unmeasured("engine events unreadable")
