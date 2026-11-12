@@ -41,6 +41,10 @@ _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
+# Only this job reads BORING_DISTILL_SRC, so hermes can run distillation from a read-only trunk
+# worktree while every other hermes script keeps the main checkout on PYTHONPATH. Unset → unchanged.
+if os.environ.get("BORING_DISTILL_SRC"):
+    sys.path.insert(0, os.environ["BORING_DISTILL_SRC"])
 import distill_core
 import distill_queue
 import markers
