@@ -2941,8 +2941,16 @@ class AdviceAheadTests(unittest.TestCase):
             return FETCH_DATA[path]
 
         stubs = Stubs(resolutions=RESOLUTIONS)
-        collabs = self._collabs(stubs)._replace(fetch=fetch)
+        events: list[tuple[str, dict]] = []
+        collabs = self._collabs(stubs)._replace(
+            fetch=fetch, record=lambda name, fields: events.append((name, fields))
+        )
         card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        run_row = next(fields for name, fields in events if name == aw.RUN_EVENT)
+        self.assertEqual(
+            run_row["decisions"],
+            {"": {"lines": 3, "notes": ["wiki-1000", "wiki-1001", "wiki-1002"]}},
+        )
         self.assertEqual(len(stubs.propose_calls), 3)
         self.assertEqual(door_calls.count(("/decisions", "")), 1)
         # the note numbers ride in /decisions items: no /claim-source round trip per decision row

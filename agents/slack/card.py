@@ -637,6 +637,13 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
                 same_note=state["same_note_count"],
                 suppressed=state["suppressed_count"],
                 written=len(revisions),
+                decisions={
+                    project: {
+                        "lines": len(lines),
+                        "notes": [line.split(" — ", 1)[0] for line in lines],
+                    }
+                    for project, lines in decisions_cache.items()
+                },
             ),
         )
         return {"advice_revisions": revisions}

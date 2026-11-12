@@ -197,7 +197,10 @@ def run_event_fields(
     same_note: int,
     suppressed: int,
     written: int,
+    decisions: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    """`decisions`: per project whose 「과거 결정」 block went into a prompt this run,
+    {"lines": count, "notes": [note stems]} — so a judge reads what the model was shown."""
     return {
         "day": day,
         "run": run,
@@ -207,6 +210,7 @@ def run_event_fields(
         "same_note": same_note,
         "suppressed": suppressed,
         "written": written,
+        "decisions": decisions,
     }
 
 
