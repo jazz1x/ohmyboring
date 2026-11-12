@@ -2266,6 +2266,27 @@ impl Store {
         }
     }
 
+    /// The failure for a claim key (subject, predicate, valid_from) another note already holds.
+    async fn claim_key_collision(
+        c: &impl GenericClient,
+        subject: &str,
+        predicate: &str,
+        source_path: &str,
+        valid_from: SystemTime,
+    ) -> Result<()> {
+        let holder: String = c
+            .query_one(
+                "SELECT source_path FROM claim WHERE subject = $1 AND predicate = $2 AND valid_from = $3;",
+                &[&subject, &predicate, &valid_from],
+            )
+            .await
+            .context("read the claim row holding the key")?
+            .get(0);
+        anyhow::bail!(
+            "claim ({subject}, {predicate}) valid_from collides: {source_path} cannot take the key held by {holder}"
+        )
+    }
+
     /// The pgvector half of `upsert_claim_with_anchor_on`.
     #[allow(clippy::too_many_arguments)]
     async fn upsert_claim_pg_on(
@@ -2290,7 +2311,8 @@ impl Store {
         // a cycle. `c` is the request's transaction (`ingest_in_own_tx`), so the locks last to
         // its commit.
         Self::lock_claim_slot_on(c, subject, predicate).await?;
-        c.execute(
+        let written = c
+            .execute(
                 "INSERT INTO claim (subject, predicate, value, source_path, valid_from, embedding, kind, confidence, anchor, anchor_hash, anchor_symbol, era)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text, $10::text, $11::text,
                          CASE WHEN $9::text IS NULL THEN 'unanchored' ELSE 'anchored' END)
@@ -2298,7 +2320,8 @@ impl Store {
                      value = EXCLUDED.value, source_path = EXCLUDED.source_path,
                      embedding = EXCLUDED.embedding, kind = EXCLUDED.kind, confidence = EXCLUDED.confidence,
                      anchor = EXCLUDED.anchor, anchor_hash = EXCLUDED.anchor_hash,
-                     anchor_symbol = EXCLUDED.anchor_symbol, era = EXCLUDED.era;",
+                     anchor_symbol = EXCLUDED.anchor_symbol, era = EXCLUDED.era
+                 WHERE claim.source_path = EXCLUDED.source_path;",
                 &[
                     &subject,
                     &predicate,
@@ -2315,6 +2338,10 @@ impl Store {
             )
             .await
             .context("insert claim")?;
+        // Zero rows: the key (subject, predicate, valid_from) is already another note's row.
+        if written == 0 {
+            return Self::claim_key_collision(c, subject, predicate, source_path, valid_from).await;
+        }
         // Seal everything below the slot's latest valid_from, leaving only the single
         // latest row current. A `fact` is a slot: seal across notes on (subject, predicate).
         // Every other kind is an item in a list, so the seal stays inside the note that wrote
@@ -4134,9 +4161,9 @@ impl Store {
         Self::lock_claim_slots_of(tx, newer).await?;
         tx.execute(
             &format!(
-                "UPDATE claim c SET superseded_at = COALESCE(
+                "UPDATE claim c SET superseded_at = GREATEST(COALESCE(
                         (SELECT max(valid_from) FROM claim WHERE source_path = $1),
-                        now())
+                        now()), c.valid_from)
                  WHERE c.source_path = $2 AND c.superseded_at IS NULL
                    AND (c.subject, c.predicate) IN
                        (SELECT subject, predicate FROM claim WHERE source_path = $1)
@@ -4162,7 +4189,8 @@ impl Store {
             .query(
                 "SELECT c.subject, c.predicate FROM claim c
                   WHERE c.source_path = $2
-                    AND c.superseded_at = (SELECT max(valid_from) FROM claim WHERE source_path = $1)
+                    AND c.superseded_at = GREATEST(
+                        (SELECT max(valid_from) FROM claim WHERE source_path = $1), c.valid_from)
                   ORDER BY c.subject, c.predicate;",
                 &[&newer, &older],
             )
@@ -4241,9 +4269,9 @@ impl Store {
         let sealed = tx
             .execute(
                 &format!(
-                    "UPDATE claim c SET superseded_at = COALESCE(
+                    "UPDATE claim c SET superseded_at = GREATEST(COALESCE(
                             (SELECT max(valid_from) FROM claim WHERE source_path = $1),
-                            now())
+                            now()), c.valid_from)
                      WHERE c.source_path = $2 AND c.superseded_at IS NULL
                        AND {RETIRED_NOTE};",
                 ),

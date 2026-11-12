@@ -239,3 +239,78 @@ async fn remember_closes_nothing_when_no_slot_is_restated() {
     p.store.delete_document(&p.old).await.ok();
     p.store.delete_document(&p.new).await.ok();
 }
+
+/// The superseded note's slice ended AFTER the superseding note's (the newer note was ingested
+/// late, so valid_from is the slice end). Closing the old row at the new note's earlier
+/// valid_from would stamp `superseded_at` before the row's own `valid_from`.
+async fn late_ingested_superseder(dsn: &str) -> Pair {
+    let store = Store::open(dsn, 1024).await.expect("open store");
+    let db = connect(dsn).await;
+    let id = unique_id("seal-late");
+    let old = format!("/vault/wiki/seal-{id}-old.md");
+    let new = format!("/vault/wiki/seal-{id}-new.md");
+    let slot_a = format!("slot-a-{id}");
+    let t_new = whole_second_now();
+    let t_old = t_new + Duration::from_mins(1);
+    seed_doc(&store, &old).await;
+    seed_doc(&store, &new).await;
+    seed_fact(&store, &old, &slot_a, "old-a", t_old).await;
+    seed_fact(&store, &new, &slot_a, "new-a", t_new).await;
+    Pair {
+        store,
+        db,
+        old,
+        new,
+        slot_a,
+        slot_b: String::new(),
+        t_new,
+    }
+}
+
+async fn rows_closed_before_they_opened(p: &Pair) -> i64 {
+    p.db.query_one(
+        "SELECT count(*) FROM claim WHERE source_path IN ($1, $2) AND superseded_at < valid_from;",
+        &[&p.old, &p.new],
+    )
+    .await
+    .expect("count")
+    .get(0)
+}
+
+#[tokio::test]
+async fn a_whole_note_seal_never_closes_a_row_before_it_opened() {
+    if skip() {
+        return;
+    }
+    let p = late_ingested_superseder(&test_dsn().unwrap()).await;
+    p.store
+        .record_supersedes(&[[p.new.clone(), p.old.clone()]], None)
+        .await
+        .expect("supersedes");
+    let bad = rows_closed_before_they_opened(&p).await;
+    p.store.delete_document(&p.old).await.ok();
+    p.store.delete_document(&p.new).await.ok();
+    assert_eq!(bad, 0, "rows with superseded_at < valid_from");
+}
+
+#[tokio::test]
+async fn a_restated_slot_seal_never_closes_a_row_before_it_opened() {
+    if skip() {
+        return;
+    }
+    let p = late_ingested_superseder(&test_dsn().unwrap()).await;
+    let report = p
+        .store
+        .remember_supersedes_in_tx(&[[p.new.clone(), p.old.clone()]], None)
+        .await
+        .expect("supersedes");
+    let bad = rows_closed_before_they_opened(&p).await;
+    p.store.delete_document(&p.old).await.ok();
+    p.store.delete_document(&p.new).await.ok();
+    assert_eq!(bad, 0, "rows with superseded_at < valid_from");
+    assert_eq!(
+        report.retired,
+        vec![(p.slot_a.clone(), "state".to_owned())],
+        "the slot the new note re-states is still reported closed"
+    );
+}

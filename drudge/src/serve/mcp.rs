@@ -3019,8 +3019,8 @@ fn parse_remember_note(
         })
         .collect();
 
-    let omb_session_since = parse_session_since(&get_str("omb_session_since"))?;
-    let omb_session_until = parse_session_until(&get_str("omb_session_until"))?;
+    let (omb_session_since, omb_session_until) =
+        parse_session_window(&get_str("omb_session_since"), &get_str("omb_session_until"))?;
     let author = parse_author(args)?;
 
     let front = FrontMatter {
@@ -3041,6 +3041,22 @@ fn parse_remember_note(
         author,
     };
     Ok(RememberNote { front, body })
+}
+
+/// Where the conversation slice starts and ends; a slice that ends before it starts is refused.
+fn parse_session_window(
+    since_raw: &str,
+    until_raw: &str,
+) -> Result<(Option<u64>, Option<u64>), (i32, String)> {
+    let since = parse_session_since(since_raw)?;
+    let until = parse_session_until(until_raw)?;
+    match (since, until) {
+        (Some(s), Some(u)) if u < s => Err((
+            -32602,
+            format!("omb_session_until {u} is before omb_session_since {s}"),
+        )),
+        _ => Ok((since, until)),
+    }
 }
 
 /// The moment a note's conversation slice ended, epoch seconds as digits; empty means absent.
@@ -3980,6 +3996,23 @@ mod tests {
                 "{bad}"
             );
         }
+        assert_eq!(wiki_notes(tmp.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_remember_refuses_a_slice_that_ends_before_it_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = vault_state(tmp.path());
+        let reply = mcp_remember_reply(
+            &s,
+            json!({"title": "t", "body": "b", "repo": "p",
+                   "omb_session_since": "2000", "omb_session_until": "1999"}),
+        )
+        .await;
+        assert_eq!(
+            reply["error"],
+            json!({"code": -32602, "message": "omb_session_until 1999 is before omb_session_since 2000", "data": {"outcome": "refused"}}),
+        );
         assert_eq!(wiki_notes(tmp.path()), 0);
     }
 

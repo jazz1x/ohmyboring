@@ -144,6 +144,19 @@ class IngestWorkerTest(unittest.TestCase):
         last = datetime(2026, 11, 1, 10, 5, 30, tzinfo=UTC).timestamp()
         self.assertEqual(run.call_args.kwargs["session_until"], last)
 
+    def test_the_offer_event_says_where_the_slice_end_came_from(self):
+        self._write_session("s-no-ts")  # its only row carries no timestamp
+        root = Path(self.sessions_root) / "proj"
+        row = {
+            "cwd": self.tmp.name,
+            "timestamp": "2026-11-01T10:00:00Z",
+            "message": {"role": "user", "content": "q" * 600},
+        }
+        (root / "s-ts.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        self._run_main()
+        self.assertEqual(self._offer_events("s-ts")[0]["slice_end"], "transcript")
+        self.assertEqual(self._offer_events("s-no-ts")[0]["slice_end"], "missing")
+
     def test_the_worker_takes_origin_and_repo_from_the_host_table(self):
         self._write_session("s-host")
         ingest_worker.repo_table.write(self.tmp.name, "company", "ds-governance")

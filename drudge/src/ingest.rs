@@ -32,8 +32,14 @@ const PRUNE_SKIPPED_SAMPLE: usize = 20;
 /// The moment a note's claims count from. A session note says when its conversation slice ended;
 /// every other note has only the time its file was written.
 enum ClaimTime {
-    /// Epoch seconds, at most `frontmatter::MAX_SESSION_UNTIL_SECS` (parsed at the boundary).
-    SliceEnd(u64),
+    /// `secs`: epoch seconds, at most `frontmatter::MAX_SESSION_UNTIL_SECS` (parsed at the
+    /// boundary). A note cannot describe a conversation that ends after the note was written, so
+    /// a later `secs` is cut to `written`: a caller-supplied future time would otherwise pin the
+    /// claim at the top of its slot.
+    SliceEnd {
+        secs: u64,
+        written: SystemTime,
+    },
     NoteWritten(SystemTime),
 }
 
@@ -44,12 +50,15 @@ impl ClaimTime {
     fn valid_from(&self, path: &str) -> SystemTime {
         match self {
             Self::NoteWritten(written) => *written,
-            Self::SliceEnd(secs) => {
+            Self::SliceEnd { secs, written } => {
                 let digest = Sha256::digest(path.as_bytes());
                 let mut head = [0_u8; 8];
                 head.copy_from_slice(&digest[..8]);
                 let micros = u64::from_be_bytes(head) % 1_000_000;
-                SystemTime::UNIX_EPOCH + Duration::from_secs(*secs) + Duration::from_micros(micros)
+                let slice_end = SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(*secs)
+                    + Duration::from_micros(micros);
+                slice_end.min(*written)
             }
         }
     }
@@ -224,9 +233,10 @@ impl GraphExtractor for FrontmatterGraphExtractor {
         // temporal-fact claims — (subject,predicate)→value, a new value supersedes the old.
         // valid_from = when the claim became true (chronological ordering). value embedding via bge-m3 (no generation).
         if !front.claims.is_empty() {
+            let written = store.doc_lookup().updated_at(tx, path).await?;
             let claim_time = match front.omb_session_until {
-                Some(secs) => ClaimTime::SliceEnd(secs),
-                None => ClaimTime::NoteWritten(store.doc_lookup().updated_at(tx, path).await?),
+                Some(secs) => ClaimTime::SliceEnd { secs, written },
+                None => ClaimTime::NoteWritten(written),
             };
             let valid_from = claim_time.valid_from(path);
             let note_anchors = if front.project.is_empty() {

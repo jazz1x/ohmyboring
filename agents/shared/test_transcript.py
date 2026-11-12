@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -392,3 +393,29 @@ if __name__ == "__main__":
     test_clamp_text_snaps_to_newline_not_mid_line()
     test_codex_distill_clamp_default_and_env_override()
     print("ok - transcript parser")
+
+
+def test_last_timestamp_is_none_when_no_row_carries_one(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write(p, [{"message": {"role": "user", "content": "hi"}}, {"timestamp": 5, "type": "user"}])
+    assert transcript.last_timestamp(str(p)) is None
+
+
+def test_last_timestamp_with_since_is_the_last_row_after_since(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write(
+        p,
+        [
+            {"timestamp": "2026-11-01T10:00:00Z", "type": "user"},
+            {"timestamp": "2026-11-01T11:00:00Z", "type": "assistant"},
+            {"type": "summary"},
+        ],
+    )
+    noon = datetime(2026, 11, 1, 10, 30, tzinfo=UTC).timestamp()
+    assert transcript.last_timestamp(str(p)) == datetime(2026, 11, 1, 11, 0, tzinfo=UTC).timestamp()
+    assert (
+        transcript.last_timestamp(str(p), since=noon) == datetime(2026, 11, 1, 11, 0, tzinfo=UTC).timestamp()
+    )
+    assert (
+        transcript.last_timestamp(str(p), since=datetime(2026, 11, 1, 11, 0, tzinfo=UTC).timestamp()) is None
+    )

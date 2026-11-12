@@ -435,6 +435,7 @@ def main(argv=None):
             source_chars=original_text_chars,
             emitted_chars=len(text),
             clamped=was_clamped,
+            slice_end="missing" if until is None else "transcript",
         )
     # DRAIN — after the offer scan, so a session offered this tick is processed this tick.
     _drain_queue()

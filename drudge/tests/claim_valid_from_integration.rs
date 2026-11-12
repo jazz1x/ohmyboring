@@ -177,3 +177,87 @@ async fn two_notes_with_the_same_slice_end_second_both_keep_their_claim_row() {
     assert!(exact.iter().all(|t| *t >= floor));
     assert_ne!(exact[0], exact[1], "the two rows have distinct keys");
 }
+
+/// A slice end after the moment the note was written is a claim about the future: it is cut to
+/// the write time, so it cannot sit above every real row of its slot.
+#[tokio::test]
+async fn a_slice_end_in_the_future_is_cut_to_the_time_the_note_was_written() {
+    let Ok(dsn) = std::env::var("BORING_TEST_DATABASE_URL") else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = token("ctfuture");
+    let dir = tempdir().expect("vault dir");
+    let path = dir.path().join("future.md");
+    fs::write(
+        &path,
+        session_note(&subject, "v1", now_secs() + 10 * 365 * 86_400),
+    )
+    .expect("write note");
+    let path = path.to_string_lossy().into_owned();
+
+    ingest_file_with::<DefaultChunker, FrontmatterGraphExtractor, _>(
+        &store,
+        &ZeroEmbed,
+        &BoringConfig::default(),
+        &path,
+    )
+    .await
+    .expect("ingest");
+
+    let rows = claim_rows(&db, &subject).await;
+    forget(&store, &db, &[&path], &subject).await;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1 <= now_secs() + 1, "valid_from: {}", rows[0].1);
+}
+
+/// Two notes that land on the same claim key (same subject, predicate and valid_from): the second
+/// is refused by name, and the first note's row is not overwritten.
+#[tokio::test]
+async fn a_claim_key_held_by_another_note_is_a_named_failure_not_an_overwrite() {
+    let Ok(dsn) = std::env::var("BORING_TEST_DATABASE_URL") else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let store = Store::open(&dsn, 1024).await.expect("open store");
+    let db = connect(&dsn).await;
+    let subject = token("ctkey");
+    let at = UNIX_EPOCH + Duration::from_secs(now_secs() - 3_600);
+    let write = |path: &'static str, value: &'static str| {
+        store.upsert_claim(
+            &subject,
+            "axis",
+            value,
+            path,
+            at,
+            &[0.0_f32; 1024],
+            "fact",
+            "certain",
+        )
+    };
+
+    write("/vault/a.md", "v1").await.expect("first note");
+    let refused = write("/vault/b.md", "v2").await;
+    let again = write("/vault/a.md", "v1b").await;
+    let rows = db
+        .query(
+            "SELECT source_path, value FROM claim WHERE subject = $1;",
+            &[&subject],
+        )
+        .await
+        .expect("read claims");
+    db.execute("DELETE FROM claim WHERE subject = $1;", &[&subject])
+        .await
+        .expect("delete claims");
+
+    let message = format!("{:#}", refused.expect_err("second note is refused"));
+    assert!(
+        message.contains("/vault/a.md") && message.contains("/vault/b.md"),
+        "{message}"
+    );
+    again.expect("the same note may rewrite its own row");
+    let rows: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+    assert_eq!(rows, vec![("/vault/a.md".to_owned(), "v1b".to_owned())]);
+}
