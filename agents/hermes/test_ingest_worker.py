@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -398,6 +399,18 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertTrue(ingest_worker.distill_queue.is_queued("q-down"))
         self.assertEqual(self._last_event()["status"], "deferred")
         self.assertIn("llm down", self._last_event()["reason"])
+
+    def test_a_day_over_the_distill_budget_defers_the_drain_and_leaves_items_queued(self):
+        self._queue("q-over-budget")
+        now = datetime.now(UTC).isoformat()
+        # 2.5M input x $0.10 + 1M output x $0.50 per 1M = $0.75 per row; two rows = $1.50 > $1.00.
+        row = {"ts": now, "llm_input_tokens": 2_500_000, "llm_output_tokens": 1_000_000}
+        with mock.patch.object(ingest_worker.event_log, "recent_events", return_value=[row, row]):
+            run = self._drain_with(True)
+        run.assert_not_called()
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-over-budget"))
+        self.assertEqual(self._last_event()["status"], "deferred")
+        self.assertIn("daily budget: $1.50 >= $1.00", self._last_event()["reason"])
 
     def test_a_downed_door_defers_the_tick_without_spending_a_try(self):
         # E3a-1 — remember 는 문을 지나니, 문이 답이 없으면 시도를 태우지 않고 그대로 미룬다.

@@ -563,6 +563,38 @@ def collect() -> Either[Collect, str]:
     return parse_collect(load(), os.environ)
 
 
+@dataclass(frozen=True)
+class DistillBudget:
+    """Daily USD ceiling for distillation and the per-1M-token prices that turn tokens into USD."""
+
+    daily_usd: float
+    price_in_per_mtok: float
+    price_out_per_mtok: float
+
+
+# Claude Haiku 5.5 list price, claude-api skill model table cached 2026-11-03 ($0.50/$2.50 above 100K-token prompts)
+_DISTILL_BUDGET_DEFAULTS = {
+    "daily_usd": ("BORING_DISTILL_DAILY_USD", 1.0),
+    "price_in_per_mtok": ("BORING_DISTILL_PRICE_IN_PER_MTOK", 0.10),
+    "price_out_per_mtok": ("BORING_DISTILL_PRICE_OUT_PER_MTOK", 0.50),
+}
+
+
+def parse_distill_budget(env: Mapping[str, str]) -> Either[DistillBudget, str]:
+    values: dict[str, float] = {}
+    for key, (name, default) in _DISTILL_BUDGET_DEFAULTS.items():
+        match _env_number(env, (name,), 1):
+            case Err(reason):
+                return Err(reason)
+            case Ok(number):
+                values[key] = default if number is None else float(number)
+    return Ok(DistillBudget(**values))
+
+
+def distill_budget() -> Either[DistillBudget, str]:
+    return parse_distill_budget(os.environ)
+
+
 def _matches(cwd: str, remote_url: str | None, matcher: str) -> bool:
     """Case-insensitive substring match against remote URL first, then cwd.
 

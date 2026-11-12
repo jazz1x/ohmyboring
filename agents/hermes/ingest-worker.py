@@ -35,6 +35,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -50,13 +51,16 @@ import distill_queue
 import markers
 import repo_table
 import transcript
+import verdict_core
 
 from ohmyboring import config as boring_config
 from ohmyboring import config as omb_env
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import llm, workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
+from ohmyboring.distill import budget as distill_budget
 from ohmyboring.distill import run as distill_run
+from ohmyboring.events.parse import EVENT_LOG_MAX_LIMIT
 from ohmyboring.result import Err, Ok
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
@@ -301,10 +305,48 @@ def _log_queue(status, reason="", **fields):
     event_log.try_append_event("hermes-ingest-worker", "ingest_queue", status, reason=reason, **fields)
 
 
+def _budget_state():
+    """Today's (WINDOW_TZ) distillation spend against the daily limit."""
+    match boring_config.distill_budget():
+        case Err(reason):
+            return distill_budget.Unmeasured(reason)
+        case Ok(budget):
+            pass
+    try:
+        # The engine clamps /events at EVENT_LOG_MAX_LIMIT; a full page may hide older rows of
+        # the day, so it must not be summed as if it were the whole day.
+        rows = event_log.recent_events(
+            EVENT_LOG_MAX_LIMIT, component="distill-session", event_name="distill_resolution"
+        )
+    except OSError as e:
+        return distill_budget.Unmeasured(f"events unreadable: {e}")
+    if len(rows) >= EVENT_LOG_MAX_LIMIT:
+        return distill_budget.Unmeasured(f"events read clamped at {EVENT_LOG_MAX_LIMIT}")
+    today = datetime.now(verdict_core.WINDOW_TZ).date()
+    return distill_budget.judge_day_budget(rows, today, verdict_core.WINDOW_TZ, budget)
+
+
+def _budget_defer_reason(state):
+    """None = go on; else the reason the whole drain waits."""
+    match state:
+        case distill_budget.Within():
+            return None
+        case distill_budget.Exceeded(spent, limit):
+            return f"daily budget: ${spent:.2f} >= ${limit:.2f}"
+        case distill_budget.Unmeasured(reason):
+            return f"daily budget unmeasured: {reason}"
+
+
 def _drain_queue():
     """Distill up to QUEUE_PER_TICK hook-queued sessions, oldest first."""
     items = distill_queue.drain(QUEUE_PER_TICK)
     if not items:
+        return
+    defer_reason = _budget_defer_reason(_budget_state())
+    if defer_reason is not None:
+        print(f"[ingest-worker] queue deferred: {defer_reason}", file=sys.stderr)
+        agents = ",".join(sorted({item.agent for item in items}))
+        _log_queue("deferred", defer_reason, agent=agents, queued=len(items))
         return
     match _reachable():
         case Err(reason):
