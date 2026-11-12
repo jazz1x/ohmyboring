@@ -312,14 +312,15 @@ def _budget_state():
             return distill_budget.Unmeasured(reason)
         case Ok(budget):
             pass
-    try:
-        # The engine clamps /events at EVENT_LOG_MAX_LIMIT; a full page may hide older rows of
-        # the day, so it must not be summed as if it were the whole day.
-        rows = event_log.recent_events(
-            EVENT_LOG_MAX_LIMIT, component="distill-session", event_name="distill_resolution"
-        )
-    except OSError as e:
-        return distill_budget.Unmeasured(f"events unreadable: {e}")
+    # Engine store only: the local events.ndjson is a failure spool, so reading it would turn an
+    # unreachable engine into a $0 day.
+    rows = event_log.recent_engine_events(
+        EVENT_LOG_MAX_LIMIT, component="distill-session", event_name="distill_resolution"
+    )
+    if rows is None:
+        return distill_budget.Unmeasured("engine events unreadable")
+    # The engine clamps /events at EVENT_LOG_MAX_LIMIT; a full page may hide older rows of
+    # the day, so it must not be summed as if it were the whole day.
     if len(rows) >= EVENT_LOG_MAX_LIMIT:
         return distill_budget.Unmeasured(f"events read clamped at {EVENT_LOG_MAX_LIMIT}")
     today = datetime.now(verdict_core.WINDOW_TZ).date()

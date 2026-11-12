@@ -37,6 +37,10 @@ class IngestWorkerTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parent.parent.parent
         os.environ["BORING_CONFIG"] = str(repo_root / "boring.json")
         self.addCleanup(self._restore_env)
+        # No engine in tests: an empty day, so the budget gate lets the drain through.
+        engine_events = mock.patch.object(ingest_worker.event_log, "recent_engine_events", return_value=[])
+        engine_events.start()
+        self.addCleanup(engine_events.stop)
 
         # Default scan root lives under a .claude path so the agent axis maps to claude-code.
         self.sessions_root = str(Path(self.tmp.name) / ".claude" / "projects")
@@ -405,7 +409,7 @@ class IngestWorkerTest(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         # 2.5M input x $0.10 + 1M output x $0.50 per 1M = $0.75 per row; two rows = $1.50 > $1.00.
         row = {"ts": now, "llm_input_tokens": 2_500_000, "llm_output_tokens": 1_000_000}
-        with mock.patch.object(ingest_worker.event_log, "recent_events", return_value=[row, row]):
+        with mock.patch.object(ingest_worker.event_log, "recent_engine_events", return_value=[row, row]):
             run = self._drain_with(True)
         run.assert_not_called()
         self.assertTrue(ingest_worker.distill_queue.is_queued("q-over-budget"))

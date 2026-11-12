@@ -330,6 +330,17 @@ def iter_events() -> list[dict[str, Any]]:
     return events
 
 
+def recent_engine_events(
+    limit: int,
+    component: str | None = None,
+    event_name: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """The engine store only; None = it could not be read. Unlike `recent_events` there is no
+    fallback to the local log, which holds rows only when the DB sink failed."""
+    return _fetch_engine_events(limit, component, event_name, status)
+
+
 def recent_events(
     limit: int = 20,
     component: str | None = None,
