@@ -419,6 +419,18 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertEqual(self._last_event()["status"], "deferred")
         self.assertIn("daily budget: $1.50 >= $1.00", self._last_event()["reason"])
 
+    def test_a_clamped_engine_event_read_defers_the_drain_even_when_its_cost_is_small(self):
+        self._queue("q-clamped")
+        now = datetime.now(UTC).isoformat()
+        # 1000 rows x ~$0.000002 is far under $1.00, but a full page may hide older rows of the day.
+        rows = [{"ts": now, "llm_input_tokens": 10, "llm_output_tokens": 1}] * 1000
+        with mock.patch.object(ingest_worker.event_log, "recent_engine_events", return_value=rows):
+            run = self._drain_with(True)
+        run.assert_not_called()
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-clamped"))
+        self.assertEqual(self._last_event()["status"], "deferred")
+        self.assertIn("clamped at 1000", self._last_event()["reason"])
+
     def test_a_downed_door_defers_the_tick_without_spending_a_try(self):
         # E3a-1 — remember 는 문을 지나니, 문이 답이 없으면 시도를 태우지 않고 그대로 미룬다.
         self._queue("q-door-down")
