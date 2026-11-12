@@ -3,6 +3,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -602,6 +603,19 @@ class ReachableTests(unittest.TestCase):
             mock.patch.object(ingest_worker, "_llm_reachable", return_value=Ok(None)),
         ):
             self.assertEqual(ingest_worker._reachable(), Ok(None))
+
+
+class ImportWithoutPsycopgTest(unittest.TestCase):
+    def test_worker_imports_when_psycopg_is_unavailable(self):
+        code = (
+            "import sys, importlib.util; sys.modules['psycopg'] = None; "
+            f"s = importlib.util.spec_from_file_location('iw', {_ingest_worker_path!r}); "
+            "m = importlib.util.module_from_spec(s); sys.modules['iw'] = m; s.loader.exec_module(m)"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", code], env=os.environ.copy(), capture_output=True, text=True
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 if __name__ == "__main__":

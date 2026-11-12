@@ -60,7 +60,6 @@ from ohmyboring.adapters import llm, workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
 from ohmyboring.distill import budget as distill_budget
 from ohmyboring.distill import run as distill_run
-from ohmyboring.events.parse import EVENT_LOG_MAX_LIMIT
 from ohmyboring.result import Err, Ok
 
 # Runs in TWO contexts: inside the hermes-agent container (via `hermes cron --script`) or on the host
@@ -141,6 +140,8 @@ PENDING_TTL = _collect.pending_ttl_seconds
 RETRY_TTL = _collect.retry_ttl_seconds
 QUEUE_PER_TICK = _schedule.queue_per_tick
 BUDGET_READ_HOURS = 48
+# Engine clamps /events at 1000 (drudge/src/serve/http.rs EVENT_LOG_MAX_LIMIT) and marks a page truncated when entries >= the requested limit (~L897): getting this many back means the read may be cut.
+BUDGET_READ_LIMIT = 1000
 
 
 def _repo_slug(cwd):
@@ -317,17 +318,16 @@ def _budget_state():
     # unreachable engine into a $0 day.
     # 48h covers any WINDOW_TZ day whatever the hour; judge_day_budget picks today out of it.
     rows = event_log.recent_engine_events(
-        EVENT_LOG_MAX_LIMIT,
+        BUDGET_READ_LIMIT,
         component="distill-session",
         event_name="distill_resolution",
         since_hours=BUDGET_READ_HOURS,
     )
     if rows is None:
         return distill_budget.Unmeasured("engine events unreadable")
-    # The engine clamps /events at EVENT_LOG_MAX_LIMIT; a full page may hide older rows of
-    # the day, so it must not be summed as if it were the whole day.
-    if len(rows) >= EVENT_LOG_MAX_LIMIT:
-        return distill_budget.Unmeasured(f"events read clamped at {EVENT_LOG_MAX_LIMIT}")
+    # A full page may hide older rows of the day, so it must not be summed as if it were the whole day.
+    if len(rows) >= BUDGET_READ_LIMIT:
+        return distill_budget.Unmeasured(f"events read clamped at {BUDGET_READ_LIMIT}")
     today = datetime.now(verdict_core.WINDOW_TZ).date()
     return distill_budget.judge_day_budget(rows, today, verdict_core.WINDOW_TZ, budget)
 
