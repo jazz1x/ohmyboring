@@ -8,12 +8,14 @@ import urllib.request
 from typing import Any
 
 from ohmyboring import config as omb_env
+from ohmyboring.result import Err, Ok
 
 # LLM connection resolves through omb_env (SSOT): env override (BORING_LLM_*) → boring.json
-# llm block → default, with host.docker.internal → localhost rewrite on the host.
-LLM_BASE_URL = omb_env.llm_base_url()
-LLM_MODEL = omb_env.llm_model()
-LLM_API_KEY = omb_env.llm_api_key()
+# llm block → default, with host.docker.internal → localhost rewrite on the host. Distillation
+# alone may point elsewhere via BORING_DISTILL_{BASE_URL,MODEL,API_KEY}; empty → the values above.
+LLM_BASE_URL = omb_env.distill_base_url()
+LLM_MODEL = omb_env.distill_model()
+LLM_API_KEY = omb_env.distill_api_key()
 
 
 def extract_json(text: str) -> Any:
@@ -40,8 +42,90 @@ def extract_json(text: str) -> Any:
         return None
 
 
-def call_llm(prompt: str) -> Any:
-    """Call the local OpenAI-compatible chat endpoint and return the parsed JSON, or None."""
+# Superset of what the distill callers read from call_llm: draft/repair → title, body, tags, tools,
+# concepts, claims (nodes/note.py); the skip verdict {"skip": true} (prompts/draft.py); polish → body
+# only (polish.py). No `required` at top level: polish and skip answers carry a subset.
+DISTILL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "skip": {"type": "boolean"},
+        "title": {"type": "string"},
+        "body": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "tools": {"type": "array", "items": {"type": "string"}},
+        "concepts": {"type": "array", "items": {"type": "string"}},
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "value": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "confidence": {"type": "string"},
+                },
+                "required": ["subject", "predicate", "value", "kind", "confidence"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+_SYSTEM_PROMPT = "You emit only compact, valid JSON. No prose outside JSON."
+
+# Parsed once at import (boundary); an unknown BORING_DISTILL_PROVIDER stays an Err and call_llm
+# reports it on every call instead of silently running the local path.
+DISTILL_PROVIDER = omb_env.distill_provider()
+
+
+def _anthropic_text(prompt: str) -> str | None:
+    """Anthropic Messages API (official SDK) → the reply text, or None (failure announced on stderr)."""
+    import anthropic  # lazy: the local path does not need the SDK
+
+    client_args: dict[str, Any] = {"api_key": LLM_API_KEY}
+    explicit_base_url = omb_env.distill_base_url_explicit()
+    if explicit_base_url:
+        client_args["base_url"] = explicit_base_url
+    try:
+        client = anthropic.Anthropic(**client_args)
+        resp = client.messages.create(
+            model=LLM_MODEL,
+            max_tokens=16000,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={
+                "format": {"type": "json_schema", "schema": DISTILL_SCHEMA},
+                "effort": "low",
+            },
+        )
+    except anthropic.BadRequestError as e:
+        print(f"[distill-session] LLM call rejected (400): {e}", file=sys.stderr)
+        return None
+    except anthropic.RateLimitError as e:
+        print(f"[distill-session] LLM rate limited (429): {e}", file=sys.stderr)
+        return None
+    except anthropic.APIStatusError as e:
+        print(f"[distill-session] LLM call failed (HTTP {e.status_code}): {e}", file=sys.stderr)
+        return None
+    except anthropic.APIConnectionError as e:
+        print(f"[distill-session] LLM connection failed: {e}", file=sys.stderr)
+        return None
+
+    print(
+        f"[distill-session] usage input_tokens={resp.usage.input_tokens} "
+        f"output_tokens={resp.usage.output_tokens}",
+        file=sys.stderr,
+    )
+    if resp.stop_reason in ("refusal", "max_tokens"):
+        print(f"[distill-session] LLM stopped without a usable answer: {resp.stop_reason}", file=sys.stderr)
+        return None
+    return next((b.text for b in resp.content if b.type == "text"), None)
+
+
+def _openai_compat_text(prompt: str) -> str | None:
+    """Local OpenAI-compatible chat endpoint → the reply text, or None (failure announced on stderr)."""
     headers = {"content-type": "application/json"}
     if LLM_API_KEY:
         headers["authorization"] = f"Bearer {LLM_API_KEY}"
@@ -49,10 +133,7 @@ def call_llm(prompt: str) -> Any:
         {
             "model": LLM_MODEL,
             "messages": [
-                {
-                    "role": "system",
-                    "content": "You emit only compact, valid JSON. No prose outside JSON.",
-                },
+                {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
@@ -83,9 +164,23 @@ def call_llm(prompt: str) -> Any:
         return None
 
     try:
-        message = data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         print(f"[distill-session] unexpected LLM response shape: {data}", file=sys.stderr)
+        return None
+
+
+def call_llm(prompt: str) -> Any:
+    """Ask the configured distill provider and return the parsed JSON, or None."""
+    match DISTILL_PROVIDER:
+        case Err(reason):
+            print(f"[distill-session] {reason}", file=sys.stderr)
+            return None
+        case Ok(omb_env.AnthropicProvider()):
+            message = _anthropic_text(prompt)
+        case Ok(omb_env.OpenAICompatProvider()):
+            message = _openai_compat_text(prompt)
+    if message is None:
         return None
 
     parsed = extract_json(message)

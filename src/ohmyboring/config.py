@@ -107,6 +107,53 @@ def llm_api_key() -> str:
     return os.environ.get(key_env) or ""
 
 
+def distill_base_url() -> str:
+    """Chat endpoint for distillation only: BORING_DISTILL_BASE_URL, empty → llm_base_url().
+    Embeddings never read this; they stay on llm_base_url()."""
+    return os.environ.get("BORING_DISTILL_BASE_URL") or llm_base_url()
+
+
+def distill_base_url_explicit() -> str:
+    """BORING_DISTILL_BASE_URL only ('' when unset) — the anthropic SDK keeps its own default then,
+    instead of inheriting the local llm_base_url()."""
+    return os.environ.get("BORING_DISTILL_BASE_URL", "")
+
+
+def distill_model() -> str:
+    """Distillation chat model: BORING_DISTILL_MODEL, empty → llm_model()."""
+    return os.environ.get("BORING_DISTILL_MODEL") or llm_model()
+
+
+def distill_api_key() -> str:
+    """Distillation chat key: BORING_DISTILL_API_KEY, empty → llm_api_key()."""
+    return os.environ.get("BORING_DISTILL_API_KEY") or llm_api_key()
+
+
+@dataclass(frozen=True)
+class OpenAICompatProvider:
+    """Distillation over the OpenAI-compatible chat endpoint (local Ollama/gemma) — the default."""
+
+
+@dataclass(frozen=True)
+class AnthropicProvider:
+    """Distillation through the official anthropic SDK (Messages API)."""
+
+
+DistillProvider = OpenAICompatProvider | AnthropicProvider
+
+
+def distill_provider(env: Mapping[str, str] | None = None) -> Either[DistillProvider, str]:
+    """BORING_DISTILL_PROVIDER → tagged provider. Empty → openai_compat; unknown → Err (no fallback)."""
+    raw = (env if env is not None else os.environ).get("BORING_DISTILL_PROVIDER", "").strip()
+    match raw:
+        case "" | "openai_compat":
+            return Ok(OpenAICompatProvider())
+        case "anthropic":
+            return Ok(AnthropicProvider())
+        case _:
+            return Err(f"BORING_DISTILL_PROVIDER must be openai_compat or anthropic, got {raw!r}")
+
+
 def embed_model() -> str:
     """Embedding model — the engine's policy SSOT (boring.json only, no env knob). Host distillation
     mirrors that: boring.json llm.embed_model → legacy top-level embed_model → default."""
