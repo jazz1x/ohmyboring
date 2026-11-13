@@ -430,11 +430,12 @@ class DoorTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(StubHandler.seen_bodies[-1], payload)
         self.assertEqual(StubHandler.seen_content_types[-1], "application/json")
-        self.assertEqual(json.loads(body), json.loads(TOOLS_LIST_BODY))
         self.assertEqual(content_type, STUB_CONTENT_TYPE)
         names = [t["name"] for t in json.loads(body)["result"]["tools"]]
         self.assertEqual(
-            names, ["alpha", "beta", "gamma"], "스위치 기본 engine — 문은 도구 목록을 안 건드린다"
+            names,
+            ["alpha", "beta", "gamma", "slice_history"],
+            "스위치 기본 engine — 엔진 도구는 그대로, 문 전용 도구(slice_history)만 덧붙는다",
         )
 
     def test_tools_list_non_2xx_and_non_list_answers_pass_through_untouched(self):

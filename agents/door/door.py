@@ -141,6 +141,7 @@ from ohmyboring.recall import named as recall_named
 from ohmyboring.recall import shadow as recall_shadow
 from ohmyboring.recall import wiki as recall_wiki
 from ohmyboring.registers import pg as registers_pg
+from ohmyboring.registers import slice_history
 from ohmyboring.remember import dedup as remember_dedup
 from ohmyboring.remember import index as remember_index
 from ohmyboring.remember import pii as remember_pii
@@ -362,6 +363,11 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
             if (call := _mcp_tools_call(body)) is not None and call[0] == gap_parse.TOOL["name"]:
                 rpc = _http_json_object(body) or {}
                 return await _gap_python(rpc.get("id"), call[1], "mcp")
+    # slice_history 는 엔진에 쌍둥이가 없는 문 전용 도구라 읽기 주인 스위치와 상관없이 문이 답한다.
+    if request.method == "POST" and request.url.path == "/mcp":
+        if (call := _mcp_tools_call(body)) is not None and call[0] == slice_history.TOOL["name"]:
+            rpc = _http_json_object(body) or {}
+            return await _slice_history_python(rpc.get("id"), call[1])
     # 읽기 주인 스위치(E4-1): python 이면 일곱 레지스터 읽기를 엔진에 넘기지 않고 문 안에서 답한다.
     if request.method == "POST" and _register_reader() == _READER_PYTHON:
         if request.url.path in _REGISTER_HTTP_PATHS:
@@ -393,8 +399,11 @@ async def _proxy(request: Request, background_tasks: BackgroundTasks) -> Respons
         )
     if request.method == "POST" and request.url.path == "/mcp":
         response = _augment_mcp_recall(body, response)
-        if _link_writer() == _WRITER_PYTHON:
-            response = _augment_tools_list(body, response)
+        door_tools = [
+            *([gap_parse.TOOL] if _link_writer() == _WRITER_PYTHON else []),
+            slice_history.TOOL,
+        ]
+        response = _augment_tools_list(body, response, door_tools)
     return response
 
 
@@ -445,8 +454,8 @@ def _augment_mcp_recall(body: bytes, response: Response) -> Response:
     )
 
 
-def _augment_tools_list(body: bytes, response: Response) -> Response:
-    """POST /mcp 의 tools/list 가 엔진 2xx application/json 이면 gap 도구를 맨 끝에 덧붙인다.
+def _augment_tools_list(body: bytes, response: Response, door_tools: list[dict]) -> Response:
+    """POST /mcp 의 tools/list 가 엔진 2xx application/json 이면 문이 답하는 도구(gap·slice_history)를 맨 끝에 덧붙인다.
     엔진 도구는 그대로 두고, 그 밖의 모양(다른 메서드·비 2xx·JSON 아님·tools 목록 없음)은
     받은 바이트 그대로."""
     if not 200 <= response.status_code < 300:
@@ -466,7 +475,8 @@ def _augment_tools_list(body: bytes, response: Response) -> Response:
     if not isinstance(tools, list):
         return response
     # 엔진도 gap 을 싣는다(C-PORT4) — 스위치 python 이면 문 것으로 바꿔 한 번만 나오게 한다.
-    result["tools"] = [*(t for t in tools if t.get("name") != gap_parse.TOOL["name"]), gap_parse.TOOL]
+    door_names = {t["name"] for t in door_tools}
+    result["tools"] = [*(t for t in tools if t.get("name") not in door_names), *door_tools]
     return _pass_through(
         response.status_code, json.dumps(response_json, ensure_ascii=False).encode("utf-8"), content_type
     )
@@ -1172,6 +1182,44 @@ async def _register_python(
     if transport == "mcp":
         return _mcp_result(payload, request_id)
     return JSONResponse(payload)
+
+
+def _slice_history_answer(args: slice_history.SliceArgs) -> Either[dict, str]:
+    """슬라이스 이력 한 바퀴 — 읽기 전용 연결. Surreal 쪽 길은 아직 없어 Err 로 답한다(pg 로 되돌아가지 않음)."""
+    match _backend():
+        case Err(error):
+            return Err(error.message)
+        case Ok(surreal_store.OnSurreal()):
+            return Err("slice_history is not on the Surreal copy yet")
+        case Ok(surreal_store.OnPg()):
+            pass
+    try:
+        conn = psycopg.connect(os.environ["DOOR_PG_DSN"], options="-c default_transaction_read_only=on")
+    except psycopg.Error as e:
+        return Err(f"pg connect: {e}")
+    with conn:
+        return slice_history.answer(conn, args, _policy_origins())
+
+
+async def _slice_history_python(request_id: Any, arguments: dict) -> Response:
+    """MCP slice_history — 엔진에 없는 문 전용 도구(읽기 주인 스위치와 상관없이 목록에 오르고 답한다)."""
+    if (unconfigured := _store_unconfigured()) is not None:
+        return unconfigured
+    match slice_history.parse_args(arguments):
+        case Err(rejected):
+            return _register_rejection(request_id, "mcp", rejected.message)
+        case Ok(args):
+            pass
+    try:
+        result = await asyncio.to_thread(_slice_history_answer, args)
+    except Exception as e:  # noqa: BLE001 — _register_python 과 같이 예상 못한 고장도 -32603 으로
+        print(f"[door] slice_history failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        result = Err(f"{type(e).__name__}: {e}")
+    match result:
+        case Err(message):
+            return _register_failure(request_id, "mcp", message)
+        case Ok(payload):
+            return _mcp_result(payload, request_id)
 
 
 _RECALL_WIKI_INDEX = recall_wiki.WikiIndex(vault_note.split_frontmatter)
