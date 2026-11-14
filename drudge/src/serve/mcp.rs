@@ -19,9 +19,7 @@ use crate::ingest;
 use crate::redact;
 use crate::serve::owner::{self, Caller};
 use crate::serve::remember_defer::{DeferredNotes, IndexJob};
-use crate::serve::{
-    AppState, MCP_MAX_RESULTS, MCP_MAX_TOKENS, SyncState, register_limit, vec_off_rpc,
-};
+use crate::serve::{AppState, MCP_MAX_RESULTS, SyncState, register_limit, vec_off_rpc};
 use crate::store::{EventLogFilter, Store, SupersedesReport, wiki_path_spellings};
 use crate::vault;
 use crate::vector::VectorIndex;
@@ -868,6 +866,30 @@ async fn mcp_code_index_status(s: &AppState, args: Option<&Value>) -> Result<Val
 /// Python `answer._CLAIMS_PER_NOTE`.
 const CLAIMS_PER_NOTE: i64 = 5;
 
+/// How wide each leg of `mcp_recall` runs before the fuse cuts to the caller's `max_results`.
+struct RecallWidths {
+    wiki_n: usize,
+    vec_n: usize,
+    vec_chars: usize,
+}
+
+/// Per-leg recall pool: each leg is read this wide, then the fuse cuts to `max_results`.
+/// C-RANK2 branch B, measured on a DB copy: new-query hit rows 37/48 vs 34 (A), lost 0,
+/// p95 0.99x (wiki-00000027355/27357).
+const RECALL_LEG_POOL: usize = 20;
+
+/// The vector leg's character budget, lifted so the pool is cut by count, not by chars (as measured).
+const RECALL_VECTOR_CHARS_LIFTED: usize = 4_000_000;
+
+fn recall_widths(max_results: usize) -> RecallWidths {
+    let leg = RECALL_LEG_POOL.max(max_results);
+    RecallWidths {
+        wiki_n: leg,
+        vec_n: leg,
+        vec_chars: RECALL_VECTOR_CHARS_LIFTED,
+    }
+}
+
 async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, String)> {
     let query = args
         .and_then(|a| a.get("query"))
@@ -883,13 +905,6 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
         .and_then(|n| usize::try_from(n).ok())
         .unwrap_or(5)
         .clamp(1, MCP_MAX_RESULTS);
-    let max_tokens = args
-        .and_then(|a| a.get("max_tokens"))
-        .and_then(Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(2000)
-        .clamp(1, MCP_MAX_TOKENS);
-    let max_chars = max_tokens.saturating_mul(4);
     let project = args
         .and_then(|a| a.get("project"))
         .and_then(Value::as_str)
@@ -914,8 +929,9 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             .map_err(|e| (-32603_i32, format!("wiki recall verdicts: {e:#}")))?,
         _ => ranked,
     };
-    let titles = crate::wiki_recall::pool_titles(&ranked, max_results);
-    let wiki_hits = crate::wiki_recall::select_for_order(&ranked, max_results);
+    let widths = recall_widths(max_results);
+    let titles = crate::wiki_recall::pool_titles(&ranked, widths.wiki_n);
+    let wiki_hits = crate::wiki_recall::select_for_order(&ranked, widths.wiki_n);
     let (wiki_hits, facts) = match s.store.as_ref() {
         Some(store) if !wiki_hits.is_empty() => crate::retrieve::order_wiki_hits(store, wiki_hits)
             .await
@@ -927,8 +943,8 @@ async fn mcp_recall(s: &AppState, args: Option<&Value>) -> Result<String, (i32, 
             store,
             &s.llm,
             query,
-            max_results,
-            max_chars,
+            widths.vec_n,
+            widths.vec_chars,
             &[],
             project,
             since_hours,
@@ -3435,6 +3451,17 @@ mod tests {
         assert!(!needs_dedup(&["/vault/wiki/wiki-0001.md".to_owned()]));
         assert!(!needs_dedup(&["/a.md".to_owned(), "/b.md".to_owned()]));
         assert!(needs_dedup(&[]));
+    }
+
+    #[test]
+    fn recall_runs_each_leg_at_the_wide_pool_and_lifts_the_vector_char_budget() {
+        let w = super::recall_widths(5);
+        assert_eq!(
+            (w.wiki_n, w.vec_n, w.vec_chars),
+            (20, 20, 4_000_000),
+            "B: each leg 20, vector char budget lifted"
+        );
+        assert_eq!(super::recall_widths(30).wiki_n, 30, "never shrinks");
     }
 
     fn vault_state(root: &std::path::Path) -> crate::serve::AppState {
