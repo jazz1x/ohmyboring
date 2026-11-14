@@ -2268,7 +2268,7 @@ async fn defer_indexing(
     let source_path = job.front.source_path.clone();
     let wiki_id = vault::wiki_stem(&source_path).unwrap_or_default();
     let message = format!(
-        "remembered → {} · saved, indexing deferred (sync {}) — recallable after it finishes",
+        "remembered → {} · saved, indexing deferred (sync {}) — claims reach decisions/next_actions after the sync finishes; do not remember again",
         job.label,
         sync.as_str()
     );

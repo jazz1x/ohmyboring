@@ -153,6 +153,11 @@ async fn remember_answers_while_a_sync_holds_the_lock() {
         "answer says indexing waits: {}",
         r.message
     );
+    assert!(
+        r.message.contains("do not remember again"),
+        "answer tells the agent not to retry: {}",
+        r.message
+    );
     assert!(std::path::Path::new(&r.source_path).exists(), "note saved");
 }
 
