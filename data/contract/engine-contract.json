@@ -398,7 +398,7 @@
           "type": "integer"
         },
         "max_tokens": {
-          "description": "approximate token budget (default 2000)",
+          "description": "accepted for compatibility and ignored: each leg reads a fixed pool and the answer is cut by max_results",
           "type": "integer"
         },
         "project": {

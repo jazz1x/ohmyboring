@@ -200,7 +200,7 @@ fn mcp_tools_list() -> Value {
                     "project": {"type": "string", "description": "optional project slug to restrict results"},
                     "since_hours": {"type": "integer", "description": "optional recency window in hours (e.g. 24 for last day)"},
                     "max_results": {"type": "integer", "description": "max hits (default 5, cap 20)"},
-                    "max_tokens": {"type": "integer", "description": "approximate token budget (default 2000)"},
+                    "max_tokens": {"type": "integer", "description": "accepted for compatibility and ignored: each leg reads a fixed pool and the answer is cut by max_results"},
                     "session_id": {"type": "string", "description": "optional session id — the notes returned are recorded as handed to this session (the write side of the feedback door)"}
                 },
                 "required": ["query"]
