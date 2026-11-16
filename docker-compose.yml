@@ -47,6 +47,11 @@ services:
     container_name: boring-surreal
     restart: unless-stopped
     user: root
+    # Default block cache = half of host memory less 1 GiB (v3.3.5 kvs-rocksdb/src/cnf.rs:24);
+    # 512 MiB / 5g = copy measured twice, not yet live.
+    environment:
+      SURREAL_ROCKSDB_BLOCK_CACHE_SIZE: "536870912"
+    mem_limit: 5g
     command: start --user root --pass ${BORING_SURREAL_PASSWORD:-boring} --log warn rocksdb:/data/db
     volumes:
       - ./data/surrealdata:/data
