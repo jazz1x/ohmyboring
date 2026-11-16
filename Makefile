@@ -1,4 +1,4 @@
-.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor status readiness heal verify-llm door-build door-up engine-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
+.PHONY: help up down build logs agent-logs events events-replay ask sync remember collect distill-now smoke e2e doctor status readiness heal verify-llm door-build door-up engine-up maintenance maintenance-install maintenance-uninstall maintenance-status steward steward-fix vault-cleanup-check vault-cleanup-fix retention retention-apply backup-db restore-db backup-surreal restore-surreal compact models ollama hermes-build guard quality test-db test-db-upgrade self-verify-check deny eval bench-llm psql reset secretary card door
 
 # Some Docker Desktop installs have a broken `docker compose` plugin while the
 # standalone `docker-compose` binary works. Fall back transparently.
@@ -243,6 +243,13 @@ backup-db: ## Backup pgvector DB to data/backups/ (custom format; keeps latest 7
 
 restore-db: ## Restore pgvector DB from latest backup (interactive; stop drudge, drop/recreate DB)
 	@./scripts/restore-db.sh
+
+backup-surreal: ## Export the Surreal side to data/backups/ (pairs with a pg dump by prefix; PAIR=<pg dump> reuses its timestamp)
+	@mkdir -p data/backups
+	@./scripts/backup-surreal.sh
+
+restore-surreal: ## Import a Surreal dump into an EMPTY container (FILE= TARGET= PG_CONTAINER= PG_DSN= all required; no default target)
+	@./scripts/restore-surreal.sh
 
 compact: ## Run VACUUM/REINDEX/prune/orphan-GC against the pgvector DB
 	cd drudge && BORING_VECTOR=on cargo run -- compact

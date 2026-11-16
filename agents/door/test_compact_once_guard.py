@@ -21,18 +21,37 @@ LIVE_DSN = "postgresql://live/boring"
 
 
 class ForeignDsnRefusedBeforeWork(unittest.TestCase):
-    def _run(self, env: dict[str, str]) -> tuple[int, str, mock.Mock]:
+    def _run(
+        self, env: dict[str, str], config: dict | None = None, argv: list[str] | None = None
+    ) -> tuple[int, str, mock.Mock]:
         err = io.StringIO()
+        config = {"vector": {"backend": "pgvector"}} if config is None else config
         connect = mock.Mock(side_effect=RuntimeError("stop after the guard"))
         # 거부 분기를 지운 변이에서도 사건이 문 /events(라이브)로 가지 않게 싱크를 막는다 — 10-23 에 두 번 샜다.
         with (
             mock.patch.dict(os.environ, env, clear=True),
             mock.patch.object(compact_once.psycopg, "connect", connect),
             mock.patch.object(compact_once.event_log, "try_append_event", mock.Mock(return_value=True)),
+            mock.patch.object(compact_once.boring_config, "load", return_value=config),
+            mock.patch("agents.door.pg_path_guard.boring_config.load", return_value=config),
             contextlib.redirect_stderr(err),
         ):
-            code = compact_once.main(["--dsn", COPY_DSN])
+            code = compact_once.main(argv or ["--dsn", COPY_DSN])
         return code, err.getvalue(), connect
+
+    def test_surreal_backend_refuses_before_shadow_and_connecting(self) -> None:
+        code, err, connect = self._run(
+            {"DOOR_PG_DSN": LIVE_DSN}, {"vector": {"backend": "surreal"}}, ["--shadow", "--dsn", LIVE_DSN]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("backend=surreal", err)
+        connect.assert_not_called()
+
+    def test_unreadable_config_refuses_the_write_path(self) -> None:
+        code, err, connect = self._run({"DOOR_PG_DSN": LIVE_DSN}, {}, ["--dsn", LIVE_DSN])
+        self.assertEqual(code, 2)
+        self.assertIn("boring.json", err)
+        connect.assert_not_called()
 
     def test_copy_dsn_without_isolated_events_exits_2_before_connecting(self) -> None:
         code, err, connect = self._run({"DOOR_PG_DSN": LIVE_DSN})

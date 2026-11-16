@@ -13,9 +13,12 @@ import sys
 
 import psycopg
 
+from ohmyboring import config as boring_config
 from ohmyboring.adapters import events as event_log
 from ohmyboring.compact import run
 from ohmyboring.result import Err, Ok
+
+from .pg_path_guard import pg_path_refusal
 
 
 def _shadow(dsn: str) -> int:
@@ -34,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shadow", action="store_true", help="읽기 전용 미리보기(쓰기 0)")
     parser.add_argument("--dsn", default=os.environ.get("DOOR_PG_DSN", ""))
     args = parser.parse_args(argv)
+    # 쓰기 길이라 설정을 못 읽어 {} 가 오면 backend 를 모르는 채 pg 를 쓰게 되므로 거부한다.
+    if not boring_config.load():
+        print("[compact] boring.json 을 읽지 못했다 — backend 를 모르고 pg 를 쓸 수 없다.", file=sys.stderr)
+        return 2
+    refusal = pg_path_refusal(["compact_once (compact/run.py writes pg)"])
+    if refusal is not None:
+        print(f"[compact] {refusal}", file=sys.stderr)
+        return 2
     if not args.dsn:
         print("[compact] DOOR_PG_DSN 이 비어 있다 — 문 안에서 돌리거나 --dsn 을 준다.", file=sys.stderr)
         return 2

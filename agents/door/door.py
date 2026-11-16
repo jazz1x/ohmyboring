@@ -194,7 +194,7 @@ def _refuse_python_pg_paths_on_surreal() -> None:
     파이썬 읽기 중 Surreal 로 가는 것(Z3, `_on_store`): claim_source(door.py:1451·1460 _fetch_claim_source·_fetch_claim_sources),
     rules(door.py:1559 _fetch_rules), split-subjects 읽기(door.py:1597 _fetch_split_samples, :1699 _fetch_split_subject_rows),
     레지스터 decisions·risks·next_actions·stalled·context 의 claim 읽기(registers/pg.py). 그대로 pg 인 읽기는 둘:
-    _fetch_edges(door.py:1374, MEMORY_READER 의 /approved)·_fetch_active_projects(door.py:1490), 그리고 BRIEF_OWNER 의
+    _fetch_edges(door.py:1403, MEMORY_READER 의 /approved)·_fetch_active_projects(door.py:1519), 그리고 BRIEF_OWNER 의
     briefing/generate.py:210·243·262·291 — 셋 다 이 거부가 막는다(C-PGREAD1). sync 위생 집계는 파이썬 sync 가
     surreal 에서 기동 거부라 부를 곳이 없어 옮기지 않았다(C0b2). recurrences·status 는 아직 Surreal 길이 없어 Err 로 답한다(pg 로 되돌아가지 않음)."""
     match pg_path_refusal(_python_pg_paths_on()):

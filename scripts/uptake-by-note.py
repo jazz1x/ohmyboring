@@ -26,11 +26,14 @@ from datetime import UTC, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "agents", "shared"))
+sys.path.insert(0, os.path.join(HERE, ".."))
 
 import transcript  # noqa: E402
 import uptake_core  # noqa: E402
 import verdict_core  # noqa: E402
 import yaml  # noqa: E402
+
+from agents.door.pg_path_guard import pg_path_refusal  # noqa: E402
 
 MATCH_TOLERANCE = 0.20
 CELL_FLOOR = 100
@@ -283,6 +286,10 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    refusal = pg_path_refusal(["uptake-by-note (load_handed reads pg edge/document)"])
+    if refusal is not None:
+        print(f"[uptake-by-note] {refusal}", file=sys.stderr)
+        return 2
     since, until = parse_z(args.since), parse_z(args.until)
     events, event_rows = load_events(since, until)
     handed = load_handed(since, until)

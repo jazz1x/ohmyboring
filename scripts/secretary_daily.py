@@ -34,9 +34,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import usage  # noqa: E402  (also puts agents/shared on sys.path)
 import verdict_core  # noqa: E402
+
+from agents.door.pg_path_guard import pg_path_refusal  # noqa: E402
 
 OUT_DIR = Path.home() / "Documents" / "ohmyboring" / "secretary"
 FRAME = Path.home() / "Documents" / "ohmyboring" / "global-recipe" / "report-paper-frame.html"
@@ -503,6 +506,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="비서 일간 점검 (모델 0, 장부 쓰기 0)")
     ap.add_argument("--day", required=True, help="WINDOW_TZ (UTC+9) date, e.g. 2026-11-09")
     args = ap.parse_args(argv)
+    refusal = pg_path_refusal(["secretary_daily (closed_claims reads pg claim)"])
+    if refusal is not None:
+        print(f"[secretary] {refusal}", file=sys.stderr)
+        return 2
     day = args.day
     t0 = time.monotonic()
     lo, hi, start_epoch = day_bounds(day)
