@@ -44,9 +44,11 @@ def _tracked_python() -> list[Path]:
 def _local_module_names(files: list[Path]) -> set[str]:
     """A tracked file's stem is a local module, and so is every directory holding an
     `__init__.py` — the repo's own packages (ohmyboring, ohmyboring_<framework>) are local,
-    not distributions requirements.txt should name."""
+    not distributions requirements.txt should name. A top-level directory holding tracked `.py`
+    files is local too: `agents/` has no `__init__.py`, and scripts import `agents.door…` from it."""
     packages = {p.parent.name for p in files if p.name == "__init__.py"}
-    return {p.stem for p in files} | {p.name.replace("-", "_") for p in files} | packages
+    top_dirs = {p.relative_to(ROOT).parts[0] for p in files if len(p.relative_to(ROOT).parts) > 1}
+    return {p.stem for p in files} | {p.name.replace("-", "_") for p in files} | packages | top_dirs
 
 
 def _imported_top_level(files: list[Path]) -> dict[str, list[str]]:
@@ -110,8 +112,9 @@ def _declared() -> set[str]:
         if not line:
             continue
         declared.add(_distribution(line))
-    core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
-    return declared | {_distribution(spec) for spec in core}
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    extras = [spec for specs in project.get("optional-dependencies", {}).values() for spec in specs]
+    return declared | {_distribution(spec) for spec in [*project["dependencies"], *extras]}
 
 
 def _distribution(spec: str) -> str:

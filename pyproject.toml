@@ -14,6 +14,10 @@ dependencies = [
   "pydantic>=2.13.4",
 ]
 
+[project.optional-dependencies]
+# src/ohmyboring/adapters/llm.py:100 imports it lazily, only on the opt-in Anthropic distill path.
+distill = ["anthropic>=2.8.0"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["ohmyboring*"]
