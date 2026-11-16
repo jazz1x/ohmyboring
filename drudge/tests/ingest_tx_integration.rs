@@ -258,7 +258,7 @@ fn shared_note(shared: &[String], claims: &[(String, bool)], body: &str) -> Stri
 }
 
 /// Ingests two files at once, 40 rounds, each round on rows no other round shares. Returns how
-/// many rounds one of the two was aborted by Postgres (`deadlock detected`).
+/// many rounds either ingest returned any error (`deadlock detected` is the one this guards).
 async fn aborted_rounds(make: impl Fn(&[String]) -> (String, String)) -> usize {
     let Some(dsn) = test_dsn() else {
         eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
@@ -278,6 +278,16 @@ async fn aborted_rounds(make: impl Fn(&[String]) -> (String, String)) -> usize {
         let second_path = dir.path().join("second.md");
         fs::write(&first_path, first).expect("write first");
         fs::write(&second_path, second).expect("write second");
+        // Two undated notes written in the same instant share a claim key (store.rs:2305 refuses the
+        // second); a second apart keeps the rounds about lock order only.
+        let first_written = fs::metadata(&first_path)
+            .and_then(|m| m.modified())
+            .expect("first mtime");
+        fs::File::options()
+            .write(true)
+            .open(&second_path)
+            .and_then(|f| f.set_modified(first_written + std::time::Duration::from_secs(1)))
+            .expect("second mtime");
         let (first, second) = (
             first_path.to_string_lossy().into_owned(),
             second_path.to_string_lossy().into_owned(),
