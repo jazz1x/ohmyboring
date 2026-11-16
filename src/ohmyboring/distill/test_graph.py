@@ -18,7 +18,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ohmyboring.adapters import llm as llm_adapter  # noqa: E402
 from ohmyboring.distill import polish as polish_engine  # noqa: E402
+from ohmyboring.distill import resolution_event  # noqa: E402
 from ohmyboring.distill.graph import Steps, build  # noqa: E402
+from ohmyboring.distill.graph import graph as distill_graph  # noqa: E402
 from ohmyboring.distill.nodes import polish as polish_node  # noqa: E402
 from ohmyboring.distill.test_polish import TIDY, WALL  # noqa: E402
 
@@ -41,7 +43,7 @@ def run(outcomes: dict[str, dict], steps_overrides: dict | None = None, trace: l
 
     fields = {field: node(field) for field in Steps.__dataclass_fields__}
     fields.update(steps_overrides or {})
-    final = build(Steps(**fields)).invoke({"text": "", "ok": False})
+    final = build(Steps(**fields)).invoke({"text": "PR #1", "ok": False})
     return trace, final
 
 
@@ -271,6 +273,28 @@ class PolishNodeRoutingTests(unittest.TestCase):
         with mock.patch.object(llm_adapter, "call_llm", no_call):
             trace, _ = run(outcomes, overrides)
         self.assertEqual(trace, ["draft", "prepare", "verify", "repair_call", "give_up"])
+
+
+class NoEvidenceTokensTest(unittest.TestCase):
+    def test_transcript_without_evidence_tokens_skips_before_any_model_call(self):
+        calls: list[str] = []
+        skipped: list[str] = []
+
+        def fake_call(prompt):
+            calls.append(prompt)
+
+        def fake_skip_event(_session_id, _origin, _repo, _resolution, reason):
+            skipped.append(reason)
+
+        with (
+            mock.patch.dict("os.environ", {"BORING_DISTILL_RESOLUTION": "evidence"}),
+            mock.patch.object(llm_adapter, "call_llm", fake_call),
+            mock.patch.object(resolution_event, "log_skip_event", fake_skip_event),
+        ):
+            final = distill_graph.invoke(
+                {"text": "그냥 이야기만 나눴다", "origin": "o", "repo": "r", "session_id": "s", "ok": False}
+            )
+        self.assertEqual((calls, skipped, final["ok"]), ([], ["no_evidence_tokens"], True))
 
 
 class LangGraphJsonTest(unittest.TestCase):

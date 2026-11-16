@@ -187,7 +187,7 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             mock.patch.object(sys, "stderr", stderr),
         ):
             ok = run.distill_and_remember(
-                "pure chit-chat",
+                "pure chit-chat about PR #1",
                 "personal",
                 "oh-my-boring",
                 "s-skip",
@@ -343,7 +343,13 @@ class DistillCoreResolutionGateTests(unittest.TestCase):
             mock.patch.object(llm_adapter, "call_llm", return_value={"skip": True}),
             mock.patch.object(sys, "stderr", io.StringIO()),
         ):
-            run.distill_and_remember("short but long enough text " * 20, "personal", "r", "s-llmskip")
+            # 근거 낱말이 있어야 C-EVIDSKIP1 의 시작 간선을 지나 모델(llm_skip)까지 간다.
+            run.distill_and_remember(
+                "PR #159 had 8 CI checks passing and eval-gate took 2m10s. " * 10,
+                "personal",
+                "r",
+                "s-llmskip",
+            )
         in_graph = _read_last_event()
         resolution_event.log_skip_event("s-toshort", "personal", "r", "none", "too_short")
         out_of_graph = _read_last_event()

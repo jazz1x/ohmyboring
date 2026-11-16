@@ -314,6 +314,13 @@ def _search_text(title: str, body: str, claims: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def evidence_tokens_unreachable(transcript: str, resolution: str | None) -> bool:
+    """전사에 근거 낱말이 0 이면 verify_note_resolution 의 evidence-tokens 조건은 본문이 무엇이든 못 넘는다."""
+    rule = RESOLUTION_RULES[normalize_resolution(resolution)]
+    seen = _evidence_tokens(transcript)
+    return not seen and _required_evidence_tokens(int(rule["min_evidence_tokens"]), seen) > 0
+
+
 def _required_evidence_tokens(configured_min: int, seen: tuple[str, ...]) -> int:
     if not seen:
         return configured_min
