@@ -70,9 +70,42 @@ def candidate_line(candidate: ConflictCandidate) -> str | None:
     )
 
 
-def message_suffix(candidates: tuple[ConflictCandidate, ...]) -> str:
-    lines = [line for line in map(candidate_line, candidates) if line]
+@dataclass(frozen=True)
+class Found:
+    candidates: tuple[ConflictCandidate, ...]
+
+
+@dataclass(frozen=True)
+class SearchFailed:
+    """검색이 실패했다 — 후보 없음(Found(()))과 갈라 보인다. 저장은 막지 않는다."""
+
+    reason: str
+
+
+SearchOutcome = Found | SearchFailed
+
+
+def message_suffix(outcome: SearchOutcome) -> str:
+    match outcome:
+        case Found(candidates):
+            lines = [line for line in map(candidate_line, candidates) if line]
+        case SearchFailed(reason):
+            lines = [f"후보 찾기 실패: {reason}"]
     return "".join(f"\n{line}" for line in lines)
+
+
+def search_conflicts_guarded(
+    cur: Any, project: str, claims: list[tuple[str, str, str]], own_path: str
+) -> SearchOutcome:
+    """search_conflicts 를 SAVEPOINT 안에서 — 실패하면 그 자리로 되돌려 같은 트랜잭션의 노트 쓰기는 산다."""
+    cur.execute("SAVEPOINT conflict_search")
+    try:
+        candidates = search_conflicts(cur, project, claims, own_path)
+    except Exception as failure:  # noqa: BLE001 — 후보는 알림이라 쓰기의 성공 조건이 아니다(판정 29465)
+        cur.execute("ROLLBACK TO SAVEPOINT conflict_search")
+        return SearchFailed(str(failure))
+    cur.execute("RELEASE SAVEPOINT conflict_search")
+    return Found(candidates)
 
 
 _SEARCH_SQL = (

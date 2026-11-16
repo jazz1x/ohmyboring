@@ -790,6 +790,20 @@ class WriterCase(unittest.TestCase):
         )
         self.assertEqual(params["own_path"], outcome.source_path)
 
+    def test_failed_conflict_search_still_stores_and_names_the_failure(self):
+        def raising(sql, params):
+            if "unnest(%(ids)s" in sql:
+                raise RuntimeError("statement timeout")
+            return _handler(self.sql)(sql, params)
+
+        outcome = self.write(self._decision_args(), self.deps(raising))
+        self.assertIsInstance(outcome, writer.Written)
+        assert isinstance(outcome, writer.Written)
+        self.assertIn("\n후보 찾기 실패: statement timeout", outcome.message)
+        self.assertEqual(outcome.conflict_candidates, ())
+        executed = [sql for sql, _ in self.sql]
+        self.assertIn("ROLLBACK TO SAVEPOINT conflict_search", executed)
+
     def test_control_fact_claim_runs_no_conflict_search(self):
         outcome = self.write(self._decision_args(kind="fact"), self._conflict_deps([self._CONFLICT_ROW]))
         assert isinstance(outcome, writer.Written)
