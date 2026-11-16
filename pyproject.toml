@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 # src/ohmyboring/adapters/llm.py:100 imports it lazily, only on the opt-in Anthropic distill path.
 distill = ["anthropic>=2.8.0"]
+# agents/memory/deep_agent.py — pulls langchain/langchain-core with it; the lock keeps them together.
+memory = ["deepagents>=0.7.18"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
