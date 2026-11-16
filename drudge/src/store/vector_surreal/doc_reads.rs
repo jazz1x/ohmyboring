@@ -340,6 +340,20 @@ impl SurrealClient {
 
     /// `Store::related_docs`.
     pub async fn related_docs(&self, source_path: &str, limit: i64) -> Result<Vec<String>> {
+        Ok(self
+            .related_docs_scored(source_path, limit)
+            .await?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    /// `Store::related_docs_scored`: `related_docs` with each neighbour's shared-node count.
+    pub async fn related_docs_scored(
+        &self,
+        source_path: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, i64)>> {
         let doc_id = format!("{DOC_PREFIX}{source_path}");
         let take = usize::try_from(limit).unwrap_or(0);
         Ok(self
@@ -347,7 +361,7 @@ impl SurrealClient {
             .await?
             .into_iter()
             .take(take)
-            .map(|(src, _)| dst_to_path(&src))
+            .map(|(src, n)| (dst_to_path(&src), n))
             .collect())
     }
 

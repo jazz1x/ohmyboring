@@ -754,13 +754,16 @@ impl SurrealView<'_> {
     }
 }
 
-impl VectorIndex for SurrealView<'_> {
-    async fn semantic_related_docs(
+impl SurrealView<'_> {
+    /// `semantic_related_docs` with each neighbour's cosine distance, the value pg's `<=>` gives.
+    /// The HNSW scan only picks the candidates; the distance is recomputed exactly
+    /// (`1 - vector::similarity::cosine`; `vector::distance::cosine` arrives in v4.0.0).
+    pub(super) async fn semantic_related_docs_scored(
         &self,
         source_path: &str,
         limit: i64,
         max_dist: f64,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, f64)>> {
         let sources: Vec<Vec<f32>> = self
             .client
             .rows::<Vec<f32>>(&format!(
@@ -778,10 +781,10 @@ impl VectorIndex for SurrealView<'_> {
         let sql: String = sources
             .iter()
             .map(|emb| {
+                let v = floats(emb);
                 format!(
-                    "SELECT source_path, vector::distance::knn() AS d FROM chunk \
-                     WHERE embedding <|{ef},{ef}|> {} AND source_path != {};",
-                    floats(emb),
+                    "SELECT source_path, 1 - vector::similarity::cosine(embedding, {v}) AS d \
+                     FROM chunk WHERE embedding <|{ef},{ef}|> {v} AND source_path != {};",
                     text(source_path)
                 )
             })
@@ -801,7 +804,23 @@ impl VectorIndex for SurrealView<'_> {
             best.into_iter().filter(|(_, d)| *d <= max_dist).collect();
         within.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         within.truncate(usize::try_from(limit).unwrap_or(0));
-        Ok(within.into_iter().map(|(p, _)| p).collect())
+        Ok(within)
+    }
+}
+
+impl VectorIndex for SurrealView<'_> {
+    async fn semantic_related_docs(
+        &self,
+        source_path: &str,
+        limit: i64,
+        max_dist: f64,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .semantic_related_docs_scored(source_path, limit, max_dist)
+            .await?
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect())
     }
 
     async fn recurrences(

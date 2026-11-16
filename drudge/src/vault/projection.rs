@@ -71,7 +71,7 @@ pub async fn project_links(
             );
         }
     }
-    store.finish_projection_run(run_started_at).await?;
+    store.finish_projection_run(run_started_at, &scope).await?;
     Ok(updated)
 }
 

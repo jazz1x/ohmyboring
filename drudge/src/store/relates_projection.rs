@@ -14,10 +14,14 @@ use deadpool_postgres::GenericClient;
 use anyhow::{Context, Result};
 
 use super::vector_pg::Pg;
+use super::vector_surreal::{SurrealClient, SurrealView};
 use super::{Store, VectorRoute};
-use crate::vector::VectorIndex;
 
 const WATERMARK_KEY: &str = "relates_projection_watermark";
+/// Surreal's watermark is read off Surreal's clock, so it never shares a row with pg's.
+const SURREAL_WATERMARK_KEY: &str = "relates_projection_watermark_surreal";
+/// Set by a full Surreal pass, cleared by any pg pass: the ledger holds Surreal's rows.
+const SURREAL_FULL_KEY: &str = "relates_projection_full_surreal";
 
 /// Same bound as `project_note`'s `semantic_related_docs(.., 0.40)` call.
 const SEMANTIC_MAX_DIST: f64 = 0.40;
@@ -152,25 +156,18 @@ impl Store {
         ))
     }
 
-    /// `related_docs` with each neighbour's shared-node count. Surreal route: count 0, because
-    /// nothing is remembered there (see `replace_projection_links`).
+    /// `related_docs` with each neighbour's shared-node count.
     ///
     /// # Errors
     /// The query failed.
     pub async fn related_docs_scored(&self, src: &str, limit: i64) -> Result<Vec<(String, i64)>> {
         match &self.vector_route {
             VectorRoute::Pgvector => self.related_docs_scored_pg(src, limit).await,
-            VectorRoute::Surreal(client) => Ok(client
-                .related_docs(src, limit)
-                .await?
-                .into_iter()
-                .map(|p| (p, 0))
-                .collect()),
+            VectorRoute::Surreal(client) => client.related_docs_scored(src, limit).await,
         }
     }
 
-    /// `semantic_related_docs` with each neighbour's distance. Surreal route: distance 0.0, as
-    /// above.
+    /// `semantic_related_docs` with each neighbour's cosine distance.
     ///
     /// # Errors
     /// The query failed.
@@ -186,18 +183,16 @@ impl Store {
                     .semantic_related_docs_scored(src, limit, max_dist)
                     .await
             }
-            VectorRoute::Surreal(_) => Ok(self
-                .semantic_related_docs(src, limit, max_dist)
-                .await?
-                .into_iter()
-                .map(|p| (p, 0.0))
-                .collect()),
+            VectorRoute::Surreal(client) => {
+                SurrealView { client }
+                    .semantic_related_docs_scored(src, limit, max_dist)
+                    .await
+            }
         }
     }
 
     /// Replace the remembered links and k-th bounds of `src` (`dst` = linked note's
-    /// `source_path`). Surreal route: nothing is remembered, because that route always runs a
-    /// full pass.
+    /// `source_path`). Both routes keep this ledger in pg (it outlives the switch-over).
     ///
     /// # Errors
     /// The transaction failed.
@@ -207,9 +202,6 @@ impl Store {
         links: &[(String, ProjectionVia)],
         bound: &ProjectionBound,
     ) -> Result<()> {
-        if matches!(self.vector_route, VectorRoute::Surreal(_)) {
-            return Ok(());
-        }
         let dsts: Vec<&str> = links.iter().map(|(d, _)| d.as_str()).collect();
         let vias: Vec<&str> = links.iter().map(|(_, v)| v.column_value()).collect();
         let mut db = self.db().await?;
@@ -276,10 +268,60 @@ impl Store {
     ///
     /// # Errors
     /// The write failed.
-    pub async fn finish_projection_run(&self, started: SystemTime) -> Result<()> {
-        if matches!(self.vector_route, VectorRoute::Surreal(_)) {
-            return Ok(());
+    pub async fn finish_projection_run(
+        &self,
+        started: SystemTime,
+        scope: &ProjectionScope,
+    ) -> Result<()> {
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.finish_projection_run_pg(started).await,
+            VectorRoute::Surreal(client) => {
+                self.finish_projection_run_surreal(client, started, scope)
+                    .await
+            }
         }
+    }
+
+    /// pg's `document` is not Surreal's: the notes still alive come from Surreal and are matched
+    /// against the pg ledger here. `SURREAL_FULL_KEY` is set only by a full pass, so an
+    /// incremental run can tell the ledger was last rebuilt from Surreal's rows.
+    async fn finish_projection_run_surreal(
+        &self,
+        client: &SurrealClient,
+        started: SystemTime,
+        scope: &ProjectionScope,
+    ) -> Result<()> {
+        let live = client.all_doc_paths().await?;
+        let db = self.db().await?;
+        db.execute(
+            "DELETE FROM relates_projection WHERE NOT (src = ANY($1::text[]));",
+            &[&live],
+        )
+        .await
+        .context("drop projection rows of deleted notes (surreal)")?;
+        db.execute(
+            "DELETE FROM relates_projection_bound WHERE NOT (src = ANY($1::text[]));",
+            &[&live],
+        )
+        .await
+        .context("drop projection bounds of deleted notes (surreal)")?;
+        let mut keys = vec![SURREAL_WATERMARK_KEY];
+        if matches!(scope, ProjectionScope::Full(_)) {
+            keys.push(SURREAL_FULL_KEY);
+        }
+        for key in keys {
+            db.execute(
+                "INSERT INTO sync_state (key, value) VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
+                &[&key, &started],
+            )
+            .await
+            .context("set relates_projection surreal watermark")?;
+        }
+        Ok(())
+    }
+
+    async fn finish_projection_run_pg(&self, started: SystemTime) -> Result<()> {
         self.db()
             .await?
             .execute(
@@ -307,6 +349,15 @@ impl Store {
             )
             .await
             .context("set relates_projection watermark")?;
+        // A pg run rewrote rows the Surreal ledger would trust; the next Surreal run starts full.
+        self.db()
+            .await?
+            .execute(
+                "DELETE FROM sync_state WHERE key = $1;",
+                &[&SURREAL_FULL_KEY],
+            )
+            .await
+            .context("clear relates_projection surreal full marker")?;
         Ok(())
     }
 }

@@ -657,3 +657,132 @@ async fn moved_duplicate_stem_neighbour_frees_a_slot() {
         .await;
     fx.assert_incremental_equals_full_and_visits(101).await;
 }
+
+type Ledger = (
+    Vec<(String, String, String)>,
+    Vec<(String, Option<String>, Option<i32>, Option<String>)>,
+);
+
+/// Both routes keep the ledger in pg; distances are compared at 6 decimals. Empties it after.
+async fn take_ledger(dsn: &str) -> Ledger {
+    let (db, conn) = tokio_postgres::connect(dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    let links = db
+        .query(
+            "SELECT src, dst, via FROM relates_projection ORDER BY src, dst, via",
+            &[],
+        )
+        .await
+        .expect("links")
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    let bounds = db
+        .query(
+            "SELECT src, round(sem_kth_dist::numeric, 6)::text, graph_kth_shared, graph_kth_src
+             FROM relates_projection_bound ORDER BY src",
+            &[],
+        )
+        .await
+        .expect("bounds")
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+        .collect();
+    db.batch_execute("DELETE FROM relates_projection; DELETE FROM relates_projection_bound;")
+        .await
+        .expect("reset ledger");
+    (links, bounds)
+}
+
+/// E1 (C-SURREALCUT2): a full pass on the Surreal route records the same links and k-th bounds
+/// as on pg. Needs `BORING_TEST_SURREAL_URL` and `BORING_SURREAL_PASSWORD` besides the pg DSN.
+#[tokio::test]
+#[ignore = "needs a throwaway SurrealDB"]
+async fn surreal_full_pass_records_the_pg_ledger() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").unwrap();
+    // More neighbours than k on both sides (graph k = 6, semantic k = 4), so no bound is NULL.
+    // Half the graph notes share a third concept, so the k-th shared count is 2 or 3.
+    for id in 101..=108 {
+        let concepts: &[&str] = if id % 2 == 0 {
+            &["ga", "gb", "gc"]
+        } else {
+            &["ga", "gb"]
+        };
+        fx.put_note(id, "proj-graph", concepts, u64::from(id), DAY)
+            .await;
+    }
+    let flipped = |flips: usize| {
+        let mut v = fx.embedding(7);
+        for x in v.iter_mut().take(flips) {
+            *x = -*x;
+        }
+        v
+    };
+    // Pairwise flip differences are all distinct: no two neighbours tie on distance, since pg's
+    // `ORDER BY dist` has no tiebreak and the relates_to order of a tie is not fixed.
+    for (id, flips) in (201..=206).zip([0, 13, 29, 47, 68, 92]) {
+        fx.put_note_vec(id, "proj-sem", &[], flipped(flips), DAY)
+            .await;
+    }
+    fx.project(true).await;
+    let pg = take_ledger(&dsn).await;
+    let pg_files = fx.contents();
+
+    let config: drudge::config::SurrealConfig = serde_json::from_value(serde_json::json!({
+        "url": std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL"),
+        "namespace": format!("cut2_e1_{}", fx.nonce),
+        "database": format!("cut2_e1_{}", fx.nonce),
+    }))
+    .unwrap();
+    let client =
+        drudge::store::SurrealClient::new(config.settings(&|n| std::env::var(n).ok()).unwrap())
+            .unwrap();
+    let tables = client.fill_from(&fx.store).await.expect("fill");
+    assert!(tables.iter().all(drudge::store::FillTable::same), "fill");
+    let routed = Store::open(&dsn, 1024)
+        .await
+        .unwrap()
+        .with_vector_route(drudge::store::VectorRoute::Surreal(client));
+    project_links(&routed, fx.vault.path(), 6, true)
+        .await
+        .expect("project_links surreal");
+    let surreal = take_ledger(&dsn).await;
+
+    println!(
+        "E1 links pg {} surreal {} · bounds pg {} surreal {}",
+        pg.0.len(),
+        surreal.0.len(),
+        pg.1.len(),
+        surreal.1.len()
+    );
+    println!(
+        "E1 pg bounds {:?}",
+        pg.1.iter()
+            .map(|b| (b.0.rsplit('/').next().unwrap(), &b.1, b.2))
+            .collect::<Vec<_>>()
+    );
+    for (src, sem, shared, _) in &pg.1 {
+        // wiki-01xx = the graph group, wiki-02xx = the semantic cluster.
+        if src.contains("/wiki-01") {
+            assert!(
+                shared.is_some_and(|n| n > 0),
+                "graph bound NULL or 0: {src}"
+            );
+        } else {
+            let d: f64 = sem
+                .as_deref()
+                .expect("semantic bound NULL")
+                .parse()
+                .unwrap();
+            assert!(d > 0.0, "semantic bound 0: {src}");
+        }
+    }
+    assert_eq!(pg.1.len(), 14, "pg recorded a bound per note");
+    assert_eq!(surreal.0, pg.0, "links differ");
+    assert_eq!(surreal.1, pg.1, "bounds differ");
+    assert_eq!(fx.contents(), pg_files, "relates_to differs");
+}
