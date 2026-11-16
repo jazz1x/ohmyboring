@@ -746,6 +746,64 @@ class WriterCase(unittest.TestCase):
         self.assertNotIn("retired claims", outcome.message)
         self.assertNotIn("supersedes linked", outcome.message)
 
+    # ── 충돌 후보 (C-CONFLICT1) ──────────────────────────────────────────────
+
+    _CONFLICT_ROW = (
+        "/vault/wiki/wiki-00000022852.md",
+        "주문서/contract1/coupon-issuer",
+        "verdict",
+        "couponIssuer 는 nullable 로 둔다",
+        ["couponIssuer"],
+    )
+
+    def _decision_args(self, kind="decision", value="쿠폰 발급처(couponIssuer)를 null 로 보낸다"):
+        return {
+            "title": "충돌 시험",
+            "body": "본문이다. " * 6,
+            "repo": "foodspring-front",
+            "claims": [
+                {"subject": "foodspring-front", "predicate": "root-cause", "value": value, "kind": kind}
+            ],
+        }
+
+    def _conflict_deps(self, rows):
+        def handler(sql, params):
+            if "unnest(%(ids)s" in sql:
+                return list(rows)
+            return _handler(self.sql)(sql, params)
+
+        return self.deps(handler)
+
+    def test_decision_claim_fills_candidates_and_message_line(self):
+        outcome = self.write(self._decision_args(), self._conflict_deps([self._CONFLICT_ROW]))
+        assert isinstance(outcome, writer.Written)
+        self.assertEqual([c.source_path for c in outcome.conflict_candidates], [self._CONFLICT_ROW[0]])
+        self.assertIn(
+            "\n후보: wiki-00000022852 주문서/contract1/coupon-issuer/verdict — 겹친 낱말 couponIssuer — couponIssuer 는",
+            outcome.message,
+        )
+        (sql, params) = self.sql_with("unnest(%(ids)s")[0]
+        self.assertEqual(params["ids"], ["couponIssuer"])
+        self.assertEqual(params["project"], "foodspring-front")
+        self.assertEqual(
+            (params["slot_subjects"], params["slot_predicates"]), (["foodspring-front"], ["root-cause"])
+        )
+        self.assertEqual(params["own_path"], outcome.source_path)
+
+    def test_control_fact_claim_runs_no_conflict_search(self):
+        outcome = self.write(self._decision_args(kind="fact"), self._conflict_deps([self._CONFLICT_ROW]))
+        assert isinstance(outcome, writer.Written)
+        self.assertEqual(outcome.conflict_candidates, ())
+        self.assertEqual(self.sql_with("unnest(%(ids)s"), [])
+        self.assertNotIn("후보:", outcome.message)
+
+    def test_control_no_identifier_runs_no_conflict_search(self):
+        outcome = self.write(
+            self._decision_args(value="쿠폰 발급처를 바꾼다"), self._conflict_deps([self._CONFLICT_ROW])
+        )
+        assert isinstance(outcome, writer.Written)
+        self.assertEqual(self.sql_with("unnest(%(ids)s"), [])
+
     # ── 빈 노트 거절 (MCP 길만) ──────────────────────────────────────────────
 
     def test_mcp_refuses_note_with_no_project_and_no_claims(self):

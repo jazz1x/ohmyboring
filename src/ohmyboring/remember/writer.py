@@ -57,6 +57,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from ohmyboring.ingest.chunk import fixed_chunks
+from ohmyboring.remember import conflict as _conflict
 from ohmyboring.remember import dedup as _dedup
 from ohmyboring.remember import graph as _graph
 from ohmyboring.remember import pii as _pii
@@ -236,6 +237,9 @@ class Written:
     duplicate: str | None
     supersedes: int
     unknown: int
+    #: 같은 project 의 열린 decision 중 이 노트의 decision·blocked claim 과 식별자를 공유하는 다른 칸 —
+    #: message 에만 싣는다(HTTP 다섯 칸은 그대로). 저장은 막지 않는다.
+    conflict_candidates: tuple[_conflict.ConflictCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1257,6 +1261,7 @@ def _skipped_answer(ctx: _Ctx, match_: _dedup.DuplicateMatch, payload: dict[str,
         duplicate=match_.source_path,
         supersedes=0,
         unknown=0,
+        conflict_candidates=(),
     )
     _record_written(ctx, written, payload["status"], match_.branch, _Stats())
     return written
@@ -1305,6 +1310,14 @@ def _store_new_note(ctx: _Ctx, cur: Any, plan: _Plan) -> Written:
         f"graph(tools {stats.tools} concepts {stats.concepts} claims {stats.claims}) — recallable now"
     )
     message += _supersedes_suffix(plan.targets, linked, unknown, unknown_paths, retired)
+    trigger_claims = [
+        (c.subject, c.predicate, c.value) for c in note.front.claims if c.kind in _conflict.TRIGGER_KINDS
+    ]
+    try:
+        candidates = _conflict.search_conflicts(cur, note.front.project, trigger_claims, path)
+    except Exception as failure:  # noqa: BLE001 — 다른 쓰기 단계와 같은 이름 붙은 실패로 접는다
+        raise _WriteFailure(f"conflict candidates: {failure}") from failure
+    message += _conflict.message_suffix(candidates)
     written = Written(
         wiki_id=wiki_id,
         source_path=path,
@@ -1312,6 +1325,7 @@ def _store_new_note(ctx: _Ctx, cur: Any, plan: _Plan) -> Written:
         duplicate=plan.duplicate,
         supersedes=linked,
         unknown=unknown,
+        conflict_candidates=candidates,
     )
     # 사건은 커밋 뒤에 남긴다 — run_write 말미. 지금 남기면 커밋 시간이 전체에도 칸에도
     # 못 들어가 잔차로 샌다(바쁜 PG 의 fsync 커밋이 바로 그 경우).
