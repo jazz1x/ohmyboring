@@ -492,6 +492,7 @@ impl SurrealClient {
                     "DEFINE FIELD IF NOT EXISTS via ON claim_row TYPE option<string>;
                      DEFINE FIELD IF NOT EXISTS embedding ON claim_row TYPE option<array<float>>;
                      DEFINE FIELD IF NOT EXISTS via ON document TYPE option<string>;
+                     DEFINE FIELD IF NOT EXISTS ingested_us ON document TYPE option<int>;
                      DEFINE TABLE IF NOT EXISTS claim_gone SCHEMALESS;",
                 )
                 .await

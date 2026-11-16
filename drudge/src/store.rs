@@ -40,9 +40,9 @@ pub use log_copy_surreal::{LogCheck, LogCopy};
 pub use relates_projection::{FullReason, ProjectionBound, ProjectionScope, ProjectionVia};
 pub use vector_route::VectorRoute;
 pub use vector_surreal::{
-    ClaimRowDiff, ClaimWrite, FillTable, GraphOp, KeySet, NoteChunk, NoteWrite, ProjectTable,
-    ProjectTableError, RegisterAsk, SURREAL_GRAPH_FAILED, SplitStanding, SurrealClient, Swap,
-    TX_RETRIES, TxCount, TxPlace,
+    ChangedDocs, ClaimRowDiff, ClaimWrite, EdgeChange, FillTable, GraphOp, KeySet, NoteChunk,
+    NoteWrite, ProjectTable, ProjectTableError, RegisterAsk, SURREAL_GRAPH_FAILED, SplitStanding,
+    SurrealClient, Swap, TX_RETRIES, TxCount, TxPlace,
 };
 
 /// Ingest input (one chunk).
@@ -544,6 +544,25 @@ impl DocLookup<'_> {
             }
         }
         Ok(None)
+    }
+
+    /// Surreal only: raise the note's `ingested_us` when its semantic edges are about to differ
+    /// from `expected` (`(kind, dst)`) the way `change` says. pg's projection keys on
+    /// `ingested_at`, which pg writes itself (`touch_ingested_at_on`), so pg does nothing here.
+    pub async fn bump_ingested_if_edges_changed(
+        self,
+        path: &str,
+        expected: &[(String, String)],
+        change: EdgeChange,
+    ) -> Result<()> {
+        match self {
+            Self::Pg => Ok(()),
+            Self::Surreal(client) => {
+                client
+                    .bump_ingested_if_edges_changed(path, expected, change)
+                    .await
+            }
+        }
     }
 
     /// `Store::doc_updated_at_on`.

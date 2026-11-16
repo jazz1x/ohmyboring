@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use crate::config;
 use crate::frontmatter::{self, FrontMatter};
 use crate::llm::Llm;
-use crate::store::{DocLookup, Store};
+use crate::store::{DocLookup, EdgeChange, Store};
 
 /// Max embedding requests in flight per file. Caps load on a local single-GPU LLM server
 /// (Ollama/LM Studio) — going wider stops helping once the server serializes internally, and
@@ -209,6 +209,15 @@ impl GraphExtractor for FrontmatterGraphExtractor {
     ) -> Result<()> {
         let path = &front.source_path;
         let lookup = store.doc_lookup();
+        // Surreal: the delete below and the writes after it commit apart, and a Surreal write
+        // does not say whether it inserted, so a note whose edges move is marked first.
+        lookup
+            .bump_ingested_if_edges_changed(
+                path,
+                &semantic_edge_keys(front, self.cap),
+                EdgeChange::Replaced,
+            )
+            .await?;
         Store::clear_semantic_edges_on(lookup, tx, path).await?;
 
         // Rows shared between notes (tool, concept, claim and speaker nodes) are locked in one
@@ -311,6 +320,31 @@ impl GraphExtractor for FrontmatterGraphExtractor {
     }
 }
 
+/// The `(kind, dst)` of the `doc —claims→ claim` edges `sorted_claims(front)` writes.
+fn claim_edge_keys(front: &FrontMatter) -> Vec<(String, String)> {
+    sorted_claims(front)
+        .into_iter()
+        .map(|((subject, predicate), _)| {
+            ("claims".to_owned(), format!("claim:{subject}:{predicate}"))
+        })
+        .collect()
+}
+
+/// The `(kind, dst)` of every semantic edge (`uses`, `about`, `claims`) `extract` writes for
+/// `front`: what `SEMANTIC_EDGE_KINDS` holds for the note afterwards.
+fn semantic_edge_keys(front: &FrontMatter, cap: usize) -> Vec<(String, String)> {
+    let tools = named_slugs(&front.tools, cap)
+        .into_iter()
+        .map(|(slug, _)| ("uses".to_owned(), format!("tool:{slug}")));
+    let concepts = named_slugs(&front.concepts, cap)
+        .into_iter()
+        .map(|(slug, _)| ("about".to_owned(), format!("concept:{slug}")));
+    tools
+        .chain(concepts)
+        .chain(claim_edge_keys(front))
+        .collect()
+}
+
 /// Canonical `(subject, predicate)` of a claim the graph may hold; `None` for one it skips.
 fn claim_key(cl: &frontmatter::Claim) -> Option<(String, String)> {
     let subject = canon(&cl.subject);
@@ -385,6 +419,11 @@ async fn heal_claim_edges(
 ) -> Result<()> {
     let path = &front.source_path;
     lock_speaker_node(lookup, tx, front).await?;
+    // Surreal says nothing about what an insert added (below), so a claim edge the note lacks is
+    // read first and the note marked before it is written. pg keeps its own count.
+    lookup
+        .bump_ingested_if_edges_changed(path, &claim_edge_keys(front), EdgeChange::Added)
+        .await?;
     let mut claim_edges = 0;
     let mut newly_inserted = 0;
     for ((subject, predicate), cl) in sorted_claims(front) {
@@ -405,7 +444,7 @@ async fn heal_claim_edges(
     // New edges can change which notes share nodes with this one, while `updated_at` (file mtime)
     // stays put; the relates_to projection keys on `ingested_at`. Only edges that were not there
     // count: an unchanged note re-running its claims inserts none, and touching it anyway made
-    // every document dirty on every sync. Surreal always projects in full.
+    // every document dirty on every sync. Surreal marks the note above, before the insert.
     if newly_inserted > 0 && matches!(lookup, DocLookup::Pg) {
         Store::touch_ingested_at_on(tx, path).await?;
     }

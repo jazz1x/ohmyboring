@@ -7,6 +7,7 @@
 //! B's last links, or when B took the project-recency fallback and a note in its project changed.
 //! `relates_projection` remembers B's last links, and `relates_projection_bound` B's raw k-th
 //! bound of each relation, so the last three cases are answerable without opening any file.
+use std::collections::{BTreeSet, HashMap};
 use std::time::SystemTime;
 
 use deadpool_postgres::GenericClient;
@@ -14,8 +15,8 @@ use deadpool_postgres::GenericClient;
 use anyhow::{Context, Result};
 
 use super::vector_pg::Pg;
-use super::vector_surreal::{SurrealClient, SurrealView};
-use super::{Store, VectorRoute};
+use super::vector_surreal::{SurrealClient, SurrealView, micros_to_time};
+use super::{ChangedDocs, Store, VectorRoute};
 
 const WATERMARK_KEY: &str = "relates_projection_watermark";
 /// Surreal's watermark is read off Surreal's clock, so it never shares a row with pg's.
@@ -25,6 +26,16 @@ const SURREAL_FULL_KEY: &str = "relates_projection_full_surreal";
 
 /// Same bound as `project_note`'s `semantic_related_docs(.., 0.40)` call.
 const SEMANTIC_MAX_DIST: f64 = 0.40;
+
+/// A Surreal run reads `document.ingested_us` from this far before the last watermark. A note's
+/// document commit and its edge commits are separate transactions, and a run can start between
+/// them; the overlap catches the stamp that landed just before the watermark. A note handled
+/// twice gives the same output, so the overlap costs time, not correctness. (C-SURREALCUT2 B1.)
+const WATERMARK_OVERLAP_US: i64 = 360_000_000;
+
+/// More changed chunks than this and a Surreal run is a full pass: each changed chunk is one
+/// nearest-neighbour scan. A placeholder until the copy's distribution sets it. (C-SURREALCUT2 C.)
+const MAX_CHANGED_CHUNKS: usize = 500;
 
 /// A note's raw k-th bounds from the queries `project_note` ran (before dedupe and truncate).
 /// `None` = fewer than k came back, so any new neighbour inside the old range would land in.
@@ -90,9 +101,13 @@ impl ProjectionVia {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FullReason {
     Requested,
-    SurrealRoute,
+    /// The ledger was last written by a pg pass (or never by a full Surreal one): its rows are
+    /// not Surreal's, so no incremental run may trust them.
+    NoSurrealFull,
     NoWatermark,
     EmptyProjection,
+    /// More chunks changed than an incremental Surreal run is worth.
+    TooManyChanged,
 }
 
 impl FullReason {
@@ -100,11 +115,18 @@ impl FullReason {
     pub fn label(self) -> &'static str {
         match self {
             Self::Requested => "requested",
-            Self::SurrealRoute => "surreal-route",
+            Self::NoSurrealFull => "no-surreal-full",
             Self::NoWatermark => "no-watermark",
             Self::EmptyProjection => "empty-projection",
+            Self::TooManyChanged => "too-many-changed",
         }
     }
+}
+
+/// Where an incremental run may start from, or why it may not.
+enum Resume {
+    From(SystemTime),
+    Full(FullReason),
 }
 
 /// Which notes one projection run visits. Chosen once at entry, folded once by the caller.
@@ -124,9 +146,111 @@ impl Store {
         if requested_full {
             return Ok(ProjectionScope::Full(FullReason::Requested));
         }
-        if matches!(self.vector_route, VectorRoute::Surreal(_)) {
-            return Ok(ProjectionScope::Full(FullReason::SurrealRoute));
+        match &self.vector_route {
+            VectorRoute::Pgvector => self.projection_scope_pg().await,
+            VectorRoute::Surreal(client) => self.projection_scope_surreal(client).await,
         }
+    }
+
+    async fn projection_scope_pg(&self) -> Result<ProjectionScope> {
+        let watermark = match self.resume_point(WATERMARK_KEY).await? {
+            Resume::Full(reason) => return Ok(ProjectionScope::Full(reason)),
+            Resume::From(watermark) => watermark,
+        };
+        let rows = self
+            .db()
+            .await?
+            .query(DIRTY_SQL, &[&watermark, &SEMANTIC_MAX_DIST])
+            .await
+            .context("relates_projection dirty set")?;
+        Ok(ProjectionScope::Changed(
+            rows.iter().map(|r| r.get::<_, String>(0)).collect(),
+        ))
+    }
+
+    /// The Surreal half of `DIRTY_SQL`: the notes written since the watermark, the notes they
+    /// reach through the graph and the embeddings, and the notes of their projects come from
+    /// Surreal (`projection_dirty.rs`); the ledger tables (`was_linked`, the bounds, the project
+    /// fallback) are pg's and are read here.
+    async fn projection_scope_surreal(&self, client: &SurrealClient) -> Result<ProjectionScope> {
+        let full_marked: bool = self
+            .db()
+            .await?
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM sync_state WHERE key = $1);",
+                &[&SURREAL_FULL_KEY],
+            )
+            .await
+            .context("relates_projection surreal full marker")?
+            .get(0);
+        if !full_marked {
+            return Ok(ProjectionScope::Full(FullReason::NoSurrealFull));
+        }
+        let watermark = match self.resume_point(SURREAL_WATERMARK_KEY).await? {
+            Resume::Full(reason) => return Ok(ProjectionScope::Full(reason)),
+            Resume::From(watermark) => watermark,
+        };
+        let since_us = micros_of(watermark)? - WATERMARK_OVERLAP_US;
+        let written = match client.changed_docs(since_us, MAX_CHANGED_CHUNKS).await? {
+            ChangedDocs::TooMany => return Ok(ProjectionScope::Full(FullReason::TooManyChanged)),
+            ChangedDocs::Within(paths) => paths,
+        };
+        let live = client.all_doc_paths().await?;
+        let bounds = self.projection_bounds().await?;
+        let db = self.db().await?;
+        let gone: Vec<String> = db
+            .query(
+                "SELECT p FROM (SELECT src AS p FROM relates_projection
+                                UNION SELECT dst FROM relates_projection) g
+                 WHERE NOT (p = ANY($1::text[]));",
+                &[&live],
+            )
+            .await
+            .context("relates_projection notes that left")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let changed: Vec<String> = written.iter().chain(&gone).cloned().collect();
+        let shared = client.shared_reach(&written, &bounds).await?;
+        let near = client
+            .near_reach(&written, &bounds, SEMANTIC_MAX_DIST)
+            .await?;
+        let was_linked: Vec<String> = db
+            .query(
+                "SELECT DISTINCT src FROM relates_projection WHERE dst = ANY($1::text[]);",
+                &[&changed],
+            )
+            .await
+            .context("relates_projection was_linked")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let neighbours = client.docs_in_projects_of(&written).await?;
+        let fallback: Vec<String> = db
+            .query(
+                "SELECT n.p FROM unnest($1::text[]) AS n(p)
+                 WHERE EXISTS (SELECT 1 FROM relates_projection r WHERE r.src = n.p AND r.via = 'recent')
+                    OR (SELECT count(*) FROM relates_projection r WHERE r.src = n.p) < 2;",
+                &[&neighbours],
+            )
+            .await
+            .context("relates_projection project fallback")?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let dirty: BTreeSet<String> = changed
+            .into_iter()
+            .chain(shared)
+            .chain(near)
+            .chain(was_linked)
+            .chain(fallback)
+            .collect();
+        Ok(ProjectionScope::Changed(dirty.into_iter().collect()))
+    }
+
+    /// Where the last run of the ledger under `watermark_key` ended, or why an incremental run
+    /// has no such place.
+    async fn resume_point(&self, watermark_key: &str) -> Result<Resume> {
         let db = self.db().await?;
         let populated: bool = db
             .query_one("SELECT EXISTS (SELECT 1 FROM relates_projection);", &[])
@@ -134,26 +258,43 @@ impl Store {
             .context("relates_projection populated?")?
             .get(0);
         if !populated {
-            return Ok(ProjectionScope::Full(FullReason::EmptyProjection));
+            return Ok(Resume::Full(FullReason::EmptyProjection));
         }
         let watermark: Option<SystemTime> = db
             .query_opt(
                 "SELECT value FROM sync_state WHERE key = $1;",
-                &[&WATERMARK_KEY],
+                &[&watermark_key],
             )
             .await
             .context("relates_projection watermark")?
             .map(|r| r.get(0));
-        let Some(watermark) = watermark else {
-            return Ok(ProjectionScope::Full(FullReason::NoWatermark));
-        };
-        let rows = db
-            .query(DIRTY_SQL, &[&watermark, &SEMANTIC_MAX_DIST])
+        Ok(watermark.map_or(Resume::Full(FullReason::NoWatermark), Resume::From))
+    }
+
+    /// Every remembered k-th bound, by the note it belongs to.
+    async fn projection_bounds(&self) -> Result<HashMap<String, ProjectionBound>> {
+        Ok(self
+            .db()
+            .await?
+            .query(
+                "SELECT src, sem_kth_dist, graph_kth_shared, graph_kth_src FROM relates_projection_bound;",
+                &[],
+            )
             .await
-            .context("relates_projection dirty set")?;
-        Ok(ProjectionScope::Changed(
-            rows.iter().map(|r| r.get::<_, String>(0)).collect(),
-        ))
+            .context("relates_projection bounds")?
+            .iter()
+            .map(|r| {
+                let shared: Option<i32> = r.get(2);
+                let src: Option<String> = r.get(3);
+                (
+                    r.get::<_, String>(0),
+                    ProjectionBound {
+                        sem_kth_dist: r.get(1),
+                        graph_kth: shared.zip(src),
+                    },
+                )
+            })
+            .collect())
     }
 
     /// `related_docs` with each neighbour's shared-node count.
@@ -234,19 +375,25 @@ impl Store {
         Ok(())
     }
 
-    /// The database clock, read at the start of a projection run: `document.ingested_at` is
-    /// written with the same clock, so the watermark and the rows it is compared with agree.
+    /// The clock of the database that holds `document`, read at the start of a projection run:
+    /// `ingested_at` (pg) and `ingested_us` (Surreal) are written with that same clock, so the
+    /// watermark and the rows it is compared with agree.
     ///
     /// # Errors
     /// The query failed.
     pub async fn projection_run_clock(&self) -> Result<SystemTime> {
-        Ok(self
-            .db()
-            .await?
-            .query_one("SELECT now();", &[])
-            .await
-            .context("projection run clock")?
-            .get(0))
+        match &self.vector_route {
+            VectorRoute::Pgvector => Ok(self
+                .db()
+                .await?
+                .query_one("SELECT now();", &[])
+                .await
+                .context("projection run clock")?
+                .get(0)),
+            VectorRoute::Surreal(client) => {
+                micros_to_time(client.clock_micros().await?, "surreal clock")
+            }
+        }
     }
 
     /// Mark `path` as re-ingested now although its file mtime did not move.
@@ -360,6 +507,13 @@ impl Store {
             .context("clear relates_projection surreal full marker")?;
         Ok(())
     }
+}
+
+fn micros_of(t: SystemTime) -> Result<i64> {
+    let since = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("watermark is before 1970")?;
+    i64::try_from(since.as_micros()).context("watermark does not fit i64 microseconds")
 }
 
 /// $1 = watermark (start of the last run), $2 = semantic distance bound. One round trip, set-wise.

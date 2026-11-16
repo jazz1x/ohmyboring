@@ -108,7 +108,7 @@ fn note_sql(w: &NoteWrite<'_>, own: Option<&ProjectTable>, tables: &[String]) ->
          LET $old = (SELECT VALUE extracted_sha FROM document WHERE source_path = {p})[0];
          UPSERT type::record('document', {p}) CONTENT {{cid: {p}, source_path: {p}, origin: {o}, \
          project: {pr}, kind: {k}, {title} tags: {tags}, sha: {sha}, extracted_sha: ($old ?? ''), \
-         updated_us: {us}, author: {au}, via: 'surreal'}};
+         updated_us: {us}, author: {au}, via: 'surreal', ingested_us: time::micros(time::now())}};
          FOR $r IN [{rows}] {{ UPSERT type::record('chunk', $r.cid) CONTENT $r; {own_upsert} }};
          {chunk_level}",
         keep = texts(&keep),

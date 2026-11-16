@@ -1084,9 +1084,11 @@ mod claim_tx;
 mod doc_reads;
 mod doc_tx;
 mod graph_tx;
+mod projection_dirty;
 pub use claim_tx::{ClaimWrite, SplitStanding, TX_RETRIES, TxCount, TxPlace};
 pub use doc_tx::{NoteChunk, NoteWrite};
 pub use graph_tx::GraphOp;
+pub use projection_dirty::{ChangedDocs, EdgeChange};
 mod reads;
 mod recurrences;
 
@@ -1324,6 +1326,8 @@ fn document_select(tail: &str) -> String {
 
 /// `(key, SurrealQL record literal)` of one `document_select` row. The key is the `source_path`;
 /// a note without a title leaves the `title` field out (it is `option<string>` on both sides).
+/// `ingested_us` is the fill's own time, as any other write of the row stamps it: the first
+/// projection run after a fill sees every filled note as changed and goes full.
 fn document_literal(r: &Row) -> (String, String) {
     let path: String = r.get(0);
     let title = r
@@ -1331,7 +1335,8 @@ fn document_literal(r: &Row) -> (String, String) {
         .map_or_else(String::new, |t| format!("title: {},", text(&t)));
     let literal = format!(
         "{{cid: {p}, source_path: {p}, origin: {}, project: {}, kind: {}, {title} tags: {}, \
-         sha: {}, extracted_sha: {}, updated_us: {}, author: {}}}",
+         sha: {}, extracted_sha: {}, updated_us: {}, author: {}, \
+         ingested_us: time::micros(time::now())}}",
         text(&r.get::<_, String>(1)),
         text(&r.get::<_, String>(2)),
         text(&r.get::<_, String>(3)),
@@ -1604,7 +1609,8 @@ const DOCUMENT_DDL: &str = "DEFINE TABLE document SCHEMAFULL;
          DEFINE FIELD extracted_sha ON document TYPE string;
          DEFINE FIELD updated_us ON document TYPE int;
          DEFINE FIELD author ON document TYPE string;
-         DEFINE FIELD via ON document TYPE option<string>;";
+         DEFINE FIELD via ON document TYPE option<string>;
+         DEFINE FIELD ingested_us ON document TYPE option<int>;";
 
 /// pg's `(document, node, edge)` keys, in the shapes Surreal keys them by. The fill's compare
 /// reads all three (`catch_up` no longer reads any: C0b1 copy off).
