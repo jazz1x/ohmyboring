@@ -1393,6 +1393,31 @@ async fn surreal_watermark_overlap_and_full_fallbacks() {
         "300 s before the watermark is still written"
     );
 
+    // 501 extra chunks on the written note: one over the cap (500) that keeps an incremental
+    // run cheaper than a full one.
+    let p101 = serde_json::to_string(&side.path(101).to_string_lossy()).unwrap();
+    client
+        .run(&format!(
+            "LET $e = (SELECT VALUE embedding FROM chunk WHERE source_path = {p101} LIMIT 1)[0];
+             FOR $i IN 0..501 {{
+                 CREATE chunk CONTENT {{ cid: 'too-many-' + <string>$i, source_path: {p101},
+                     project: '', doc_updated_us: 0, content: 'x', origin: 'personal',
+                     embedding: $e }};
+             }};"
+        ))
+        .await
+        .expect("pad chunks");
+    let scope = side.store.projection_scope(false).await.expect("scope");
+    println!("E2 (i) 501 more chunks written: {scope:?}");
+    assert_eq!(
+        scope,
+        drudge::store::ProjectionScope::Full(drudge::store::FullReason::TooManyChanged)
+    );
+    client
+        .run("DELETE chunk WHERE string::starts_with(cid, 'too-many-');")
+        .await
+        .expect("unpad chunks");
+
     db.execute(
         "DELETE FROM sync_state WHERE key = 'relates_projection_full_surreal';",
         &[],
