@@ -322,11 +322,16 @@ make readiness
 
 구조화 이벤트는 distill, collector/worker, `doctor`/`readiness`, `guard`, `eval`에서 기록됩니다. memory-ingest 이벤트에는 Rust 작업 흐름 그래프 계약을 따르는 `workflow=memory_ingest`, `workflow_node`, `workflow_outcome` 필드가 붙습니다. 이벤트는 OpenTelemetry 형태의 로그 레코드로 로컬 엔진 DB에 먼저 저장됩니다. NDJSON 파일은 엔진이 내려간 경우의 fallback 스풀이고, `BORING_EVENT_SINK=spool` 또는 `both`를 선택한 경우에만 의도적으로 파일 중심/동시 기록이 됩니다. DB 관점은 HTTP `/events`(`/otel-events` alias도 동일) 또는 MCP `events`로 보고, `make events`는 DB를 먼저 조회하되 실패하면 파일 스풀을 봅니다.
 
-> **임베딩 모델을 바꾸면 벡터 차원이 바뀝니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 크기가 다른 벡터가 나오므로, `llm.embed_dim`을 맞게 수정하고 **그리고** `make reset`을 실행해야 합니다 — 그러지 않으면 기존 형태의 벡터에 대한 upsert가 실패합니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
+> **임베딩 모델을 바꾸면 전부 다시 임베딩해야 합니다.** 합성 모델(`llm.model`)은 자유롭게 교체해도 되지만, `llm.embed_model`을 바꾸면 저장된 벡터가 모두 낡은 것이 됩니다. 차원이 같더라도 이 절차를 따르세요 — 시스템은 차원이 같은 모델 교체를 막지 않습니다. (Gemini 문서, Gemini 모델 간 교체 기준: "you must re-embed all of your existing data".)
+> 1. `make backup-db` (되돌릴 때: `make restore-db FILE=…`이 옛 모델 상태 전체를 복원합니다).
+> 2. `boring.json`에서 `llm.embed_model`과 `llm.embed_dim`을 바꿉니다.
+> 3. `make reset` → `make up`(vault에서 다시 ingest) → `make verify-llm`.
+>
+> **잃는 것:** 질의 로그(`query_log`), 답 라벨(`recall_label`), 이벤트(`event_log`), 소유자가 판정한 간선(`edge`의 `judge='owner'`), 실행 중 바뀐 claim 컬럼. 이것들은 1단계 백업 파일에만 남습니다. 흔한 차원: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
 ### 로컬 모델 선택
 
-ohmyboring은 두 개의 로컬 모델을 사용합니다: 증류/ask용 **합성 모델**, 그리고 벡터 검색용 **임베딩 모델**. 합성 모델은 자유롭게 교체할 수 있고, 임베딩 모델은 `llm.embed_dim` 업데이트와 `make reset`이 필요합니다.
+ohmyboring은 두 개의 로컬 모델을 사용합니다: 증류/ask용 **합성 모델**, 그리고 벡터 검색용 **임베딩 모델**. 합성 모델은 자유롭게 교체할 수 있고, 임베딩 모델도 바꿀 수 있지만 전부 다시 임베딩해야 합니다: `make backup-db`, `llm.embed_model` + `llm.embed_dim` 변경, `make reset` → `make up` → `make verify-llm` (잃는 것은 위 경고 참고).
 
 아래는 MacBook RAM 용량별 동급 페어 가이드입니다. 해당 RAM에 쓸 만한 모델이 없으면 칸을 비워둡니다.
 
@@ -660,7 +665,7 @@ curl -s -X POST http://localhost:7710/mcp \
 |---|---|
 | `make up` 실패 | Ollama 확인: `curl -sf http://127.0.0.1:11434/api/tags` |
 | LM Studio 선택 후 `make up` 실패 | LM Studio 로컬 서버를 켜고 `boring.json`의 chat/embedding 모델 id를 정확히 로드한 뒤 `make verify-llm` 실행 |
-| `embedding dim mismatch` 오류 | `/v1/embeddings`의 실제 출력 길이가 `boring.json`의 `llm.embed_dim`과 다릅니다. 새 모델 차원에 맞게 수정하고 `make reset`을 실행하세요 |
+| `embedding dim mismatch` 오류 | `/v1/embeddings`의 실제 출력 길이가 `boring.json`의 `llm.embed_dim`과 다릅니다. 모델을 바꾸려면 `make backup-db` 후 `boring.json`의 `llm.embed_model` + `llm.embed_dim`을 바꾸고 `make reset` → `make up` → `make verify-llm`을 실행하세요 |
 | 포트 충돌 | `lsof -i :7700 -i :5432 -i :11434` |
 | 두 번째 `make up` / 재클론 실패 | 먼저 `make down`을 실행하세요 — 컨테이너 이름이 고정이고 `127.0.0.1:7700` / `:5432`에 바인딩하므로, 두 번째 스택이 실행 중인 스택과 충돌합니다 |
 | agent 시작 안 됨 | `BORING_CORE_ONLY=1 make up`로 core-only 실행. hermes 이미지는 별도 빌드 필요 |

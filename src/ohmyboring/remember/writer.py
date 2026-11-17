@@ -718,7 +718,8 @@ def _checked_vector(vec: list[float], dim: int) -> str:
     if len(vec) != dim:
         raise _WriteFailure(
             f"embedding dim mismatch: got {len(vec)}, expected {dim}. boring.json embed_model "
-            f"must output {dim}-dim vectors (embed_dim), or change embed_dim + `make reset`."
+            f"must output {dim}-dim vectors (embed_dim), or to change the model: `make backup-db`, "
+            "edit embed_model + embed_dim in boring.json, then `make reset`, `make up`, `make verify-llm`."
         )
     return _vector_literal(vec)
 

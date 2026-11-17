@@ -322,13 +322,18 @@ make readiness
 
 構造化イベントは distill、collector/worker、`doctor`/`readiness`、`guard`、`eval` から記録されます。memory-ingest イベントには Rust ワークフローグラフ契約に沿った `workflow=memory_ingest`、`workflow_node`、`workflow_outcome` フィールドが付きます。イベントはまず OpenTelemetry 形式のログレコードとしてローカルエンジン DB に保存されます。NDJSON ファイルはエンジン停止時の fallback スプールで、`BORING_EVENT_SINK=spool` または `both` を選んだ場合だけ意図的にファイル中心/同時記録になります。DB view は HTTP `/events`（`/otel-events` alias も同じ）または MCP `events`、`make events` は DB を先に読み、失敗時はファイルスプールを読みます。
 
-> **埋め込みモデルを変えるとベクトルの次元が変わります。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えるとサイズの異なるベクトルが出力されるため、`llm.embed_dim` を一致させ、**かつ** `make reset` を実行する必要があります — そうしないと旧形状のベクトルへの upsert が失敗します。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
+> **埋め込みモデルを変えると、すべて再埋め込みが必要です。** 合成モデル（`llm.model`）は自由に差し替えられますが、`llm.embed_model` を変えると保存済みのベクトルがすべて古くなります。次元が同じでもこの手順に従ってください — システムは同じ次元のモデル交換を止めません。（Gemini ドキュメント、Gemini モデル間の交換の場合: "you must re-embed all of your existing data"。）
+> 1. `make backup-db`（戻すとき: `make restore-db FILE=…` で旧モデルの状態をまるごと復元します）。
+> 2. `boring.json` の `llm.embed_model` と `llm.embed_dim` を変更します。
+> 3. `make reset` → `make up`（vault から再 ingest）→ `make verify-llm`。
+>
+> **失われるもの:** クエリログ（`query_log`）、回答ラベル（`recall_label`）、イベント（`event_log`）、オーナーが判定したエッジ（`edge` の `judge='owner'`）、実行中に変更された claim カラム。これらは手順 1 のバックアップファイルにだけ残ります。よくある次元: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768。
 
 ### ローカルモデルの選択
 
 ohmyboring はローカルモデルを 2 つ動かします: 蒸留/ask 用の **synthesis モデル** と、ベクトル検索用の
 **embedding モデル** です。synthesis モデルは自由に差し替えられます。embedding モデルも差し替えられますが、
-`llm.embed_dim` の更新と `make reset` が必要です。
+すべての再埋め込みが必要です: `make backup-db`、`llm.embed_model` + `llm.embed_dim` の変更、`make reset` → `make up` → `make verify-llm`（失われるものは上の警告を参照）。
 
 以下は MacBook の RAM 別・同スケール対応表です。片方のファミリーに実用的なモデルがない段は空欄です。
 
@@ -668,7 +673,7 @@ curl -s -X POST http://localhost:7710/mcp \
 |---|---|
 | `make up` 失敗 | Ollama を確認: `curl -sf http://127.0.0.1:11434/api/tags` |
 | LM Studio 選択後に `make up` 失敗 | LM Studio ローカルサーバーを起動し、`boring.json` の chat/embedding モデル id を正確にロードしてから `make verify-llm` を実行 |
-| `embedding dim mismatch` エラー | `/v1/embeddings` の実際の出力長が `boring.json` の `llm.embed_dim` と一致していません。新しいモデル次元に合わせて修正し、`make reset` を実行してください |
+| `embedding dim mismatch` エラー | `/v1/embeddings` の実際の出力長が `boring.json` の `llm.embed_dim` と一致していません。モデルを変えるなら `make backup-db` の後、`boring.json` の `llm.embed_model` + `llm.embed_dim` を変更し、`make reset` → `make up` → `make verify-llm` を実行してください |
 | ポート競合 | `lsof -i :7700 -i :5432 -i :11434` |
 | 2 回目の `make up` / 再クローン失敗 | まず `make down` を実行してください — コンテナ名が固定で `127.0.0.1:7700` / `:5432` にバインドするため、2 つ目のスタックが実行中のスタックと競合します |
 | agent が起動しない | `BORING_CORE_ONLY=1 make up` で core-only 実行。hermes イメージは別途ビルドが必要 |

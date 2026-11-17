@@ -323,11 +323,16 @@ The model ids must match what LM Studio reports. `make verify-llm` also calls `/
 
 Structured events are emitted by distill, collectors/workers, `doctor`/`readiness`, `guard`, and `eval`. Memory-ingest events carry `workflow=memory_ingest`, `workflow_node`, and `workflow_outcome` fields that mirror the Rust workflow graph contract. Events are stored in the local engine DB first as OpenTelemetry-shaped log records; the NDJSON file is a fallback spool for engine-down cases unless you choose `BORING_EVENT_SINK=spool` or `both`. Use HTTP `/events` (or the `/otel-events` alias) or MCP `events` for the DB view; use `make events` for the DB view with automatic fallback to the file spool.
 
-> **Swapping the embedding model changes the vector dimension.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` emits vectors of a different size, so you must update `llm.embed_dim` to match **and** run `make reset` — otherwise upserts fail against the old-shaped vectors. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
+> **Swapping the embedding model means re-embedding everything.** The synthesis model (`llm.model`) is free to swap, but a new `llm.embed_model` makes every stored vector stale. Follow this procedure even when the dimension stays the same — the system does not block a same-dimension model swap. (Gemini docs, for swaps between Gemini models: "you must re-embed all of your existing data".)
+> 1. `make backup-db` (to go back: `make restore-db FILE=…` restores the whole old-model state).
+> 2. Change `llm.embed_model` and `llm.embed_dim` in `boring.json`.
+> 3. `make reset` → `make up` (re-ingests from the vault) → `make verify-llm`.
+>
+> **What is lost:** the query log (`query_log`), answer labels (`recall_label`), events (`event_log`), owner-judged edges (`edge` with `judge='owner'`), and claim columns changed while running. These survive only in the step-1 backup file. Common dims: `bge-m3` = 1024 · OpenAI `text-embedding-3-small` = 1536 · `nomic-embed-text` = 768.
 
 ### Local model selection
 
-ohmyboring runs two local models: a **synthesis model** for distillation/ask, and an **embedding model** for vector search. The synthesis model can be changed freely; the embedding model can too, but it requires updating `llm.embed_dim` and running `make reset`.
+ohmyboring runs two local models: a **synthesis model** for distillation/ask, and an **embedding model** for vector search. The synthesis model can be changed freely; the embedding model can too, but it means re-embedding everything: `make backup-db`, change `llm.embed_model` + `llm.embed_dim`, then `make reset` → `make up` → `make verify-llm` (see the warning above for what is lost).
 
 Below is a same-scale pairing guide by MacBook RAM. If a tier has no viable model in one family, the cell is left empty.
 
@@ -665,7 +670,7 @@ If you customized `~/.hermes/config.yaml` or `~/.hermes/scripts/briefing.py`, ba
 | Second `make up` / re-clone fails | Run `make down` first — the containers use fixed names and bind `127.0.0.1:7700` / `:5432`, so a second stack collides with the running one |
 | Agent not starting | `BORING_CORE_ONLY=1 make up` runs core-only; hermes image must be built separately |
 | Linux: container can't reach host Ollama | On Linux, Ollama binds `127.0.0.1` by default, so the container hits a closed port even though `host.docker.internal` resolves. Bind Ollama to all interfaces (`OLLAMA_HOST=0.0.0.0:11434`, then restart it) and/or allow the docker bridge in the host firewall |
-| `embedding dim mismatch` errors | Your `/v1/embeddings` output size does not match `llm.embed_dim` in `boring.json`. Update `embed_dim` to match the new model and run `make reset` |
+| `embedding dim mismatch` errors | Your `/v1/embeddings` output size does not match `llm.embed_dim` in `boring.json`. To change the model: `make backup-db`, change `llm.embed_model` + `llm.embed_dim` in `boring.json`, then `make reset` → `make up` → `make verify-llm` |
 | Healthy? / did the last distill land? | `make doctor` — quick health + last-ingest and Codex worker/queue check |
 | Can I rely on tomorrow morning's briefing? | `make readiness` — strict gate; every hook/model/container/ingest finding must pass |
 | `make readiness` reports stale markers | Inspect `~/.cache/boring-distill`; stale `.pending`, `.retry`, or `.dead` markers mean autonomous ingest stopped or needs reconciliation before a scheduled briefing is trusted |

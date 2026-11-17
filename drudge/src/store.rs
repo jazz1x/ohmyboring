@@ -1678,7 +1678,7 @@ impl Store {
         if embedding.len() != self.dim {
             anyhow::bail!(
                 "embedding dim mismatch: got {}, expected {}. boring.json embed_model must output \
-                 {}-dim vectors (embed_dim), or change embed_dim + `make reset`.",
+                 {}-dim vectors (embed_dim), or to change the model: `make backup-db`, edit embed_model + embed_dim in boring.json, then `make reset`, `make up`, `make verify-llm`.",
                 embedding.len(),
                 self.dim,
                 self.dim

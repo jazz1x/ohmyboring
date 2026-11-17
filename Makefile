@@ -255,7 +255,7 @@ compact: ## Run VACUUM/REINDEX/prune/orphan-GC against the pgvector DB
 	cd drudge && BORING_VECTOR=on cargo run -- compact
 
 reset: ## ⚠️ Reset including Postgres data (re-ingested from source)
-	@printf '⚠️  This deletes ./data/pgdata (the vector DB). vault/ markdown is kept. Continue? [y/N] '; \
+	@printf '⚠️  This deletes ./data/pgdata (the vector DB). vault/ markdown is kept. Lost (only in a make backup-db file): query_log, recall_label, event_log, owner-judged edges (judge=owner), claim columns changed while running. Continue? [y/N] '; \
 	  read ans; [ "$$ans" = y ] || [ "$$ans" = Y ] || { echo "aborted."; exit 1; }
 	@case "$$(printf '%s' "$${BORING_VECTOR:-off}" | tr '[:upper:]' '[:lower:]')" in \
 	  on|1|true|yes) $(COMPOSE) --profile vector down ;; \
