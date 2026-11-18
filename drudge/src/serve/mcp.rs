@@ -1084,13 +1084,16 @@ fn choose_lines(
 ) -> Result<ChosenLines, (i32, String)> {
     match (wiki_hits.is_empty(), vector) {
         (true, Err(e)) => Err((-32603, format!("retrieve: {e:#}"))),
-        (true, Ok(lines)) => Ok((lines, String::new())),
+        (true, Ok(lines)) => Ok((lines.into_iter().take(max_results).collect(), String::new())),
         (false, Ok(lines)) => crate::wiki_recall::fuse(&wiki_hits, &lines, max_results, sunk)
             .map(|fused| (fused, String::new()))
             .map_err(|e| (-32603, format!("wiki recall fuse: {e:#}"))),
+        // The wiki list arrives in the order `fuse` reads it (exact titles leading), so its head is
+        // the cut `fuse` would pin first.
         (false, Err(e)) => Ok((
             wiki_hits
                 .into_iter()
+                .take(max_results)
                 .map(|h| (h.source_path, h.snippet))
                 .collect(),
             format!("\n\n(vector 길 실패: {e:#})"),
@@ -3239,6 +3242,35 @@ mod tests {
             .iter()
             .map(|p| ((*p).to_owned(), String::new()))
             .collect()
+    }
+
+    #[test]
+    fn recall_answers_at_most_max_results_lines_when_one_leg_is_missing() {
+        let none = std::collections::HashSet::new();
+        let pool: Vec<String> = (0..20).map(|i| format!("v{i}")).collect();
+        let pool: Vec<&str> = pool.iter().map(String::as_str).collect();
+        let (vector_only, _) =
+            super::choose_lines(Vec::new(), Ok(vector_lines(&pool)), 1, &none).unwrap();
+        assert_eq!(
+            vector_only,
+            vector_lines(&["v0"]),
+            "no wiki hit: vector cut to max_results"
+        );
+
+        let mut exact = wiki_hit("w0");
+        exact.exact_title = true;
+        let wiki = std::iter::once(exact)
+            .chain((1..6).map(|i| wiki_hit(&format!("w{i}"))))
+            .collect();
+        let (wiki_only, tail) =
+            super::choose_lines(wiki, Err(anyhow::anyhow!("down")), 3, &none).unwrap();
+        let paths: Vec<&str> = wiki_only.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["w0", "w1", "w2"],
+            "vector failed: wiki cut to max_results, exact title kept"
+        );
+        assert!(tail.contains("down"));
     }
 
     // Counts lookups and records the paths each one asked for.
