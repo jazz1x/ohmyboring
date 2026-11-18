@@ -73,8 +73,9 @@ services:
     # Default 10001 = the Dockerfile's drudge uid → macOS (Docker Desktop uid-remaps) is unaffected.
     # Native Linux: set BORING_UID/BORING_GID in .env to your host user (id -u / id -g).
     user: "${BORING_UID:-10001}:${BORING_GID:-10001}"
-    # No depends_on — the default wiki mode doesn't need postgres. In vector mode, `--profile vector`
-    # brings up postgres alongside, and Store::open's connect retry (~10s) absorbs the startup race.
+    # No depends_on — the default wiki mode doesn't need postgres. `--profile vector` only enables the
+    # service; start.sh names boring-postgres in vector mode, and Store::open's connect retry (~10s)
+    # absorbs the startup race.
     environment:
       # LLM connection is the `llm` block of the bind-mounted boring.json (the SSOT). These are
       # pass-through OVERRIDES only — no baked default, so an unset value stays empty and the engine
