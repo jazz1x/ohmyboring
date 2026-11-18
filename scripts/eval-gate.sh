@@ -73,12 +73,29 @@ fi
 echo "▶ Copying eval fixtures into vault/wiki …"
 cp data/eval/fixtures/eval-*.md vault/wiki/
 eval_fixtures_copied=1
+# document.updated_at is the file's mtime (drudge/src/ingest.rs:738-741), not the frontmatter date,
+# and cp stamps copy time in glob order (head < target). related_by_shared_ground only reaches
+# OLDER notes (src/ohmyboring/search/pg.py:371), so age each multi-hop target explicitly.
+touch -t 202001010000 vault/wiki/eval-mh-*-target.md
 
 echo "▶ Syncing eval corpus …"
 curl -s -m600 -X POST "$URL/sync" >/dev/null
 
 echo "▶ Running eval …"
 uv run --locked python data/eval/run_eval.py
+
+# Graph path off vs on (C-GRAPHEVAL1) — once, against the main engine only (not the extra URL below).
+# Exit != 0 when no pair is valid or a simple lookup loses its answer; the numbers a/b never fail.
+# A run that exits 0 without printing the report line is also a failure.
+echo "▶ Running graph eval (related off vs on) …"
+graph_rc=0
+graph_out="$(uv run --locked --extra memory python data/eval/run_eval.py --graph)" || graph_rc=$?
+printf '%s\n' "$graph_out"
+[ "$graph_rc" -eq 0 ] || exit "$graph_rc"
+if ! printf '%s\n' "$graph_out" | grep -Eq '^multi-hop off [0-9]+/[0-9]+ · on [0-9]+/[0-9]+ \(valid [0-9]+ of [0-9]+\)$'; then
+  echo "graph eval: report line 'multi-hop off a/v · on b/v' not printed"
+  exit 1
+fi
 
 # BORING_EVAL_EXTRA_URL (set: the door's python /search) — the same golden run, once more
 # against that URL, before cleanup drops the fixtures. Both runs must pass 22/22.

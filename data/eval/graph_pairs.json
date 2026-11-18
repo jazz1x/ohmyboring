@@ -1,0 +1,13 @@
+{
+  "description": "Multi-hop pairs for `run_eval.py --graph`. Query matches the -head note; the -target note is the answer and shares no content word with the query, so only the graph path (shared claim) can hand it over. Fixtures: fixtures/eval-mh-<n>-head.md / -target.md.",
+  "pairs": [
+    {"n": 1, "query": "customers received the same invoice email twice after the scheduler restarted"},
+    {"n": 2, "query": "mobile app login screen freezes for a few seconds on first launch after an update"},
+    {"n": 3, "query": "search results page returns stale prices for some products"},
+    {"n": 4, "query": "file uploads larger than a gigabyte fail behind the load balancer"},
+    {"n": 5, "query": "unit tests pass locally but the pipeline run randomly turns red on timestamps"},
+    {"n": 6, "query": "websocket connections drop every few minutes on the office wifi"},
+    {"n": 7, "query": "pagination skips some records when new items are added while scrolling"},
+    {"n": 8, "query": "translation strings show raw keys in the German build only"}
+  ]
+}
