@@ -44,7 +44,7 @@ class Counting(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "s.jsonl"
             _write(f, [_row("req-1", 100), _row("req-1", 100), _row("req-2", 5)])
-            totals = usage.scan_file(f)
+            totals, _ = usage.scan_file(f)
             out = sum(c["output_tokens"] for c in totals.values())
             self.assertEqual(out, 105, "a repeated requestId must not be charged twice")
 
@@ -57,7 +57,7 @@ class Counting(unittest.TestCase):
 
             lanes = {}
             for path in sorted(root.rglob("*.jsonl")):
-                for key, counts in usage.scan_file(path).items():
+                for key, counts in usage.scan_file(path)[0].items():
                     lanes.setdefault(key.split("|")[3], 0)
                     lanes[key.split("|")[3]] += counts["output_tokens"]
             self.assertEqual(lanes, {"main": 10, "sidechain": 20, "subagent": 40})
@@ -92,7 +92,7 @@ class DayBucket(unittest.TestCase):
             plain["timestamp"] = "2026-11-03T15:30:00Z"
             fractional["timestamp"] = "2026-11-03T15:30:00.123Z"
             _write(f, [plain, fractional])
-            days = {key.split("|", 1)[0] for key in usage.scan_file(f)}
+            days = {key.split("|", 1)[0] for key in usage.scan_file(f)[0]}
             self.assertEqual(days, {"2026-11-04"})
 
 
