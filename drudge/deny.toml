@@ -11,6 +11,10 @@ ignore = [
   # unmaintained only, no known vuln, no fixed release. Pulled in by serde_yaml 0.9; the engine
   # is being retired (E5), so swapping the YAML crate is not worth it. Owner call 2026-10-16.
   { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained via serde_yaml; engine retiring (E5)" },
+  # chrono 0.4.45: unmaintained only (all versions), no known vuln. Used for RFC3339 parse and
+  # Local/Utc now (34 lines in src/); the engine is retiring (E5). Revisit if a vulnerability advisory
+  # lands on chrono or the engine outlives E5.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no vuln; engine retiring (E5)" },
 ]
 
 [bans]
