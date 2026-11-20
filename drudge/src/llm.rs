@@ -23,6 +23,18 @@ pub struct Llm {
     client: reqwest::Client,
 }
 
+/// Hand-written: `api_key` is a secret, printed as `***`.
+impl std::fmt::Debug for Llm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Llm")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("embed_model", &self.embed_model)
+            .field("chat_model", &self.chat_model)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Llm {
     /// Build from config + env. `boring.json`'s `llm` block is the declarative SSOT for the connection
     /// (base_url/model) and the embed model (policy SSOT, kernel A's sole model). Runtime env
@@ -162,5 +174,23 @@ impl Llm {
             .next()
             .map(|c| c.message.content.unwrap_or_default())
             .context("chat response has no choices[0]")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_hides_the_api_key() {
+        let llm = Llm {
+            base_url: "http://localhost:11434/v1".to_owned(),
+            api_key: Some("sk-live-secret-value".to_owned()),
+            embed_model: "bge-m3".to_owned(),
+            chat_model: "chat".to_owned(),
+            client: reqwest::Client::new(),
+        };
+        let shown = format!("{llm:?}");
+        assert!(!shown.contains("sk-live-secret-value"), "{shown}");
     }
 }

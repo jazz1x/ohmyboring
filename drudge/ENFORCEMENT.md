@@ -29,7 +29,7 @@
 | pedantic idioms (semicolon · needless, etc.) | **clippy pedantic (deny)** | `drudge/Cargo.toml:51-52` | nursery excluded (time bomb) |
 | formatting | **`cargo fmt --check`** (pre-commit) | `.pre-commit-config.yaml` (`cargo-fmt`) · `scripts/guard.sh` | — |
 | behavioral non-regression (recall/answer quality) | **eval-gate.sh** (`data/eval/run_eval.py`) — **CI-enforced** (`eval-gate` job, offline recorded-embedding replay) + local `make eval` on a live stack | `data/eval/run_eval.py` · `scripts/eval-gate.sh` · `.github/workflows/ci.yml` | Recall@3 target = 1.00 on `data/eval/golden.json` |
-| release acceptance drift (MCP contract ↔ docs ↔ removed danger surface) | **quality-gate** (`make quality`) — stack-free, CI-enforced | `drudge/src/serve/mcp.rs` tests · `Makefile` · `.github/workflows/ci.yml` | Fails if tool inventory/vector-mode docs drift or the removed `renumber` surface returns |
+| release acceptance drift (MCP contract ↔ docs ↔ removed danger surface) | **`quality_gate` tests** (`make quality`) — stack-free, CI-enforced inside `rust-gate` (guard.sh `cargo test`) | `drudge/src/serve/mcp.rs` tests · `Makefile` · `.github/workflows/ci.yml` | Fails if tool inventory/vector-mode docs drift or the removed `renumber` surface returns |
 | `--no-verify` bypass | **forbidden (policy)** | `.pre-commit-config.yaml` | on failure, fix the root cause |
 
 ### Cross-reference to design decisions
@@ -50,7 +50,7 @@
 
 ## Gates
 - **pre-commit** = `.pre-commit-config.yaml` (install: `pre-commit install`): `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → changed test files only. **`make guard` / CI `rust-gate`** = `scripts/guard.sh` (stack-free): `cargo fmt --check` → `cargo clippy --quiet --all-targets -D warnings` → `cargo test` → py-compile → Python/shell unit suites.
-- **release acceptance / CI** = `make quality`: MCP tool inventory, vector-mode support docs, and removed dangerous CLI surfaces stay synchronized.
+- **release acceptance** = `make quality` (CI runs the same tests inside `rust-gate`): MCP tool inventory, vector-mode support docs, and removed dangerous CLI surfaces stay synchronized.
 - **pre-deploy / CI** = `scripts/eval-gate.sh`: confirm drudge is up → copy `data/eval/fixtures/` into the vault → `/sync` → `run_eval.py` recall floor. The harness is committed (`data/eval/run_eval.py` + `golden.json` + 18 fixture files). CI runs it without a GPU via `data/eval/stub_embedder.py` (replays real bge-m3 vectors recorded by `record_embeddings.py` into `recorded_embeddings.json`) — so CI recall == real recall. Recall@3 < 1.00 → non-zero → merge/deploy halted. Locally, `make eval` runs the same gate against a live LLM.
 
 ## Gates assert their own preconditions

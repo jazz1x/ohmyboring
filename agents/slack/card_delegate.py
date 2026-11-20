@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 
 import card_press  # noqa: E402
+import note_ref  # noqa: E402
 import vault_note  # noqa: E402
 from card_types import (  # noqa: E402
     COMMENT_WINDOW_HOURS,
@@ -242,7 +243,9 @@ def proposal_evidence(sessions: list[str], note_path: str, kind: str) -> str | N
         if not isinstance(attrs, dict):
             continue
         observed_at = entry.get("observed_at")
-        if attrs.get("note") != note_path or attrs.get("kind") != kind:
+        row_note = attrs.get("note")
+        row_note = note_ref.note_fields(row_note)["note"] if isinstance(row_note, str) else row_note
+        if row_note != note_ref.note_fields(note_path)["note"] or attrs.get("kind") != kind:
             continue
         if attrs.get("session_id") not in wanted or not isinstance(observed_at, str):
             continue

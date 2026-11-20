@@ -61,10 +61,17 @@ def main():
         texts.append(q["query"])
     for n in golden.get("negatives", []):
         texts.append(n["query"])
+    pairs = json.loads((HERE / "graph_pairs.json").read_text(encoding="utf-8"))
+    for p in pairs["pairs"]:
+        texts.append(p["query"])
 
-    recorded = {}
-    dim = None
+    # Keep vectors already recorded: re-embedding them could move a ranking the gate depends on.
+    prior = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
+    recorded = dict(prior.get("vectors", {}))
+    dim = prior.get("dim")
     for t in texts:
+        if key(t) in recorded:
+            continue
         vec = embed(t)
         dim = dim or len(vec)
         recorded[key(t)] = vec

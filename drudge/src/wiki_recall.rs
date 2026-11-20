@@ -22,6 +22,8 @@ pub struct WikiHit {
     pub source_path: String,
     pub snippet: String,
     pub score: f32,
+    /// Title equals the query after case-fold and whitespace collapse (Python `wiki.py` `exact_title`).
+    pub exact_title: bool,
 }
 
 /// Split the query into search terms — whitespace split + 2+ chars + lowercase. Pure.
@@ -146,6 +148,7 @@ fn extract_project(content: &str) -> String {
 }
 
 /// One parsed wiki note, cached in lowercased form for scoring. `mtime` keys incremental refresh.
+#[derive(Debug)]
 struct CachedDoc {
     id: String,
     title: String, // raw (for display); lowercased forms below are what scoring reads
@@ -161,7 +164,7 @@ struct CachedDoc {
 /// index is **honest, not stale**: `refresh()` re-stats the dir each call and re-reads only files whose
 /// mtime changed (catching out-of-band edits, e.g. Obsidian), and drops vanished files. Reading bodies
 /// — the expensive part — happens only on first sight or change. (Layer 1 honesty kept; Layer 3 cost cut.)
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct WikiIndex {
     docs: HashMap<PathBuf, CachedDoc>,
 }
@@ -225,6 +228,20 @@ impl WikiIndex {
         project: Option<&str>,
         since_hours: Option<i32>,
     ) -> Vec<WikiHit> {
+        let mut hits = self.search_ranked(query, project, since_hours);
+        hits.truncate(k);
+        hits
+    }
+
+    /// Every matching note in Python `wiki.py` `search()` order — callers cut, this does not.
+    #[must_use]
+    pub fn search_ranked(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        since_hours: Option<i32>,
+    ) -> Vec<WikiHit> {
+        let asked = normalized(query);
         let terms = query_terms(query);
         if terms.is_empty() {
             return Vec::new();
@@ -253,17 +270,172 @@ impl WikiIndex {
                     source_path: d.source_path.clone(),
                     snippet,
                     score,
+                    exact_title: normalized(&d.title) == asked,
                 })
             })
             .collect();
+        // Python key: exact titles first; then score desc; then newer `wiki-N` first; then path.
         hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.exact_title
+                .cmp(&a.exact_title)
+                .then_with(|| {
+                    if a.exact_title {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        b.score.total_cmp(&a.score)
+                    }
+                })
+                .then_with(|| creation_order(&b.id).cmp(&creation_order(&a.id)))
+                .then_with(|| a.source_path.cmp(&b.source_path))
         });
-        hits.truncate(k);
         hits
     }
+}
+
+/// Move each note by its verdict net: one net step = one lexical point (the smallest unit of
+/// `score_lower`), so a note sorts by `score + net`, ties keeping order. Runs on the whole uncut ranked list,
+/// so the pool cut that follows already sees the verdicts and a note just outside `k` can enter.
+/// Exact-title notes stay pinned in front. The score slots of the unpinned notes keep their
+/// order and values and are handed to the notes in their new order, so the list stays
+/// score-descending and the score-tie pool and `order_wiki_hits` read it unchanged. Pure.
+#[must_use]
+pub fn lift_by_nets(ranked: Vec<WikiHit>, nets: &HashMap<String, i64>) -> Vec<WikiHit> {
+    let pinned = ranked.iter().take_while(|h| h.exact_title).count();
+    let mut rest = ranked;
+    let tail = rest.split_off(pinned);
+    let slots: Vec<f32> = tail.iter().map(|h| h.score).collect();
+    let lifted = |h: &WikiHit| {
+        let net = nets.get(&h.source_path).copied().unwrap_or(0);
+        f64::from(h.score) + f64::from(i32::try_from(net).unwrap_or(i32::MAX))
+    };
+    let mut moved: Vec<(usize, WikiHit)> = tail.into_iter().enumerate().collect();
+    moved.sort_by(|(i, a), (j, b)| lifted(b).total_cmp(&lifted(a)).then(i.cmp(j)));
+    rest.extend(moved.into_iter().zip(slots).map(|((_, mut h), score)| {
+        h.score = score;
+        h
+    }));
+    rest
+}
+
+/// `wiki-N` -> N (engine and Python both number notes max+1); unnumbered names are -1 (last).
+fn creation_order(id: &str) -> i64 {
+    id.strip_prefix("wiki-")
+        .unwrap_or(id)
+        .parse::<u32>()
+        .map_or(-1, i64::from)
+}
+
+/// Python `answer._wiki_selected`: from the full ranked list take `size = min(k, len)`, the pool is
+/// every exact-title note plus every note scoring at least the size-th hit (ties at the cut stay),
+/// and the first `size` pool members go on to ordering with exact-title notes carrying
+/// `max(pool score) + 1`. Pure.
+#[must_use]
+pub fn select_for_order(hits: &[WikiHit], k: usize) -> Vec<WikiHit> {
+    let pool = pool(hits, k);
+    let lifted = pool.iter().map(|h| h.score).fold(f32::MIN, f32::max) + 1.0;
+    pool.into_iter()
+        .take(k.min(hits.len()))
+        .map(|h| {
+            let mut h = h.clone();
+            if h.exact_title {
+                h.score = lifted;
+            }
+            h
+        })
+        .collect()
+}
+
+/// Python `_Selected.titles`: (path -> title) of the whole pool `select_for_order` cuts from.
+#[must_use]
+pub fn pool_titles(hits: &[WikiHit], k: usize) -> HashMap<String, String> {
+    pool(hits, k)
+        .into_iter()
+        .map(|h| (h.source_path.clone(), h.title.clone()))
+        .collect()
+}
+
+/// Python `pool_hits`: every exact-title note plus every note scoring at least the
+/// `min(k, len)`-th hit (ties at the cut stay).
+fn pool(hits: &[WikiHit], k: usize) -> Vec<&WikiHit> {
+    let Some(threshold) = k.min(hits.len()).checked_sub(1).map(|i| hits[i].score) else {
+        return Vec::new();
+    };
+    hits.iter()
+        .filter(|h| h.exact_title || h.score >= threshold)
+        .collect()
+}
+
+/// Python `answer._fused`: wiki and vector lines merged by RRF (k=60). Leading exact-title wiki
+/// lines stay pinned; the rest sort by summed RRF, ties by wiki rank then vector rank; a note in
+/// both lists shows its wiki body, a repeated vector path counts at its first rank. Membership is
+/// decided by RRF first; then `sunk` (superseded) notes move behind the rest inside the cut, never
+/// out of it, and pinned lines stay put. Pure.
+pub fn fuse(
+    wiki: &[WikiHit],
+    vector: &[(String, String)],
+    k: usize,
+    sunk: &HashSet<String>,
+) -> Result<Vec<(String, String)>> {
+    let pinned: Vec<&WikiHit> = wiki.iter().take_while(|h| h.exact_title).collect();
+    let pinned_paths: HashSet<&str> = pinned.iter().map(|h| h.source_path.as_str()).collect();
+    let mut wiki_at: HashMap<&str, usize> = HashMap::new();
+    let mut body: HashMap<&str, &str> = HashMap::new();
+    for (i, h) in wiki.iter().enumerate() {
+        wiki_at.insert(h.source_path.as_str(), i);
+    }
+    let mut vector_at: HashMap<&str, usize> = HashMap::new();
+    for (i, (path, text)) in vector.iter().enumerate() {
+        vector_at.entry(path.as_str()).or_insert(i);
+        body.entry(path.as_str()).or_insert(text.as_str());
+    }
+    for h in wiki {
+        body.insert(h.source_path.as_str(), h.snippet.as_str());
+    }
+    let absent = wiki.len() + vector.len();
+    let mut scored: Vec<(&str, f64, usize, usize)> = body
+        .keys()
+        .filter(|path| !pinned_paths.contains(**path))
+        .map(|path| {
+            let mut sum = 0.0;
+            for rank in [wiki_at.get(path), vector_at.get(path)]
+                .into_iter()
+                .flatten()
+            {
+                sum += crate::retrieve::rrf_term(rank + 1)?;
+            }
+            Ok((
+                *path,
+                -sum,
+                wiki_at.get(path).copied().unwrap_or(absent),
+                vector_at.get(path).copied().unwrap_or(absent),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    scored.sort_by(|a, b| {
+        a.1.total_cmp(&b.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+    let room = k.saturating_sub(pinned.len());
+    let mut admitted: Vec<&str> = scored.iter().take(room).map(|(path, ..)| *path).collect();
+    admitted.sort_by_key(|path| sunk.contains(*path));
+    Ok(pinned
+        .iter()
+        .map(|h| (h.source_path.clone(), h.snippet.clone()))
+        .chain(
+            admitted
+                .iter()
+                .map(|path| ((*path).to_owned(), body[path].to_owned())),
+        )
+        .take(k)
+        .collect())
+}
+
+fn normalized(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One-shot recall (CLI / non-cached callers): build a fresh index, refresh, search. The resident
@@ -289,7 +461,226 @@ mod tests {
         clippy::panic,
         clippy::float_cmp
     )]
-    use super::{WikiIndex, count_occurrences, extract_title_body, query_terms, score_doc};
+    use std::collections::HashSet;
+
+    use super::{
+        WikiIndex, count_occurrences, extract_title_body, query_terms, score_doc, select_for_order,
+    };
+
+    fn note(dir: &std::path::Path, id: &str, title: &str, repeat: usize) {
+        let body = "zebra ".repeat(repeat);
+        std::fs::write(
+            dir.join(format!("{id}.md")),
+            format!("---\ntitle: {title}\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn picked(dir: &std::path::Path, k: usize) -> Vec<(String, f32)> {
+        let mut idx = WikiIndex::default();
+        idx.refresh(dir).unwrap();
+        select_for_order(&idx.search_ranked("zebra", None, None), k)
+            .into_iter()
+            .map(|h| (h.id, h.score))
+            .collect()
+    }
+
+    // Expected values: Python wiki.search + answer._wiki_selected on the same notes.
+    #[test]
+    fn recall_picks_like_python_ties_creation_order_and_exact_lift() {
+        let dir = tempfile::tempdir().unwrap();
+        note(dir.path(), "wiki-0001", "zebra", 0);
+        note(dir.path(), "wiki-0006", "Zebra", 0);
+        note(dir.path(), "wiki-0004", "t4", 9);
+        for id in ["wiki-0005", "wiki-0003", "wiki-0002", "zz-b", "zz-a"] {
+            note(dir.path(), id, "tt", 5);
+        }
+        let want: Vec<(String, f32)> = [
+            ("wiki-0006", 11.0),
+            ("wiki-0001", 11.0),
+            ("wiki-0004", 10.0),
+            ("wiki-0005", 6.0),
+        ]
+        .map(|(i, s)| (i.to_owned(), s))
+        .to_vec();
+        assert_eq!(picked(dir.path(), 4), want);
+        assert_eq!(picked(dir.path(), 1), vec![("wiki-0006".to_owned(), 11.0)]);
+    }
+
+    fn wiki_hit(path: &str, exact: bool) -> super::WikiHit {
+        super::WikiHit {
+            id: path.to_owned(),
+            title: path.to_owned(),
+            source_path: path.to_owned(),
+            snippet: format!("W:{path}"),
+            score: 1.0,
+            exact_title: exact,
+        }
+    }
+
+    #[test]
+    fn one_net_step_is_one_lexical_point() {
+        let scored = |p: &str, score: f32| super::WikiHit {
+            score,
+            ..wiki_hit(p, false)
+        };
+        let ranked = || vec![scored("a", 6.0), scored("b", 5.0), scored("c", 4.0)];
+        let order = |nets: &[(&str, i64)]| {
+            let nets = nets.iter().map(|(p, n)| ((*p).to_owned(), *n)).collect();
+            super::lift_by_nets(ranked(), &nets)
+                .into_iter()
+                .map(|h| (h.source_path, h.score))
+                .collect::<Vec<_>>()
+        };
+        let want = |v: &[(&str, f32)]| -> Vec<(String, f32)> {
+            v.iter().map(|(p, s)| ((*p).to_owned(), *s)).collect()
+        };
+        // c 4+1 = 5 only ties b (b stays first); a rank step would have put c above b.
+        assert_eq!(
+            order(&[("c", 1)]),
+            want(&[("a", 6.0), ("b", 5.0), ("c", 4.0)])
+        );
+        // c 4+2 = 6 ties a (a stays first) and passes b; the score slots stay descending.
+        assert_eq!(
+            order(&[("c", 2)]),
+            want(&[("a", 6.0), ("c", 5.0), ("b", 4.0)])
+        );
+    }
+
+    // Python answer._wiki_selected: titles ride the whole pool (ties at the cut + exact titles),
+    // not just the first `size` that go on to ordering.
+    #[test]
+    fn pool_titles_cover_the_pool_beyond_size() {
+        let hit = |p: &str, score: f32, exact: bool| super::WikiHit {
+            score,
+            exact_title: exact,
+            ..wiki_hit(p, exact)
+        };
+        let ranked = vec![
+            hit("e.md", 0.0, true),
+            hit("w1.md", 5.0, false),
+            hit("w2.md", 3.0, false),
+            hit("w3.md", 3.0, false),
+            hit("w4.md", 1.0, false),
+        ];
+        let titles = super::pool_titles(&ranked, 2);
+        let mut got: Vec<&str> = titles.keys().map(String::as_str).collect();
+        got.sort_unstable();
+        // size 2 -> threshold = 2nd hit (w1, 5.0): pool = exact e + w1 only; w3 ties w2 at 3.0 < 5.0.
+        assert_eq!(got, vec!["e.md", "w1.md"]);
+        let titles = super::pool_titles(&ranked[1..], 2);
+        let mut got: Vec<&str> = titles.keys().map(String::as_str).collect();
+        got.sort_unstable();
+        // threshold = 2nd hit (w2, 3.0): w3 is in the pool but outside select_for_order's take(2).
+        assert_eq!(got, vec!["w1.md", "w2.md", "w3.md"]);
+        assert_eq!(select_for_order(&ranked[1..], 2).len(), 2);
+    }
+
+    fn vector_lines(paths: &[&str]) -> Vec<(String, String)> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ((*p).to_owned(), format!("V:{p}{i}")))
+            .collect()
+    }
+
+    fn fused(wiki: &[(&str, bool)], vector: &[&str], k: usize) -> Vec<(String, String)> {
+        let wiki: Vec<_> = wiki.iter().map(|(p, e)| wiki_hit(p, *e)).collect();
+        super::fuse(&wiki, &vector_lines(vector), k, &HashSet::new()).unwrap()
+    }
+
+    fn fused_sunk(
+        wiki: &[(&str, bool)],
+        vector: &[&str],
+        k: usize,
+        sunk: &[&str],
+    ) -> Vec<(String, String)> {
+        let wiki: Vec<_> = wiki.iter().map(|(p, e)| wiki_hit(p, *e)).collect();
+        let sunk: HashSet<String> = sunk.iter().map(|p| (*p).to_owned()).collect();
+        super::fuse(&wiki, &vector_lines(vector), k, &sunk).unwrap()
+    }
+
+    // Expected values: Python answer._fused with rank_facts marking `sunk` superseded.
+    #[test]
+    fn fuse_sinks_superseded_inside_the_cut_without_cutting_more() {
+        let w = [("a", false), ("b", false), ("c", false)];
+        let lines = fused_sunk(&w, &["v1", "v2"], 4, &["a"]);
+        assert_eq!(
+            shown(&lines),
+            [("v1", "V:v10"), ("b", "W:b"), ("v2", "V:v21"), ("a", "W:a")]
+        );
+        let lines = fused_sunk(&w, &["v1", "v2"], 3, &["v2"]);
+        assert_eq!(shown(&lines), [("a", "W:a"), ("v1", "V:v10"), ("b", "W:b")]);
+        let lines = fused_sunk(&w, &["v1", "v2"], 4, &["v1"]);
+        assert_eq!(
+            shown(&lines),
+            [("a", "W:a"), ("b", "W:b"), ("v2", "V:v21"), ("v1", "V:v10")]
+        );
+        let pinned = [("e", true), ("a", false), ("b", false), ("c", false)];
+        let lines = fused_sunk(&pinned, &["v1"], 3, &["a", "e"]);
+        assert_eq!(shown(&lines), [("e", "W:e"), ("v1", "V:v10"), ("a", "W:a")]);
+        let lines = fused_sunk(&w, &["v1", "v2"], 2, &["c"]);
+        assert_eq!(shown(&lines), [("a", "W:a"), ("v1", "V:v10")]);
+    }
+
+    fn shown(lines: &[(String, String)]) -> Vec<(&str, &str)> {
+        lines
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_str()))
+            .collect()
+    }
+
+    // Expected values: Python answer._fused on the same inputs (Seams.rank_facts -> {}).
+    #[test]
+    fn fuse_matches_python_rrf_pin_ties_and_duplicates() {
+        let wiki = [("e", true), ("a", false), ("b", false)];
+        let lines = fused(&wiki, &["v1", "b", "a", "v2", "v2"], 5);
+        assert_eq!(
+            shown(&lines),
+            [
+                ("e", "W:e"),
+                ("a", "W:a"),
+                ("b", "W:b"),
+                ("v1", "V:v10"),
+                ("v2", "V:v23")
+            ]
+        );
+
+        let lines = fused(&wiki, &["v1", "a", "v2"], 3);
+        assert_eq!(shown(&lines), [("e", "W:e"), ("a", "W:a"), ("v1", "V:v10")]);
+
+        let lines = fused(&[("a", false)], &["b"], 2);
+        assert_eq!(shown(&lines), [("a", "W:a"), ("b", "V:b0")]);
+
+        let lines = fused(&[("a", false)], &["b"], 1);
+        assert_eq!(shown(&lines), [("a", "W:a")]);
+
+        let lines = fused(&[("a", false)], &["v1", "v2", "v3"], 4);
+        assert_eq!(
+            shown(&lines),
+            [
+                ("a", "W:a"),
+                ("v1", "V:v10"),
+                ("v2", "V:v21"),
+                ("v3", "V:v32")
+            ]
+        );
+
+        let lines = fused(&[("x", false), ("e", true)], &["v1"], 3);
+        assert_eq!(shown(&lines), [("x", "W:x"), ("v1", "V:v10"), ("e", "W:e")]);
+
+        let lines = fused(&[("a", false), ("b", false)], &["v1"], 1);
+        assert_eq!(shown(&lines), [("a", "W:a")]);
+    }
+
+    #[test]
+    fn exact_title_beyond_k_still_lifts_the_pool_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        note(dir.path(), "wiki-0009", "zebra", 0);
+        note(dir.path(), "wiki-0001", "zebra", 16);
+        note(dir.path(), "wiki-0004", "t4", 9);
+        assert_eq!(picked(dir.path(), 1), vec![("wiki-0009".to_owned(), 21.0)]);
+    }
 
     #[test]
     fn wiki_index_refresh_is_incremental_and_honest() {

@@ -14,8 +14,10 @@ use anyhow::Result;
 
 use crate::llm::Llm;
 use crate::store::Store;
+use crate::vector::VectorIndex;
 
 /// `query()` return value — used by both the HTTP handler and the CLI.
+#[derive(Debug)]
 pub struct GraphOut {
     pub hit: String,
     pub graph_neighbors: Vec<String>,

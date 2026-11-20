@@ -7,7 +7,9 @@ Run: python3 agents/slack/test_secretary_core.py
 import json
 import os
 import sys
+import tempfile
 import urllib.request
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -290,6 +292,7 @@ def _remember_recorder():
                 "supersedes": provenance.supersedes,
                 "author": provenance.author,
                 "judge": provenance.judge,
+                "concepts": provenance.concepts,
             }
         )
         return {
@@ -317,6 +320,31 @@ def test_correct_without_a_number_supersedes_the_answers_one_note():
     assert calls[0]["body"] == "질문: 배포 언제였더라\n\n정정: 재시작은 매일 2시에 한다"
     assert calls[0]["title"] == "재시작은 매일 2시에 한다"
     assert out["source_path"] == "/vault/wiki/wiki-1077.md", "the engine's answer travels back untouched"
+
+
+def test_correct_inherits_the_target_notes_concepts():
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki = Path(tmp) / "wiki"
+        wiki.mkdir()
+        (wiki / "wiki-0435.md").write_text(
+            "---\ntitle: 배포\nconcepts:\n  - zero-downtime\n  - 한글개념\n  - rolling-restart\n---\n본문\n",
+            encoding="utf-8",
+        )
+        (wiki / "wiki-1000.md").write_text(
+            "---\ntitle: 다른\nconcepts: [other-concept]\n---\n본문\n", encoding="utf-8"
+        )
+        calls, fake = _remember_recorder()
+        sc.correct(
+            "slack:C123:1.000",
+            "",
+            ["/vault/wiki/wiki-0435.md", "/vault/wiki/wiki-1000.md"],
+            "정정 1: 재시작은 2시에 한다",
+            remember=fake,
+            vault_dir=tmp,
+        )
+    assert calls[0]["concepts"] == ["zero-downtime", "rolling-restart"], (
+        "only the corrected note's English concepts travel; Korean-only names would not make an edge"
+    )
 
 
 def test_correct_with_a_number_supersedes_only_that_note():

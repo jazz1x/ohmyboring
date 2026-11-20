@@ -18,9 +18,14 @@ use anyhow::Context;
 use super::AuditSummary;
 use crate::vault::{
     Issue, Page, RawFrontMatter, Schema, Severity, extract_wikilinks, find_cross_layer_wikilinks,
-    load_schema, normalize_link_id, parse_kind, parse_origin, parse_raw_frontmatter,
+    is_seed_note, load_schema, normalize_link_id, parse_kind, parse_origin, parse_raw_frontmatter,
     split_frontmatter,
 };
+
+/// A page id is valid when it matches the schema pattern or is the seed note. Pure.
+fn is_valid_page_id(id_re: &regex::Regex, id: &str) -> bool {
+    is_seed_note(id) || id_re.is_match(id)
+}
 
 // ─────────────────────────────────────────────────────────────
 // Lint — pure sub-functions (SRP: each check as a separate function)
@@ -67,7 +72,7 @@ fn check_id_value(
     issues: &mut Vec<Issue>,
 ) {
     if let Some(fm_id) = &raw_fm.id {
-        if !id_re.is_match(fm_id) {
+        if !is_valid_page_id(id_re, fm_id) {
             issues.push(Issue::error(
                 "id-pattern",
                 stem,
@@ -175,7 +180,7 @@ pub fn lint_page(
             return (None, issues);
         }
     };
-    if !id_re.is_match(&stem) {
+    if !is_valid_page_id(&id_re, &stem) {
         issues.push(Issue::error(
             "id-format",
             &stem,
@@ -611,14 +616,15 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        audit_pages, extract_wikilinks, find_cross_layer_wikilinks, lint_page, normalize_link_id,
+        audit_pages, extract_wikilinks, find_cross_layer_wikilinks, is_valid_page_id, lint_page,
+        normalize_link_id,
     };
     use crate::vault::{Kind, Origin, Page, PageIdSchema, Schema, Severity, SourcesSchema};
 
     fn test_schema() -> Schema {
         Schema {
             page_id: PageIdSchema {
-                pattern: r"^wiki-\d{4,5}$".to_owned(),
+                pattern: r"^wiki-\d{11}$".to_owned(),
             },
             sources: SourcesSchema {
                 allowed_prefixes: vec!["raw/".to_owned(), "meta/".to_owned(), ".rules/".to_owned()],
@@ -657,9 +663,9 @@ mod tests {
 
     #[test]
     fn wikilinks_extracted_correctly() {
-        let body = "see: [[wiki-0001]] and [[wiki-0002|second]].";
+        let body = "see: [[wiki-00000000001]] and [[wiki-00000000002|second]].";
         let links = extract_wikilinks(body);
-        assert_eq!(links, vec!["wiki-0001", "wiki-0002"]);
+        assert_eq!(links, vec!["wiki-00000000001", "wiki-00000000002"]);
     }
 
     #[test]
@@ -674,7 +680,7 @@ mod tests {
 
     #[test]
     fn cross_layer_detected() {
-        let body = "[[raw/seed.md]] and [[wiki-0001]]";
+        let body = "[[raw/seed.md]] and [[wiki-00000000001]]";
         let bad = find_cross_layer_wikilinks(body);
         assert_eq!(bad, vec!["raw/seed.md"]);
     }
@@ -684,9 +690,9 @@ mod tests {
     #[test]
     fn valid_frontmatter_no_errors() {
         let schema = test_schema();
-        let content = "---\nid: wiki-0001\ntitle: Test\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\nbody";
-        let ids = known_ids(&["wiki-0001"]);
-        let path = Path::new("/vault/wiki/wiki-0001.md");
+        let content = "---\nid: wiki-00000000001\ntitle: Test\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\nbody";
+        let ids = known_ids(&["wiki-00000000001"]);
+        let path = Path::new("/vault/wiki/wiki-00000000001.md");
         let (page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         let errors: Vec<_> = issues
             .iter()
@@ -699,10 +705,9 @@ mod tests {
     #[test]
     fn missing_required_field_is_error() {
         let schema = test_schema();
-        let content =
-            "---\nid: wiki-0001\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\nbody";
-        let ids = known_ids(&["wiki-0001"]);
-        let path = Path::new("/vault/wiki/wiki-0001.md");
+        let content = "---\nid: wiki-00000000001\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\nbody";
+        let ids = known_ids(&["wiki-00000000001"]);
+        let path = Path::new("/vault/wiki/wiki-00000000001.md");
         let (_page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         assert!(
             issues
@@ -715,9 +720,9 @@ mod tests {
     #[test]
     fn dangling_wikilink_detected() {
         let schema = test_schema();
-        let content = "---\nid: wiki-0001\ntitle: T\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n[[wiki-9999]]";
-        let ids = known_ids(&["wiki-0001"]);
-        let path = Path::new("/vault/wiki/wiki-0001.md");
+        let content = "---\nid: wiki-00000000001\ntitle: T\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n[[wiki-9999]]";
+        let ids = known_ids(&["wiki-00000000001"]);
+        let path = Path::new("/vault/wiki/wiki-00000000001.md");
         let (_page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         assert!(
             issues.iter().any(|i| i.rule == "wikilink-dangling"),
@@ -733,9 +738,9 @@ mod tests {
     #[test]
     fn valid_wikilink_no_error() {
         let schema = test_schema();
-        let content = "---\nid: wiki-0001\ntitle: T\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n[[wiki-0002]]";
-        let ids = known_ids(&["wiki-0001", "wiki-0002"]);
-        let path = Path::new("/vault/wiki/wiki-0001.md");
+        let content = "---\nid: wiki-00000000001\ntitle: T\nkind: note\norigin: personal\ndate: \"2026-01-01\"\n---\n[[wiki-00000000002]]";
+        let ids = known_ids(&["wiki-00000000001", "wiki-00000000002"]);
+        let path = Path::new("/vault/wiki/wiki-00000000001.md");
         let (_page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         assert!(
             !issues.iter().any(|i| i.rule == "wikilink-dangling"),
@@ -746,16 +751,16 @@ mod tests {
     #[test]
     fn relates_to_obsidian_alias_normalized() {
         let schema = test_schema();
-        let content = "---\nid: wiki-0001\ntitle: T\nkind: note\norigin: personal\ndate: \"2026-01-01\"\nrelates_to:\n  - \"[[wiki-0002|alias]]\"\n---\nbody";
-        let ids = known_ids(&["wiki-0001", "wiki-0002"]);
-        let path = Path::new("/vault/wiki/wiki-0001.md");
+        let content = "---\nid: wiki-00000000001\ntitle: T\nkind: note\norigin: personal\ndate: \"2026-01-01\"\nrelates_to:\n  - \"[[wiki-00000000002|alias]]\"\n---\nbody";
+        let ids = known_ids(&["wiki-00000000001", "wiki-00000000002"]);
+        let path = Path::new("/vault/wiki/wiki-00000000001.md");
         let (page, issues) = lint_page(path, content, &schema, Path::new("/vault"), &ids);
         assert!(
             !issues.iter().any(|i| i.rule == "wikilink-dangling"),
             "normalized relates_to must not be flagged: {issues:?}"
         );
         let relates = page.unwrap().relates_to;
-        assert_eq!(relates, vec!["wiki-0002"]);
+        assert_eq!(relates, vec!["wiki-00000000002"]);
     }
 
     // ── audit_pages: connected components ──
@@ -763,8 +768,16 @@ mod tests {
     #[test]
     fn two_connected_pages_single_component() {
         let pages = vec![
-            make_page("wiki-0001", vec!["wiki-0002"], "[[wiki-0002]]"),
-            make_page("wiki-0002", vec!["wiki-0001"], "[[wiki-0001]]"),
+            make_page(
+                "wiki-00000000001",
+                vec!["wiki-00000000002"],
+                "[[wiki-00000000002]]",
+            ),
+            make_page(
+                "wiki-00000000002",
+                vec!["wiki-00000000001"],
+                "[[wiki-00000000001]]",
+            ),
         ];
         let summary = audit_pages(&pages);
         assert_eq!(summary.page_count, 2);
@@ -777,8 +790,8 @@ mod tests {
     #[test]
     fn disconnected_pages_multiple_components() {
         let pages = vec![
-            make_page("wiki-0001", vec![], ""),
-            make_page("wiki-0002", vec![], ""),
+            make_page("wiki-00000000001", vec![], ""),
+            make_page("wiki-00000000002", vec![], ""),
         ];
         let summary = audit_pages(&pages);
         assert_eq!(summary.component_count, 2);
@@ -789,7 +802,7 @@ mod tests {
 
     #[test]
     fn superseded_dangling_is_error() {
-        let mut p = make_page("wiki-0001", vec![], "");
+        let mut p = make_page("wiki-00000000001", vec![], "");
         p.superseded_by = Some("wiki-9999".to_owned());
         let pages = vec![p];
         let summary = audit_pages(&pages);
@@ -803,11 +816,11 @@ mod tests {
 
     #[test]
     fn superseded_referenced_is_warn() {
-        let mut old = make_page("wiki-0001", vec![], "");
-        old.superseded_by = Some("wiki-0002".to_owned());
-        let new_page = make_page("wiki-0002", vec![], "");
-        // live wiki-0003 references the superseded wiki-0001 via relates_to
-        let live = make_page("wiki-0003", vec!["wiki-0001"], "");
+        let mut old = make_page("wiki-00000000001", vec![], "");
+        old.superseded_by = Some("wiki-00000000002".to_owned());
+        let new_page = make_page("wiki-00000000002", vec![], "");
+        // live wiki-00000000003 references the superseded wiki-00000000001 via relates_to
+        let live = make_page("wiki-00000000003", vec!["wiki-00000000001"], "");
         let pages = vec![old, new_page, live];
         let summary = audit_pages(&pages);
         assert!(
@@ -822,8 +835,44 @@ mod tests {
 
     #[test]
     fn normalize_link_id_strips_obsidian_quotes_and_alias() {
-        assert_eq!(normalize_link_id("\"[[wiki-0002|alias]]\""), "wiki-0002");
-        assert_eq!(normalize_link_id("[[wiki-0002]]"), "wiki-0002");
-        assert_eq!(normalize_link_id("wiki-0002"), "wiki-0002");
+        assert_eq!(
+            normalize_link_id("\"[[wiki-00000000002|alias]]\""),
+            "wiki-00000000002"
+        );
+        assert_eq!(
+            normalize_link_id("[[wiki-00000000002]]"),
+            "wiki-00000000002"
+        );
+        assert_eq!(normalize_link_id("wiki-00000000002"), "wiki-00000000002");
+    }
+
+    #[test]
+    fn vault_page_id_pattern_takes_only_eleven_digits_and_the_seed() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../vault/.rules/schema.yaml");
+        let schema = crate::vault::load_schema(&path).expect("vault schema.yaml loads");
+        let re = regex::Regex::new(&schema.page_id.pattern).expect("pattern compiles");
+        for ok in ["wiki-0000", "wiki-00000009999", "wiki-00000010000"] {
+            assert!(
+                is_valid_page_id(&re, ok),
+                "{ok} should match {}",
+                schema.page_id.pattern
+            );
+        }
+        for bad in [
+            "wiki-123",
+            "wiki-0001",
+            "wiki-9999",
+            "wiki-10000",
+            "wiki-100000",
+            "wiki-000000100000",
+        ] {
+            assert!(
+                !is_valid_page_id(&re, bad),
+                "{bad} should not match {}",
+                schema.page_id.pattern
+            );
+        }
+        assert_eq!(schema.page_id.pattern, test_schema().page_id.pattern);
     }
 }

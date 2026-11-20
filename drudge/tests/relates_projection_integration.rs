@@ -1,0 +1,1433 @@
+//! `vault::project_links` visits only the notes a change can reach, and writes what a full pass
+//! would write. Needs a scratch Postgres via `BORING_TEST_DATABASE_URL`:
+//!   `BORING_TEST_DATABASE_URL=postgresql://boring:boring@localhost:5432/<scratch> \`
+//!   `  cargo test -p drudge --test relates_projection_integration -- --nocapture`
+//! The tests share one database's projection state, so each holds `SERIAL` for its whole run.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::await_holding_lock,
+    clippy::format_push_string,
+    clippy::single_match_else,
+    clippy::panic,
+    clippy::too_many_lines
+)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use drudge::frontmatter::FrontMatter;
+use drudge::store::{Doc, Store};
+use drudge::vault::project_links;
+use tempfile::TempDir;
+use tokio_postgres::NoTls;
+
+const DAY: Duration = Duration::from_hours(24);
+
+/// `relates_projection`, its watermark and the dirty query span the whole database, so two
+/// tests running at once reset or consume each other's state. Each `#[tokio::test]` runs on its
+/// own thread and current-thread runtime, so a blocking std lock held across `.await` only
+/// parks the other tests' threads.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+struct Fixture {
+    store: Store,
+    vault: TempDir,
+    nonce: u64,
+    _serial: MutexGuard<'static, ()>,
+}
+
+impl Fixture {
+    /// Fresh vault + a projection state that never ran (no rows, no watermark).
+    async fn new() -> Option<Self> {
+        let dsn = std::env::var("BORING_TEST_DATABASE_URL").ok()?;
+        // A test that panicked while holding the lock left nothing to undo: the next one resets.
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = Store::open(&dsn, 1024).await.expect("open store");
+        let (client, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+        tokio::spawn(conn);
+        client
+            .batch_execute(
+                "DELETE FROM relates_projection;
+                 DELETE FROM relates_projection_bound;
+                 DELETE FROM sync_state WHERE key = 'relates_projection_watermark';",
+            )
+            .await
+            .expect("reset projection state");
+        let vault = TempDir::new().expect("tempdir");
+        std::fs::create_dir(vault.path().join("wiki")).expect("wiki dir");
+        let nonce = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap();
+        Some(Self {
+            store,
+            vault,
+            nonce,
+            _serial: serial,
+        })
+    }
+
+    fn path(&self, id: u32) -> PathBuf {
+        self.vault
+            .path()
+            .join("wiki")
+            .join(format!("wiki-{id:04}.md"))
+    }
+
+    /// Pseudo-random +-1 vector: two different seeds sit at cosine distance ~1, the same seed at 0.
+    fn embedding(&self, seed: u64) -> Vec<f32> {
+        signs(self.nonce, seed)
+    }
+
+    /// Write the note file and its document, chunk and concept edges.
+    async fn put_note(
+        &self,
+        id: u32,
+        project: &str,
+        concepts: &[&str],
+        vector_seed: u64,
+        age: Duration,
+    ) {
+        self.put_note_vec(id, project, concepts, self.embedding(vector_seed), age)
+            .await;
+    }
+
+    async fn put_note_vec(
+        &self,
+        id: u32,
+        project: &str,
+        concepts: &[&str],
+        embedding: Vec<f32>,
+        age: Duration,
+    ) {
+        let path = self.path(id);
+        let src = path.to_string_lossy().into_owned();
+        std::fs::write(
+            &path,
+            format!(
+                "---\norigin: personal\nproject: {project}\nkind: note\n---\nbody of note {id}\n"
+            ),
+        )
+        .expect("write note");
+        let front = FrontMatter {
+            origin: "personal".into(),
+            project: project.into(),
+            kind: "note".into(),
+            source_path: src.clone(),
+            ..Default::default()
+        };
+        self.store
+            .upsert_document(&front, "sha", SystemTime::now() - age)
+            .await
+            .expect("upsert document");
+        self.store
+            .upsert_chunk(&Doc {
+                id: format!("{src}#0"),
+                content: format!("body of note {id}"),
+                embedding,
+                front,
+                chunk_idx: 0,
+            })
+            .await
+            .expect("upsert chunk");
+        self.set_concepts(id, concepts).await;
+    }
+
+    async fn set_concepts(&self, id: u32, concepts: &[&str]) {
+        let src = self.path(id).to_string_lossy().into_owned();
+        self.store
+            .clear_semantic_edges(&src)
+            .await
+            .expect("clear edges");
+        for c in concepts {
+            let slug = format!("{c}-{}", self.nonce);
+            self.store.upsert_concept(&slug, c).await.expect("concept");
+            self.store
+                .relate_doc_concept(&src, &slug)
+                .await
+                .expect("edge");
+        }
+    }
+
+    /// `groups` groups of 4 old notes; the notes of a group share two concepts and a project.
+    async fn put_groups(&self, groups: u32) {
+        for g in 0..groups {
+            for k in 1..=4 {
+                let id = 100 * (g + 1) + k;
+                self.put_note(
+                    id,
+                    &format!("proj-{g}"),
+                    &[&format!("g{g}a"), &format!("g{g}b")],
+                    u64::from(id),
+                    DAY,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn project(&self, force_full: bool) -> usize {
+        project_links(&self.store, self.vault.path(), 6, force_full)
+            .await
+            .expect("project_links")
+    }
+
+    fn contents(&self) -> BTreeMap<String, String> {
+        std::fs::read_dir(self.vault.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read_to_string(&p).unwrap())
+            })
+            .collect()
+    }
+
+    fn restore(&self, snapshot: &BTreeMap<String, String>) {
+        for (name, text) in snapshot {
+            std::fs::write(self.vault.path().join("wiki").join(name), text).unwrap();
+        }
+    }
+}
+
+fn relates_to_of(text: &str) -> &str {
+    text.split("relates_to:")
+        .nth(1)
+        .unwrap_or("")
+        .split("\n---")
+        .next()
+        .unwrap_or("")
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A changed-only run must not open a file outside the dirty set: the files of two untouched
+/// groups are made unreadable, so any read of them fails the run.
+#[tokio::test]
+async fn changed_run_opens_no_file_outside_the_dirty_set() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    fx.put_groups(3).await;
+    assert!(
+        fx.project(false).await > 0,
+        "first run populates every note"
+    );
+
+    fx.put_note(900, "proj-0", &["g0a", "g0b"], 900, Duration::ZERO)
+        .await;
+    let untouched: Vec<PathBuf> = [201, 202, 203, 204, 301, 302, 303, 304]
+        .iter()
+        .map(|id| fx.path(*id))
+        .collect();
+    for p in &untouched {
+        set_mode(p, 0o000);
+    }
+    let updated = project_links(&fx.store, fx.vault.path(), 6, false).await;
+    for p in &untouched {
+        set_mode(p, 0o644);
+    }
+    let updated = updated.expect("changed-only run must not open untouched groups");
+    assert!(updated >= 1, "the new note's neighbours get its link");
+    assert!(relates_to_of(&std::fs::read_to_string(fx.path(101)).unwrap()).contains("wiki-0900"));
+}
+
+/// A NEW note pointing at an UNTOUCHED old note: the old note's `relates_to` after the
+/// changed-only run is exactly what a forced full pass writes.
+#[tokio::test]
+async fn new_note_reaches_untouched_note_like_a_full_pass() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    fx.put_groups(3).await;
+    fx.project(false).await;
+
+    // Old file mtime (restored / `rsync -a` copy): only `ingested_at` says the note is new.
+    fx.put_note(900, "proj-1", &["g1a", "g1b"], 900, DAY).await;
+    fx.project(false).await;
+    let after_changed = fx.contents();
+    let old_note = relates_to_of(&after_changed["wiki-0201.md"]).to_owned();
+    assert!(
+        old_note.contains("wiki-0900"),
+        "untouched note 201 now links the new note"
+    );
+
+    let rewritten_by_full = fx.project(true).await;
+    assert_eq!(
+        rewritten_by_full, 0,
+        "a full pass finds nothing left to rewrite"
+    );
+    assert_eq!(fx.contents(), after_changed);
+}
+
+/// Same input change, two strategies: the files rewritten and their contents match.
+#[tokio::test]
+async fn changed_only_and_full_rewrite_the_same_files() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    fx.put_groups(10).await;
+    fx.project(false).await;
+
+    // new note on an untouched group, new note near an untouched note only by meaning,
+    // an edited note that moves group, a deleted note
+    fx.put_note(900, "proj-2", &["g2a", "g2b"], 900, Duration::ZERO)
+        .await;
+    fx.put_note(901, "proj-solo", &["unrelated"], 501, Duration::ZERO)
+        .await;
+    fx.set_concepts(401, &["g5a", "g5b"]).await;
+    fx.store
+        .upsert_document(
+            &FrontMatter {
+                origin: "personal".into(),
+                project: "proj-3".into(),
+                kind: "note".into(),
+                source_path: fx.path(401).to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            "sha2",
+            SystemTime::now(),
+        )
+        .await
+        .unwrap();
+    let deleted = fx.path(701);
+    fx.store
+        .delete_document(&deleted.to_string_lossy())
+        .await
+        .unwrap();
+    std::fs::remove_file(&deleted).unwrap();
+    let before = fx.contents();
+
+    let changed_count = fx.project(false).await;
+    let by_changed = fx.contents();
+    fx.restore(&before);
+    let full_count = fx.project(true).await;
+    let by_full = fx.contents();
+
+    let rewritten = |after: &BTreeMap<String, String>| -> Vec<String> {
+        after
+            .iter()
+            .filter(|(k, v)| before.get(*k) != Some(*v))
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    let (set_changed, set_full) = (rewritten(&by_changed), rewritten(&by_full));
+    eprintln!(
+        "copy-vault: notes={} changed-only rewrote {} (returned {changed_count}), full rewrote {} (returned {full_count}); set diff = {:?}",
+        before.len(),
+        set_changed.len(),
+        set_full.len(),
+        set_changed
+            .iter()
+            .filter(|f| !set_full.contains(f))
+            .chain(set_full.iter().filter(|f| !set_changed.contains(f)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(set_changed, set_full);
+    assert_eq!(by_changed, by_full);
+    assert!(
+        by_changed["wiki-0501.md"].contains("wiki-0901"),
+        "meaning-only neighbour reached"
+    );
+}
+
+struct ZeroEmbed;
+
+impl drudge::ingest::Embed for ZeroEmbed {
+    fn embed(
+        &self,
+        _text: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<f32>>> + Send {
+        std::future::ready(Ok(vec![0.0_f32; 1024]))
+    }
+}
+
+/// Paths under `vault` whose `document.ingested_at` is later than `since`, i.e. the rows the
+/// projection's dirty query would take as changed.
+async fn ingested_after(
+    client: &tokio_postgres::Client,
+    vault: &Path,
+    since: SystemTime,
+) -> Vec<String> {
+    let like = format!("{}/%", vault.to_string_lossy());
+    let mut paths: Vec<String> = client
+        .query(
+            "SELECT source_path FROM document WHERE source_path LIKE $1 AND ingested_at > $2;",
+            &[&like, &since],
+        )
+        .await
+        .expect("query ingested_at")
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// A periodic sync of an untouched vault must not mark any document as re-ingested; one edited
+/// note marks exactly itself. Otherwise every run's dirty set is the whole corpus.
+#[tokio::test]
+async fn sync_without_changes_leaves_ingested_at_alone() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").unwrap();
+    let (client, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    let note = |id: u32, body: &str| {
+        let text = format!(
+            "---\norigin: personal\nproject: p{nonce}\nkind: note\nclaims:\n  - subject: s{nonce}x{id}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n---\n\n{body}\n",
+            nonce = fx.nonce
+        );
+        std::fs::write(fx.path(id), text).expect("write note");
+    };
+    for id in 1..=3 {
+        note(id, &format!("body {id}"));
+    }
+    let dirs = vec![fx.vault.path().to_string_lossy().into_owned()];
+    let cfg = drudge::config::BoringConfig::default();
+    let sync = || {
+        drudge::ingest::run_with::<
+            drudge::ingest::DefaultChunker,
+            drudge::ingest::FrontmatterGraphExtractor,
+            _,
+        >(&fx.store, &ZeroEmbed, &cfg, &dirs)
+    };
+    sync().await.expect("first sync");
+
+    let mark: SystemTime = client
+        .query_one("SELECT clock_timestamp();", &[])
+        .await
+        .expect("clock")
+        .get(0);
+    sync().await.expect("second sync");
+    let untouched = ingested_after(&client, fx.vault.path(), mark).await;
+    assert_eq!(
+        untouched,
+        Vec::<String>::new(),
+        "no-change sync re-ingested documents"
+    );
+
+    note(2, "body 2 edited");
+    let mark: SystemTime = client
+        .query_one("SELECT clock_timestamp();", &[])
+        .await
+        .expect("clock")
+        .get(0);
+    sync().await.expect("third sync");
+    let edited = ingested_after(&client, fx.vault.path(), mark).await;
+    assert_eq!(edited, vec![fx.path(2).to_string_lossy().into_owned()]);
+}
+
+/// A changed note that lands BEHIND a note's k-th neighbour (4 semantic, 6 graph) cannot change
+/// that note's links, so it must not make the note dirty; one that lands in a note with fewer
+/// than k neighbours must. Either way the changed-only run equals a full pass.
+#[tokio::test]
+async fn changed_note_behind_the_kth_neighbour_does_not_dirty_the_note() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    // Semantic: five notes on one vector (4 neighbours each, all at distance 0).
+    for id in 101..=105 {
+        fx.put_note(id, "proj-sem", &[], 7, DAY).await;
+    }
+    // Graph: seven notes sharing three concepts (6 neighbours each, 3 shared).
+    for id in 121..=127 {
+        fx.put_note(id, "proj-graph", &["k1", "k2", "k3"], u64::from(id), DAY)
+            .await;
+    }
+    // Semantic with fewer than 4 neighbours: a pair on one vector.
+    for id in 111..=112 {
+        fx.put_note(id, "proj-pair", &[], 9, DAY).await;
+    }
+    fx.project(false).await;
+
+    let nearby = |seed: u64| {
+        let mut v = fx.embedding(seed);
+        for x in v.iter_mut().take(100) {
+            *x = -*x; // 100 of 1024 signs flipped: cosine distance ~0.195 < 0.40
+        }
+        v
+    };
+    fx.put_note_vec(900, "proj-x1", &[], nearby(7), Duration::ZERO)
+        .await;
+    fx.put_note_vec(901, "proj-x2", &[], nearby(9), Duration::ZERO)
+        .await;
+    fx.put_note(902, "proj-x3", &["k1", "k2"], 902, Duration::ZERO)
+        .await;
+
+    let scope = fx.store.projection_scope(false).await.expect("scope");
+    let dirty = match scope {
+        drudge::store::ProjectionScope::Changed(dirty) => Ok(dirty),
+        full @ drudge::store::ProjectionScope::Full(_) => Err(full),
+    }
+    .expect("a populated projection with a watermark scopes to a changed set");
+    let dirty_ids: Vec<u32> = dirty
+        .iter()
+        .filter(|p| p.starts_with(fx.vault.path().to_string_lossy().as_ref()))
+        .filter_map(|p| p.rsplit("wiki-").next()?.strip_suffix(".md")?.parse().ok())
+        .collect();
+    eprintln!("dirty ids: {dirty_ids:?}");
+    for behind in (101..=105).chain(121..=127) {
+        assert!(
+            !dirty_ids.contains(&behind),
+            "note {behind} has k closer neighbours than the changed note"
+        );
+    }
+    for short in [111, 112] {
+        assert!(
+            dirty_ids.contains(&short),
+            "note {short} has fewer than k neighbours, the changed note can join them"
+        );
+    }
+
+    let before = fx.contents();
+    fx.project(false).await;
+    let by_changed = fx.contents();
+    fx.restore(&before);
+    fx.project(true).await;
+    assert_eq!(by_changed, fx.contents(), "changed-only run == full pass");
+    assert!(
+        relates_to_of(&by_changed["wiki-0111.md"]).contains("wiki-0901"),
+        "the short note took the new neighbour"
+    );
+}
+
+impl Fixture {
+    /// A document that is not a wiki note (`project_note` never links it): same rows as
+    /// `put_note_vec`, at `rel` under the vault (any name, any directory).
+    async fn put_other(&self, rel: &str, concepts: &[&str], embedding: Vec<f32>) -> String {
+        let file = self.vault.path().join(rel);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        let src = file.to_string_lossy().into_owned();
+        let front = FrontMatter {
+            origin: "personal".into(),
+            project: "proj-other".into(),
+            kind: "note".into(),
+            source_path: src.clone(),
+            ..Default::default()
+        };
+        self.store
+            .upsert_document(&front, "sha", SystemTime::now() - DAY)
+            .await
+            .expect("upsert document");
+        self.store
+            .upsert_chunk(&Doc {
+                id: format!("{src}#0"),
+                content: format!("other {rel}"),
+                embedding,
+                front,
+                chunk_idx: 0,
+            })
+            .await
+            .expect("upsert chunk");
+        self.store
+            .clear_semantic_edges(&src)
+            .await
+            .expect("clear edges");
+        for c in concepts {
+            let slug = format!("{c}-{}", self.nonce);
+            self.store.upsert_concept(&slug, c).await.expect("concept");
+            self.store
+                .relate_doc_concept(&src, &slug)
+                .await
+                .expect("edge");
+        }
+        src
+    }
+
+    /// Delete `victim`, then check that the changed-only run (which sees `wiki-0900` as the one
+    /// new note) writes what a full pass writes, and that note `b` is among the notes it visits.
+    async fn assert_incremental_equals_full_and_visits(&self, b: u32) {
+        let before = self.contents();
+        let scope = self.store.projection_scope(false).await.expect("scope");
+        let dirty = match scope {
+            drudge::store::ProjectionScope::Changed(dirty) => Ok(dirty),
+            full @ drudge::store::ProjectionScope::Full(_) => Err(full),
+        }
+        .expect("a changed set");
+        assert!(
+            dirty.contains(&self.path(b).to_string_lossy().into_owned()),
+            "note {b} must be dirty: a new note belongs in its top-k"
+        );
+        self.project(false).await;
+        let by_changed = self.contents();
+        self.restore(&before);
+        self.project(true).await;
+        assert_eq!(by_changed, self.contents(), "changed-only run == full pass");
+        assert!(relates_to_of(&by_changed[&format!("wiki-{b:04}.md")]).contains("wiki-0900"));
+    }
+}
+
+/// Semantic: B's raw top-4 holds a non-wiki document. It was never one of B's links, so deleting
+/// it frees a slot that a note beyond the old 4th distance now fills.
+#[tokio::test]
+async fn deleted_non_wiki_semantic_neighbour_frees_a_slot() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    for id in 101..=104 {
+        fx.put_note(id, "proj-sem", &[], 7, DAY).await;
+    }
+    let other = fx.put_other("notes-sem.md", &[], fx.embedding(7)).await;
+    fx.project(false).await;
+
+    fx.store.delete_document(&other).await.expect("delete");
+    let mut near = fx.embedding(7);
+    for x in near.iter_mut().take(100) {
+        *x = -*x;
+    }
+    fx.put_note_vec(900, "proj-x", &[], near, Duration::ZERO)
+        .await;
+    fx.assert_incremental_equals_full_and_visits(101).await;
+}
+
+/// Graph: B's raw top-6 holds a non-wiki document with a higher shared count.
+#[tokio::test]
+async fn deleted_non_wiki_graph_neighbour_frees_a_slot() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    fx.put_note(121, "proj-graph", &["k1", "k2", "k3", "k4"], 121, DAY)
+        .await;
+    for id in 122..=126 {
+        fx.put_note(id, "proj-graph", &["k1", "k2", "k3"], u64::from(id), DAY)
+            .await;
+    }
+    let other = fx
+        .put_other(
+            "notes-graph.md",
+            &["k1", "k2", "k3", "k4"],
+            fx.embedding(555),
+        )
+        .await;
+    fx.project(false).await;
+
+    fx.store.delete_document(&other).await.expect("delete");
+    fx.put_note(900, "proj-x", &["k1", "k2", "k3"], 900, Duration::ZERO)
+        .await;
+    fx.assert_incremental_equals_full_and_visits(121).await;
+}
+
+/// Semantic: B's raw top-4 holds a copy of a neighbour under another directory. `push_new`
+/// keeps the first of two paths with one stem, so the other is in the top-4 but not in B's links;
+/// moving it away must not leave a bound that hides a note which now belongs in the top-4.
+#[tokio::test]
+async fn moved_duplicate_stem_neighbour_frees_a_slot() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let flipped = |flips: usize| {
+        let mut v = fx.embedding(7);
+        for x in v.iter_mut().take(flips) {
+            *x = -*x;
+        }
+        v
+    };
+    fx.put_note_vec(101, "proj-sem", &[], flipped(0), DAY).await;
+    fx.put_other("copy/wiki-0102.md", &[], flipped(0)).await;
+    fx.put_note_vec(102, "proj-sem", &[], flipped(10), DAY)
+        .await;
+    fx.put_note_vec(103, "proj-sem", &[], flipped(20), DAY)
+        .await;
+    fx.put_note_vec(104, "proj-sem", &[], flipped(30), DAY)
+        .await;
+    fx.project(false).await;
+
+    fx.put_note(102, "proj-sem", &[], 4242, Duration::ZERO)
+        .await;
+    fx.put_note_vec(900, "proj-x", &[], flipped(100), Duration::ZERO)
+        .await;
+    fx.assert_incremental_equals_full_and_visits(101).await;
+}
+
+type Ledger = (
+    Vec<(String, String, String)>,
+    Vec<(String, Option<String>, Option<i32>, Option<String>)>,
+);
+
+/// Both routes keep the ledger in pg; distances are compared at 6 decimals. Empties it after.
+async fn take_ledger(dsn: &str) -> Ledger {
+    let (db, conn) = tokio_postgres::connect(dsn, NoTls).await.expect("connect");
+    tokio::spawn(conn);
+    let links = db
+        .query(
+            "SELECT src, dst, via FROM relates_projection ORDER BY src, dst, via",
+            &[],
+        )
+        .await
+        .expect("links")
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    let bounds = db
+        .query(
+            "SELECT src, round(sem_kth_dist::numeric, 6)::text, graph_kth_shared, graph_kth_src
+             FROM relates_projection_bound ORDER BY src",
+            &[],
+        )
+        .await
+        .expect("bounds")
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+        .collect();
+    db.batch_execute("DELETE FROM relates_projection; DELETE FROM relates_projection_bound;")
+        .await
+        .expect("reset ledger");
+    (links, bounds)
+}
+
+/// E1 (C-SURREALCUT2): a full pass on the Surreal route records the same links and k-th bounds
+/// as on pg. Needs `BORING_TEST_SURREAL_URL` and `BORING_SURREAL_PASSWORD` besides the pg DSN.
+#[tokio::test]
+#[ignore = "needs a throwaway SurrealDB"]
+async fn surreal_full_pass_records_the_pg_ledger() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let dsn = std::env::var("BORING_TEST_DATABASE_URL").unwrap();
+    // More neighbours than k on both sides (graph k = 6, semantic k = 4), so no bound is NULL.
+    // Half the graph notes share a third concept, so the k-th shared count is 2 or 3.
+    for id in 101..=108 {
+        let concepts: &[&str] = if id % 2 == 0 {
+            &["ga", "gb", "gc"]
+        } else {
+            &["ga", "gb"]
+        };
+        fx.put_note(id, "proj-graph", concepts, u64::from(id), DAY)
+            .await;
+    }
+    let flipped = |flips: usize| {
+        let mut v = fx.embedding(7);
+        for x in v.iter_mut().take(flips) {
+            *x = -*x;
+        }
+        v
+    };
+    // Pairwise flip differences are all distinct: no two neighbours tie on distance, since pg's
+    // `ORDER BY dist` has no tiebreak and the relates_to order of a tie is not fixed.
+    for (id, flips) in (201..=206).zip([0, 13, 29, 47, 68, 92]) {
+        fx.put_note_vec(id, "proj-sem", &[], flipped(flips), DAY)
+            .await;
+    }
+    fx.project(true).await;
+    let pg = take_ledger(&dsn).await;
+    let pg_files = fx.contents();
+
+    let config: drudge::config::SurrealConfig = serde_json::from_value(serde_json::json!({
+        "url": std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL"),
+        "namespace": format!("cut2_e1_{}", fx.nonce),
+        "database": format!("cut2_e1_{}", fx.nonce),
+    }))
+    .unwrap();
+    let client =
+        drudge::store::SurrealClient::new(config.settings(&|n| std::env::var(n).ok()).unwrap())
+            .unwrap();
+    let tables = client.fill_from(&fx.store).await.expect("fill");
+    assert!(tables.iter().all(drudge::store::FillTable::same), "fill");
+    let routed = Store::open(&dsn, 1024)
+        .await
+        .unwrap()
+        .with_vector_route(drudge::store::VectorRoute::Surreal(client));
+    project_links(&routed, fx.vault.path(), 6, true)
+        .await
+        .expect("project_links surreal");
+    let surreal = take_ledger(&dsn).await;
+
+    println!(
+        "E1 links pg {} surreal {} · bounds pg {} surreal {}",
+        pg.0.len(),
+        surreal.0.len(),
+        pg.1.len(),
+        surreal.1.len()
+    );
+    println!(
+        "E1 pg bounds {:?}",
+        pg.1.iter()
+            .map(|b| (b.0.rsplit('/').next().unwrap(), &b.1, b.2))
+            .collect::<Vec<_>>()
+    );
+    for (src, sem, shared, _) in &pg.1 {
+        // wiki-01xx = the graph group, wiki-02xx = the semantic cluster.
+        if src.contains("/wiki-01") {
+            assert!(
+                shared.is_some_and(|n| n > 0),
+                "graph bound NULL or 0: {src}"
+            );
+        } else {
+            let d: f64 = sem
+                .as_deref()
+                .expect("semantic bound NULL")
+                .parse()
+                .unwrap();
+            assert!(d > 0.0, "semantic bound 0: {src}");
+        }
+    }
+    assert_eq!(pg.1.len(), 14, "pg recorded a bound per note");
+    assert_eq!(surreal.0, pg.0, "links differ");
+    assert_eq!(surreal.1, pg.1, "bounds differ");
+    assert_eq!(fx.contents(), pg_files, "relates_to differs");
+}
+
+// ---------------------------------------------------------------------------------------------
+// E2 (C-SURREALCUT2 B): the dirty set of the incremental run, pg and Surreal side by side.
+//
+// Every case builds the same vault on each route (through the real ingest pipeline), runs a full
+// projection, makes one change, and reads `projection_scope`. The two routes must name the same
+// notes. Run only the ignored tests:
+//   BORING_TEST_DATABASE_URL=... BORING_TEST_SURREAL_URL=... BORING_SURREAL_PASSWORD=... \
+//   cargo test -p drudge --test relates_projection_integration -- --ignored --nocapture
+// The test empties pg's document, edge, node and claim tables first: use a scratch database.
+// ---------------------------------------------------------------------------------------------
+
+fn signs(nonce: u64, seed: u64) -> Vec<f32> {
+    let mut state = (nonce ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
+    (0..1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if state & 1 == 0 { 1.0 } else { -1.0 }
+        })
+        .collect()
+}
+
+/// A chunk whose text is `vec <seed> <lo> <hi>` embeds as the +-1 vector of `seed` with signs
+/// `lo..hi` flipped: two notes of one seed sit at cosine distance 2 * |flip sets' symmetric
+/// difference| / 1024, exactly. Any other text (a claim) embeds far from every note.
+struct TagEmbed {
+    nonce: u64,
+}
+
+impl drudge::ingest::Embed for TagEmbed {
+    fn embed(
+        &self,
+        text: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<f32>>> + Send {
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        let vector = match parts.as_slice() {
+            ["vec", seed, lo, hi] => {
+                let mut v = signs(self.nonce, seed.parse().expect("seed"));
+                let (lo, hi): (usize, usize) = (lo.parse().expect("lo"), hi.parse().expect("hi"));
+                for x in &mut v[lo..hi] {
+                    *x = -*x;
+                }
+                v
+            }
+            _ => signs(self.nonce, 31_337),
+        };
+        std::future::ready(Ok(vector))
+    }
+}
+
+fn bare(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+type BareLedger = (
+    BTreeSet<(String, String, String)>,
+    BTreeSet<(String, Option<String>, Option<i32>, Option<String>)>,
+);
+
+fn bare_ledger(ledger: Ledger) -> BareLedger {
+    let links = ledger
+        .0
+        .into_iter()
+        .map(|(src, dst, via)| (bare(&src), bare(&dst), via))
+        .collect();
+    let bounds = ledger
+        .1
+        .into_iter()
+        .map(|(src, sem, shared, kth)| (bare(&src), sem, shared, kth.map(|k| bare(&k))))
+        .collect();
+    (links, bounds)
+}
+
+/// One route of one case: its own vault, its own store, and for Surreal its own namespace.
+struct Side {
+    store: Store,
+    vault: TempDir,
+    nonce: u64,
+    dsn: String,
+    surreal: Option<drudge::store::SurrealClient>,
+}
+
+struct Outcome {
+    dirty: BTreeSet<String>,
+    control: BTreeSet<String>,
+    ledger: BareLedger,
+    files: BTreeMap<String, String>,
+}
+
+impl Side {
+    async fn open(fx: &Fixture, on_surreal: bool, case: &str) -> Self {
+        let dsn = std::env::var("BORING_TEST_DATABASE_URL").unwrap();
+        let (db, conn) = tokio_postgres::connect(&dsn, NoTls).await.expect("connect");
+        tokio::spawn(conn);
+        db.batch_execute(
+            "DELETE FROM claim; DELETE FROM edge; DELETE FROM node; DELETE FROM document;
+             DELETE FROM relates_projection; DELETE FROM relates_projection_bound;
+             DELETE FROM sync_state WHERE key LIKE 'relates_projection%';",
+        )
+        .await
+        .expect("reset pg");
+        let pg = Store::open(&dsn, 1024).await.expect("open store");
+        let (store, surreal) = if on_surreal {
+            let config: drudge::config::SurrealConfig = serde_json::from_value(serde_json::json!({
+                "url": std::env::var("BORING_TEST_SURREAL_URL").expect("BORING_TEST_SURREAL_URL"),
+                "namespace": format!("cut2_e2_{case}_{}", fx.nonce),
+                "database": format!("cut2_e2_{case}_{}", fx.nonce),
+            }))
+            .unwrap();
+            let client = drudge::store::SurrealClient::new(
+                config.settings(&|n| std::env::var(n).ok()).unwrap(),
+            )
+            .unwrap();
+            client.fill_from(&pg).await.expect("fill of an empty pg");
+            let routed = Store::open(&dsn, 1024)
+                .await
+                .unwrap()
+                .with_vector_route(drudge::store::VectorRoute::Surreal(client.clone()));
+            (routed, Some(client))
+        } else {
+            (pg, None)
+        };
+        let vault = TempDir::new().expect("tempdir");
+        std::fs::create_dir(vault.path().join("wiki")).expect("wiki dir");
+        Self {
+            store,
+            vault,
+            nonce: fx.nonce,
+            dsn,
+            surreal,
+        }
+    }
+
+    fn path(&self, id: u32) -> PathBuf {
+        self.vault
+            .path()
+            .join("wiki")
+            .join(format!("wiki-{id:04}.md"))
+    }
+
+    /// Write note `id`. Its chunk is the vector of `seed` with signs `lo..hi` flipped; `claim`
+    /// gives it one claim of its own.
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        &self,
+        id: u32,
+        project: &str,
+        concepts: &[&str],
+        claim: bool,
+        seed: u64,
+        lo: usize,
+        hi: usize,
+    ) {
+        let mut text = format!(
+            "---\norigin: personal\nproject: {project}x{}\nkind: note\n",
+            self.nonce
+        );
+        if !concepts.is_empty() {
+            text.push_str("concepts:\n");
+            for c in concepts {
+                text.push_str(&format!("  - {c}x{}\n", self.nonce));
+            }
+        }
+        if claim {
+            text.push_str(&format!(
+                "claims:\n  - subject: s{}x{id}\n    predicate: axis\n    value: v1\n    kind: fact\n    confidence: certain\n",
+                self.nonce
+            ));
+        }
+        text.push_str(&format!("---\n\nvec {seed} {lo} {hi}\n"));
+        std::fs::write(self.path(id), text).expect("write note");
+    }
+
+    async fn sync(&self) {
+        let dirs = vec![self.vault.path().to_string_lossy().into_owned()];
+        drudge::ingest::run_with::<
+            drudge::ingest::DefaultChunker,
+            drudge::ingest::FrontmatterGraphExtractor,
+            _,
+        >(
+            &self.store,
+            &TagEmbed { nonce: self.nonce },
+            &drudge::config::BoringConfig::default(),
+            &dirs,
+        )
+        .await
+        .expect("sync");
+    }
+
+    async fn project(&self, force_full: bool) {
+        project_links(&self.store, self.vault.path(), 6, force_full)
+            .await
+            .expect("project_links");
+    }
+
+    /// Baseline for a case: ingest, one full projection, and the stamps moved an hour back so only
+    /// what the case changes afterwards is newer than the watermark (the same notes on pg are
+    /// older than its watermark by construction).
+    async fn settle_baseline(&self) {
+        self.sync().await;
+        self.project(true).await;
+        self.age_stamps().await;
+    }
+
+    async fn age_stamps(&self) {
+        if let Some(client) = &self.surreal {
+            client
+                .run("UPDATE document SET ingested_us = ingested_us - 3600000000 WHERE ingested_us != NONE;")
+                .await
+                .expect("age ingested_us");
+        }
+    }
+
+    async fn delete_note(&self, id: u32) {
+        let path = self.path(id);
+        self.store
+            .delete_document(&path.to_string_lossy())
+            .await
+            .expect("delete document");
+        std::fs::remove_file(path).expect("remove note");
+    }
+
+    /// Remove only the `claims` edge of note `id`, the way a half-written ingest leaves it.
+    async fn drop_claim_edge(&self, id: u32) {
+        let node = format!("doc:{}", self.path(id).to_string_lossy());
+        match &self.surreal {
+            Some(client) => {
+                client
+                    .run(&format!(
+                        "DELETE edge WHERE src = {} AND kind = 'claims';",
+                        serde_json::to_string(&node).unwrap()
+                    ))
+                    .await
+                    .expect("drop claim edge");
+            }
+            None => {
+                let (db, conn) = tokio_postgres::connect(&self.dsn, NoTls)
+                    .await
+                    .expect("connect");
+                tokio::spawn(conn);
+                db.execute(
+                    "DELETE FROM edge WHERE src = $1 AND kind = 'claims';",
+                    &[&node],
+                )
+                .await
+                .expect("drop claim edge");
+            }
+        }
+    }
+
+    /// The names of this vault's notes `projection_scope` would visit.
+    async fn dirty(&self) -> BTreeSet<String> {
+        let prefix = self.vault.path().to_string_lossy().into_owned();
+        match self.store.projection_scope(false).await.expect("scope") {
+            drudge::store::ProjectionScope::Changed(paths) => paths
+                .iter()
+                .filter(|p| p.starts_with(&prefix))
+                .map(|p| bare(p))
+                .collect(),
+            drudge::store::ProjectionScope::Full(reason) => {
+                panic!(
+                    "expected a changed set, got a full pass: {}",
+                    reason.label()
+                )
+            }
+        }
+    }
+
+    fn files(&self) -> BTreeMap<String, String> {
+        std::fs::read_dir(self.vault.path().join("wiki"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| {
+                (
+                    bare(&p.to_string_lossy()),
+                    std::fs::read_to_string(&p).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// Run the incremental pass the dirty set was read for, then record what it left.
+    async fn finish(&self, dirty: BTreeSet<String>, control: BTreeSet<String>) -> Outcome {
+        self.project(false).await;
+        Outcome {
+            dirty,
+            control,
+            ledger: bare_ledger(take_ledger(&self.dsn).await),
+            files: self.files(),
+        }
+    }
+}
+
+fn names(ids: &[u32]) -> BTreeSet<String> {
+    ids.iter().map(|id| format!("wiki-{id:04}.md")).collect()
+}
+
+fn expect_in(out: &BTreeSet<String>, ids: &[u32], route: &str, case: &str) {
+    for n in names(ids) {
+        assert!(
+            out.contains(&n),
+            "{case} {route}: {n} must be dirty, got {out:?}"
+        );
+    }
+}
+
+fn expect_out(out: &BTreeSet<String>, ids: &[u32], route: &str, case: &str) {
+    for n in names(ids) {
+        assert!(
+            !out.contains(&n),
+            "{case} {route}: {n} must not be dirty, got {out:?}"
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Case {
+    /// (a) a new note lands inside B's k-th semantic bound.
+    InsideBound,
+    /// (b) a new note lands beyond it, still within 0.40.
+    OutsideBound,
+    /// (c) a new note lands exactly on B's k-th semantic distance (`<=` counts).
+    SemanticTie,
+    /// (c) the same on the graph side: equal shared count, the new note's path sorts before.
+    GraphTieBefore,
+    /// (c) equal shared count, the new note's path sorts after the k-th: not dirty.
+    GraphTieAfter,
+    /// (d) the new note is B's neighbour while B is not the new note's.
+    OneSided,
+    /// (e) a note that was one of B's links is deleted.
+    Deleted,
+    /// (f) a note's concepts change and nothing else.
+    EdgesOnly,
+    /// (g) a late ingest of a note whose file mtime is a month old.
+    OldMtimeLateIngest,
+    /// (h) nothing changed, and a re-save with identical content: nothing is dirty.
+    ReingestUnchanged,
+    /// (j) a claim edge missing on an unchanged note: dirty after the heal; complete: not dirty.
+    HealedClaimEdge,
+}
+
+/// Semantic cluster: B = 101 and five notes whose flip sets are disjoint, 10..50 signs wide, so
+/// every note's distances to the others are pairwise distinct. B's 4th neighbour is at 40 flips.
+fn semantic_cluster(side: &Side) {
+    side.put(101, "ps", &[], false, 7, 0, 0);
+    for (id, (lo, hi)) in [
+        (102, (0, 10)),
+        (103, (10, 30)),
+        (104, (30, 60)),
+        (105, (60, 100)),
+        (106, (100, 150)),
+    ] {
+        side.put(id, "ps", &[], false, 7, lo, hi);
+    }
+}
+
+/// Graph cluster: 101 shares {ga, gb} with 102..107 (six neighbours at 2, its k-th is 107) and
+/// {ga, gb, gc} would make a note a 3; 100 starts unrelated. Vectors are unrelated seeds.
+fn graph_cluster(side: &Side) {
+    side.put(101, "pg", &["ga", "gb", "gc"], false, 101, 0, 0);
+    for id in 102..=107 {
+        side.put(id, "pg", &["ga", "gb"], false, u64::from(id), 0, 0);
+    }
+    side.put(100, "pg", &["zz", "yy"], false, 100, 0, 0);
+}
+
+async fn run_case(side: &Side, case: Case, route: &str) -> Outcome {
+    let none = BTreeSet::new();
+    match case {
+        Case::InsideBound | Case::OutsideBound | Case::SemanticTie | Case::OldMtimeLateIngest => {
+            semantic_cluster(side);
+            side.settle_baseline().await;
+            let width = match case {
+                Case::InsideBound | Case::OldMtimeLateIngest => 25,
+                Case::OutsideBound => 100,
+                _ => 40,
+            };
+            side.put(900, "px", &[], false, 7, 200, 200 + width);
+            if matches!(case, Case::OldMtimeLateIngest) {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(side.path(900))
+                    .unwrap()
+                    .set_modified(SystemTime::now() - 30 * DAY)
+                    .unwrap();
+            }
+            side.sync().await;
+            let dirty = side.dirty().await;
+            expect_in(&dirty, &[900], route, &format!("{case:?}"));
+            if matches!(case, Case::OutsideBound) {
+                expect_out(&dirty, &[101], route, "OutsideBound");
+            } else {
+                expect_in(&dirty, &[101], route, &format!("{case:?}"));
+            }
+            side.finish(dirty, none).await
+        }
+        Case::OneSided => {
+            side.put(101, "ps", &[], false, 7, 0, 0);
+            side.put(102, "ps", &[], false, 7, 0, 10);
+            for (id, extra) in [(111, 1), (112, 3), (113, 7), (114, 15)] {
+                side.put(id, "py", &[], false, 7, 200, 260 + extra);
+            }
+            side.settle_baseline().await;
+            side.put(900, "py", &[], false, 7, 200, 260);
+            side.sync().await;
+            let dirty = side.dirty().await;
+            expect_in(&dirty, &[101, 900], route, "OneSided");
+            let out = side.finish(dirty, none).await;
+            assert!(
+                out.files["wiki-0101.md"].contains("wiki-0900"),
+                "OneSided {route}: B links the new note"
+            );
+            assert!(
+                !out.files["wiki-0900.md"].contains("wiki-0101"),
+                "OneSided {route}: the new note does not link B"
+            );
+            out
+        }
+        Case::Deleted => {
+            semantic_cluster(side);
+            side.settle_baseline().await;
+            side.delete_note(103).await;
+            let dirty = side.dirty().await;
+            expect_in(&dirty, &[101, 103], route, "Deleted");
+            side.finish(dirty, none).await
+        }
+        Case::GraphTieBefore | Case::GraphTieAfter => {
+            graph_cluster(side);
+            side.settle_baseline().await;
+            let id = if matches!(case, Case::GraphTieBefore) {
+                50
+            } else {
+                900
+            };
+            side.put(id, "px", &["ga", "gb"], false, u64::from(id), 0, 0);
+            side.sync().await;
+            let dirty = side.dirty().await;
+            if matches!(case, Case::GraphTieBefore) {
+                expect_in(&dirty, &[101, 50], route, "GraphTieBefore");
+            } else {
+                expect_in(&dirty, &[900], route, "GraphTieAfter");
+                expect_out(&dirty, &[101], route, "GraphTieAfter");
+            }
+            side.finish(dirty, none).await
+        }
+        Case::EdgesOnly => {
+            graph_cluster(side);
+            side.settle_baseline().await;
+            side.put(100, "pg", &["ga", "gb", "gc"], false, 100, 0, 0);
+            side.sync().await;
+            let dirty = side.dirty().await;
+            expect_in(&dirty, &[100, 101], route, "EdgesOnly");
+            side.finish(dirty, none).await
+        }
+        Case::ReingestUnchanged => {
+            graph_cluster(side);
+            side.settle_baseline().await;
+            side.sync().await;
+            let first = side.dirty().await;
+            // Same bytes written again: a new mtime, the same content.
+            let text = std::fs::read_to_string(side.path(102)).unwrap();
+            std::fs::write(side.path(102), text).unwrap();
+            side.sync().await;
+            let second = side.dirty().await;
+            assert_eq!(first, none, "ReingestUnchanged {route}: a plain sync");
+            assert_eq!(
+                second, none,
+                "ReingestUnchanged {route}: a same-content re-save"
+            );
+            side.finish(second, first).await
+        }
+        Case::HealedClaimEdge => {
+            for id in 101..=104 {
+                side.put(id, "pj", &["ja", "jb"], true, u64::from(id), 0, 0);
+            }
+            side.settle_baseline().await;
+            side.drop_claim_edge(101).await;
+            side.sync().await;
+            let dirty = side.dirty().await;
+            expect_in(&dirty, &[101], route, "HealedClaimEdge");
+            side.project(false).await;
+            side.age_stamps().await;
+            side.sync().await;
+            let complete = side.dirty().await;
+            assert_eq!(
+                complete, none,
+                "HealedClaimEdge {route}: every claim edge present"
+            );
+            side.finish(dirty, complete).await
+        }
+    }
+}
+
+/// E2: for every case the two routes name the same notes (a set), leave the same ledger, and
+/// write the same files. The semantic tie is the one exception: pg's `ORDER BY dist` has no
+/// tiebreak, so which of two equally near notes is B's 4th link is its own to pick; there only the
+/// dirty set is compared.
+#[tokio::test]
+#[ignore = "needs a throwaway SurrealDB"]
+async fn dirty_sets_are_the_same_on_pg_and_surreal() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let cases = [
+        ("a", Case::InsideBound),
+        ("b", Case::OutsideBound),
+        ("c_sem", Case::SemanticTie),
+        ("c_gb", Case::GraphTieBefore),
+        ("c_ga", Case::GraphTieAfter),
+        ("d", Case::OneSided),
+        ("e", Case::Deleted),
+        ("f", Case::EdgesOnly),
+        ("g", Case::OldMtimeLateIngest),
+        ("h", Case::ReingestUnchanged),
+        ("j", Case::HealedClaimEdge),
+    ];
+    for (label, case) in cases {
+        let surreal = Side::open(&fx, true, label).await;
+        let on_surreal = run_case(&surreal, case, "surreal").await;
+        let pg = Side::open(&fx, false, label).await;
+        let on_pg = run_case(&pg, case, "pg").await;
+        println!(
+            "E2 ({label}) {case:?}: pg {} surreal {} dirty, same set {} · control pg {} surreal {}: {:?}",
+            on_pg.dirty.len(),
+            on_surreal.dirty.len(),
+            on_pg.dirty == on_surreal.dirty,
+            on_pg.control.len(),
+            on_surreal.control.len(),
+            on_pg.dirty
+        );
+        assert_eq!(on_surreal.dirty, on_pg.dirty, "({label}) dirty sets differ");
+        assert_eq!(
+            on_surreal.control, on_pg.control,
+            "({label}) control sets differ"
+        );
+        if matches!(case, Case::SemanticTie) {
+            println!(
+                "E2 ({label}) ledger links pg {} surreal {} (tie at the cut-off: informational)",
+                on_pg.ledger.0.len(),
+                on_surreal.ledger.0.len()
+            );
+            continue;
+        }
+        assert_eq!(on_surreal.ledger, on_pg.ledger, "({label}) ledger differs");
+        assert_eq!(
+            on_surreal.files, on_pg.files,
+            "({label}) relates_to differs"
+        );
+    }
+}
+
+/// (i) What only the Surreal route has: a stamp up to 360 s before the watermark still counts as
+/// written, one older does not, and a ledger no full Surreal pass wrote is not trusted.
+#[tokio::test]
+#[ignore = "needs a throwaway SurrealDB"]
+async fn surreal_watermark_overlap_and_full_fallbacks() {
+    let Some(fx) = Fixture::new().await else {
+        eprintln!("SKIP: BORING_TEST_DATABASE_URL not set");
+        return;
+    };
+    let side = Side::open(&fx, true, "i").await;
+    let client = side.surreal.clone().expect("surreal side");
+    semantic_cluster(&side);
+    side.settle_baseline().await;
+    let (db, conn) = tokio_postgres::connect(&side.dsn, NoTls)
+        .await
+        .expect("connect");
+    tokio::spawn(conn);
+    let watermark_us: i64 = db
+        .query_one(
+            "SELECT (extract(epoch FROM value) * 1000000)::bigint FROM sync_state
+             WHERE key = 'relates_projection_watermark_surreal';",
+            &[],
+        )
+        .await
+        .expect("watermark")
+        .get(0);
+    let stamp = |id: u32, us: i64| {
+        let client = client.clone();
+        let p = serde_json::to_string(&side.path(id).to_string_lossy()).unwrap();
+        async move {
+            client
+                .run(&format!(
+                    "UPDATE document SET ingested_us = {us} WHERE source_path = {p};"
+                ))
+                .await
+                .expect("stamp");
+        }
+    };
+    stamp(102, watermark_us - 400_000_000).await;
+    let outside = side.dirty().await;
+    println!("E2 (i) 400 s before the watermark: dirty {outside:?}");
+    assert!(
+        outside.is_empty(),
+        "400 s before the watermark is not written"
+    );
+    stamp(101, watermark_us - 300_000_000).await;
+    let inside = side.dirty().await;
+    println!("E2 (i) 300 s before the watermark: dirty {inside:?}");
+    assert!(
+        inside.contains("wiki-0101.md"),
+        "300 s before the watermark is still written"
+    );
+
+    // 501 extra chunks on the written note: one over the cap (500) that keeps an incremental
+    // run cheaper than a full one.
+    let p101 = serde_json::to_string(&side.path(101).to_string_lossy()).unwrap();
+    client
+        .run(&format!(
+            "LET $e = (SELECT VALUE embedding FROM chunk WHERE source_path = {p101} LIMIT 1)[0];
+             FOR $i IN 0..501 {{
+                 CREATE chunk CONTENT {{ cid: 'too-many-' + <string>$i, source_path: {p101},
+                     project: '', doc_updated_us: 0, content: 'x', origin: 'personal',
+                     embedding: $e }};
+             }};"
+        ))
+        .await
+        .expect("pad chunks");
+    let scope = side.store.projection_scope(false).await.expect("scope");
+    println!("E2 (i) 501 more chunks written: {scope:?}");
+    assert_eq!(
+        scope,
+        drudge::store::ProjectionScope::Full(drudge::store::FullReason::TooManyChanged)
+    );
+    client
+        .run("DELETE chunk WHERE string::starts_with(cid, 'too-many-');")
+        .await
+        .expect("unpad chunks");
+
+    db.execute(
+        "DELETE FROM sync_state WHERE key = 'relates_projection_full_surreal';",
+        &[],
+    )
+    .await
+    .expect("drop the full marker");
+    let scope = side.store.projection_scope(false).await.expect("scope");
+    println!("E2 (i) no full marker: {scope:?}");
+    assert_eq!(
+        scope,
+        drudge::store::ProjectionScope::Full(drudge::store::FullReason::NoSurrealFull)
+    );
+}

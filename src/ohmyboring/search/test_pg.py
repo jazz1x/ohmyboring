@@ -11,6 +11,7 @@ owner 노트의 contested 카운트가 달라져 사망 확인.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import unittest
@@ -21,7 +22,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from ohmyboring.result import Err, Ok  # noqa: E402
-from ohmyboring.search import pg  # noqa: E402
+from ohmyboring.search import pg, rank, retriever  # noqa: E402
 
 DSN = os.environ.get("BORING_TEST_DATABASE_URL")
 
@@ -56,7 +57,7 @@ class RelatedSqlShapeTests(unittest.TestCase):
     def test_final_order_is_shared_desc_then_source_path_asc(self):
         sql = pg._RELATED_BY_SHARED_GROUND_SQL
         self.assertIn("ORDER BY r.shared DESC, d.source_path ASC", sql)
-        ranked_at = sql.index("GROUP BY s.doc_node ORDER BY shared DESC")
+        ranked_at = sql.index("ORDER BY shared DESC, s.doc_node ASC")
         self.assertLess(ranked_at, sql.index("LIMIT %s"), "LIMIT 전 doc_node ASC 는 ranked 단계")
 
 
@@ -93,6 +94,7 @@ class PgIntegrationTests(unittest.TestCase):
                 " author text NOT NULL DEFAULT 'unknown',"
                 " project text NOT NULL DEFAULT '',"
                 " updated_at timestamptz NOT NULL DEFAULT now(),"
+                " origin text NOT NULL DEFAULT '',"
                 " sha text NOT NULL DEFAULT '',"
                 " tags text[] NOT NULL DEFAULT '{}');"
             )
@@ -121,7 +123,7 @@ class PgIntegrationTests(unittest.TestCase):
                 "CREATE TABLE claim ("
                 " subject text NOT NULL, predicate text NOT NULL, value text NOT NULL,"
                 " source_path text NOT NULL,"
-                " valid_from timestamptz NOT NULL, superseded_at timestamptz,"
+                " valid_from timestamptz NOT NULL, superseded_at timestamptz, stale_at timestamptz,"
                 " kind text NOT NULL DEFAULT 'fact', confidence text NOT NULL DEFAULT 'certain',"
                 " said_by text);"
             )
@@ -314,28 +316,130 @@ class PgIntegrationTests(unittest.TestCase):
             case Err(e):
                 self.fail(f"rank_facts: {e}")
 
-    def test_declared_claims_tier_cut_and_canonical_kind(self):
-        match pg.declared_claims(self.conn, ["/own.md"], 10):
+    def test_current_claims_cut_and_canonical_kind(self):
+        match pg.current_claims(self.conn, ["/own.md"], 1, ()):
             case Ok(out):
                 rows = out["/own.md"]
-                self.assertEqual(
-                    [r.predicate for r in rows.rows], ["판정", "다음", "위험"], "fact 는 빠지고 tier 순"
-                )
-                self.assertEqual(rows.total_matching, 3, "대첸 행·fact 를 뺀 전수")
+                self.assertEqual([r.predicate for r in rows.rows], ["판정"], "per_doc=1 이면 decision")
+                self.assertEqual(rows.total_matching, 4, "자른 것은 전수로 밝힌다")
                 self.assertEqual(rows.rows[0].node_id, "claim:주제:판정")
-                self.assertEqual(rows.rows[1].kind, "fact", "next 가 '남은 작업 없음' 을 담으면 fact")
                 self.assertTrue(rows.rows[0].valid_from.startswith("20"), "RFC 3339")
             case Err(e):
-                self.fail(f"declared_claims: {e}")
-        match pg.declared_claims(self.conn, ["/own.md"], 1):
-            case Ok(out):
-                self.assertEqual(len(out["/own.md"].rows), 1)
-                self.assertEqual(out["/own.md"].total_matching, 3, "자른 것은 전수로 밝힌다")
+                self.fail(f"current_claims per_doc: {e}")
+
+    def _search_state(self, paths: list[str], claims: int = 2) -> retriever._State:
+        ordered = [
+            rank.Scored(
+                hit=rank.Hit(
+                    id=p + "#0",
+                    content="c",
+                    origin="personal",
+                    project="omb",
+                    source_path=p,
+                    dist=0.1,
+                    dist_kind="vector_cosine",
+                ),
+                score=1.0,
+            )
+            for p in paths
+        ]
+        return retriever._State(
+            query="q",
+            dsn=DSN,
+            plan=None,
+            project=None,
+            since_hours=None,
+            claims=claims,
+            related=0,
+            related_heads=0,
+            stack=contextlib.ExitStack(),
+            conn=self.conn,
+            ordered=ordered,
+        )
+
+    def _seed_fact_only_note(self, path: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("INSERT INTO document (source_path, project) VALUES (%s, 'omb');", (path,))
+            cur.execute(
+                "INSERT INTO edge (src, dst, kind) VALUES (%s, 'claim:배경:스택', 'claims');",
+                ("doc:" + path,),
+            )
+            cur.execute(
+                "INSERT INTO claim (source_path, subject, predicate, value, valid_from, kind)"
+                " VALUES (%s, '배경', '스택', 'pgvector', now(), 'fact');",
+                (path,),
+            )
+        self.addCleanup(self._drop_note, path)
+
+    def _drop_note(self, path: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM claim WHERE source_path = %s;", (path,))
+            cur.execute("DELETE FROM edge WHERE src = %s;", ("doc:" + path,))
+            cur.execute("DELETE FROM document WHERE source_path = %s;", (path,))
+
+    def test_search_claims_step_hands_over_a_fact_only_note(self):
+        """C-DSHAPE2: fact 만 있는 노트도 /search 의 claim 줄을 받는다 (엔진 시험과 같은 꼴)."""
+        self._seed_fact_only_note("/factonly.md")
+        match retriever._claims(self._search_state(["/factonly.md"])):
+            case Ok(state):
+                rows = state.declared["/factonly.md"]
+                self.assertEqual([r.kind for r in rows.rows], ["fact"])
+                self.assertEqual(rows.total_matching, 1)
             case Err(e):
-                self.fail(f"declared_claims per_doc: {e}")
+                self.fail(f"_claims: {e}")
+
+    def test_search_claims_step_prefers_decision_over_fact_at_one_per_hit(self):
+        match retriever._claims(self._search_state(["/own.md"], claims=1)):
+            case Ok(state):
+                self.assertEqual([r.predicate for r in state.declared["/own.md"].rows], ["판정"])
+            case Err(e):
+                self.fail(f"_claims: {e}")
+
+    def test_search_claims_step_leaves_hit_paths_untouched(self):
+        self._seed_fact_only_note("/factonly.md")
+        before = self._search_state(["/own.md", "/factonly.md", "/plain.md"])
+        match retriever._claims(before):
+            case Ok(after):
+                self.assertEqual(
+                    [s.hit.source_path for s in after.ordered],
+                    [s.hit.source_path for s in before.ordered],
+                    "claims 단계는 hit 을 고르거나 바꾸지 않는다",
+                )
+            case Err(e):
+                self.fail(f"_claims: {e}")
+
+    def test_newer_open_value_in_an_excluded_origin_is_not_counted(self):
+        old, new = "/nv-old.md", "/nv-new.md"
+        with self.conn.cursor() as cur:
+            for path, origin, valid_from in (
+                (old, "personal", "2026-11-05T00:00:00+00:00"),
+                (new, "company", "2026-11-05T01:00:00+00:00"),
+            ):
+                cur.execute("INSERT INTO document (source_path, origin) VALUES (%s, %s);", (path, origin))
+                cur.execute(
+                    "INSERT INTO claim (source_path, subject, predicate, value, valid_from, kind)"
+                    " VALUES (%s, 'nv-slot', 'follow', %s, %s, 'next');",
+                    (path, path, valid_from),
+                )
+            cur.execute(
+                "INSERT INTO edge (src, dst, kind) VALUES (%s, 'claim:nv-slot:follow', 'claims');",
+                ("doc:" + old,),
+            )
+        self.addCleanup(self._drop_note, old)
+        self.addCleanup(self._drop_note, new)
+
+        def newer_open(exclude_origins):
+            match pg.current_claims(self.conn, [old], 10, exclude_origins):
+                case Ok(out):
+                    return out[old].rows[0].newer_open
+                case Err(e):
+                    self.fail(f"current_claims: {e}")
+
+        self.assertEqual(newer_open(()), pg.NewerOpen(1, "11-05"), "대조: 더 새 행이 있다")
+        self.assertIsNone(newer_open(("company",)))
 
     def test_current_claims_keeps_facts_and_drops_closed_rows(self):
-        match pg.current_claims(self.conn, ["/own.md"], 10):
+        match pg.current_claims(self.conn, ["/own.md"], 10, ()):
             case Ok(out):
                 rows = out["/own.md"]
                 self.assertEqual(
@@ -431,6 +535,7 @@ class RelatedBySharedGroundTests(unittest.TestCase):
                 " author text NOT NULL DEFAULT 'unknown',"
                 " project text NOT NULL DEFAULT '',"
                 " updated_at timestamptz NOT NULL DEFAULT now(),"
+                " origin text NOT NULL DEFAULT '',"
                 " sha text NOT NULL DEFAULT '',"
                 " tags text[] NOT NULL DEFAULT '{}');"
             )
@@ -505,6 +610,17 @@ class RelatedBySharedGroundTests(unittest.TestCase):
                 )
             case Err(e):
                 self.fail(f"related_by_shared_ground: {e}")
+
+    def test_min_shared_two_drops_single_concept_candidates(self):
+        match pg.related_by_shared_ground(self.conn, "/rel-self.md", 10, min_shared=2):
+            case Ok(docs):
+                self.assertEqual(
+                    [d.source_path for d in docs],
+                    ["/rel-both.md", "/rel-claim.md"],
+                    "점수 1(공유 concept 하나)인 /rel-a·/rel-concept·/rel-z 는 빠지고 2 이상만 남는다",
+                )
+            case Err(e):
+                self.fail(f"related_by_shared_ground min_shared=2: {e}")
 
     def test_content_is_chunks_joined_by_chunk_idx_and_tags(self):
         match pg.related_by_shared_ground(self.conn, "/rel-self.md", 10):

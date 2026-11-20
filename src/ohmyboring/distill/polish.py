@@ -12,7 +12,7 @@ from ohmyboring.distill import readability
 from ohmyboring.distill.prompts.polish import build_polish_prompt
 
 _FACT_PATTERNS = (
-    re.compile(r"wiki-\d{4}"),
+    re.compile(r"wiki-\d{4,}"),
     re.compile(r"`[^`\n]+`"),
     re.compile(r"https?://[^\s)>\]]+"),
     re.compile(r"#\d+"),

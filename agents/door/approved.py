@@ -72,18 +72,26 @@ class Selection:
     skipped: list[Skipped]
 
 
+class TsOutOfRange(ValueError):
+    """The tail is a float (inf, nan, 1e400, 1e20 …) that cannot become a datetime."""
+
+
 def parse_session_ts(name: str) -> datetime | None:
     """``session:slack:C1:1758470000.5`` (or the bare card name) → aware datetime.
 
     The token after the last colon must be a Slack epoch in seconds; anything
-    else (a channel-only name, a uuid session) is None, never an exception.
+    else (a channel-only name, a uuid session) is None. A float no datetime can hold
+    raises TsOutOfRange, which select_approved turns into a Skipped.
     """
     tail = name.rsplit(":", 1)[-1]
     try:
         ts = float(tail)
     except ValueError:
         return None
-    return datetime.fromtimestamp(ts, tz=SEOUL)
+    try:
+        return datetime.fromtimestamp(ts, tz=SEOUL)
+    except (OverflowError, ValueError, OSError):
+        raise TsOutOfRange(name) from None
 
 
 def select_approved(rows, since_hours: float, now: datetime) -> Selection:
@@ -102,7 +110,11 @@ def select_approved(rows, since_hours: float, now: datetime) -> Selection:
         if not name.startswith("slack:"):
             skipped.append(Skipped(src, "not a slack card session"))
             continue
-        at = parse_session_ts(name)
+        try:
+            at = parse_session_ts(name)
+        except TsOutOfRange:
+            skipped.append(Skipped(src, "session ts out of range"))
+            continue
         if at is None:
             skipped.append(Skipped(src, "no parseable ts in session name"))
             continue
@@ -112,6 +124,26 @@ def select_approved(rows, since_hours: float, now: datetime) -> Selection:
             approved.append(Approved(session=name, note=dst, at=at))
         elif kind == CONTESTED_KIND:
             contested.append(Contested(session=name, note=dst, at=at))
-    approved.sort(key=lambda item: item.at, reverse=True)
-    contested.sort(key=lambda item: item.at, reverse=True)
+    # at descending, then session ascending, then note ascending (code point). Two stable
+    # passes: the DB hands rows back in no fixed order, and a tie must not depend on it.
+    for items in (approved, contested):
+        items.sort(key=lambda item: (item.session, item.note))
+        items.sort(key=lambda item: item.at, reverse=True)
     return Selection(approved=approved, contested=contested, skipped=skipped)
+
+
+def payload(selection: Selection, since_hours: int) -> dict:
+    """The /approved JSON body, key order = wire order. Only the count of skipped edge rows
+    is on the wire (duplicates counted, one per row); which rows went to the server log."""
+    return {
+        "since_hours": since_hours,
+        "approved": [
+            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
+            for item in selection.approved
+        ],
+        "contested": [
+            {"session": item.session, "note": item.note, "at": item.at.isoformat(timespec="seconds")}
+            for item in selection.contested
+        ],
+        "skipped_rows": len(selection.skipped),
+    }

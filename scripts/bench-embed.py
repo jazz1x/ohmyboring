@@ -94,7 +94,9 @@ def main() -> None:
     print(f"single-batch latency ({len(texts)} texts): {latency:.3f}s")
     print(f"actual dim: {actual_dim}  expected dim: {args.embed_dim}")
     if actual_dim != args.embed_dim:
-        print(f"DIMENSION MISMATCH: update llm.embed_dim to {actual_dim} and run 'make reset'")
+        print(
+            f"DIMENSION MISMATCH: to change the model: 'make backup-db', edit llm.embed_model + llm.embed_dim (now {actual_dim}) in boring.json, then 'make reset', 'make up', 'make verify-llm'"
+        )
         sys.exit(1)
     print("✓ dimension matches")
     print()

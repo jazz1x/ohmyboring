@@ -90,10 +90,11 @@ fi
 # scripts find the engine and use the canonical MCP server name.
 if [ -n "$AGENT" ]; then
   echo "▶ Wiring hermes-agent settings …"
-  python3 agents/shared/agent_wiring.py --install --boring-home "$PWD" || true
+  uv run --locked python --version
+  uv run --locked python agents/shared/agent_wiring.py --install --boring-home "$PWD"
 fi
 
-$COMPOSE $PROFILES up -d --build boring-drudge $AGENT
+$COMPOSE $PROFILES up -d --build boring-drudge ${PROFILES:+boring-postgres} $AGENT
 
 echo "▶ Waiting for boring-drudge health …"
 for _ in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:7700/health >/dev/null 2>&1 && break; sleep 3; done

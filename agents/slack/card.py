@@ -40,9 +40,9 @@ live collaborators — a repair row's adopt calls the door's own merge (POST
 /repairs/split-subjects); an advice row's press logs a card_verdict event — card_proposal
 exists only for these rows, and card_live._live_past_verdicts joins the two by (card_ts, idx),
 raising on a verdict with no proposal — then its adopt/reject writes the verdict to the
-engine while its hold leaves no trace beyond the event; a review row's agree leaves only a
-verdict_reviewed event, its flip writes the opposite-kind verdict to the proposing session
-and the same event — the agent's own edge is never deleted. An unanswered row stays
+engine while its hold leaves no trace beyond the event; a review row's agree writes the
+proposed verdict and its flip the opposite kind to the proposing session, each with a
+verdict_reviewed event — the agent's own edge is never deleted. An unanswered row stays
 answerable for card_press.CARD_ANSWERABLE_HOURS: the hermes plugin refuses an older press,
 and _live_past_verdicts widens its proposal read by the same hours so every press it
 accepted still joins its proposal.
@@ -69,6 +69,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -98,6 +99,8 @@ CONFIRM_SINCE_HOURS = 48
 # The advise loop's call budget: one gemma4 call per candidate, at most this many candidates
 # tried per run — a small local model's context outgrows a whole day's registers otherwise.
 ADVISE_CALL_CAP = 8
+# The 「과거 결정」 block's size: the newest decisions of the candidate's project, at most this many.
+DECISION_LINES = 3
 # The project axis: registers are called once per project active in this window, plus once
 # more for the unassigned bucket (project="").
 PROJECT_ACTIVE_DAYS = 14
@@ -170,6 +173,8 @@ class CardState(TypedDict):
     past_verdicts: card_types.PastCardHistory  # read once in read_history, shared by advise and resolve
     advise_stats: card_types.AdviseStats
     suppressed_count: int
+    unresolved_count: int  # resolve's drop: subject with no note
+    same_note_count: int  # resolve's drop: a second proposal on an already picked note
     advice_revisions: list[
         str
     ]  # the advice step's store_advice: one card_advice_written `revise` tag per row
@@ -214,6 +219,9 @@ class Collaborators(NamedTuple):
     # CARD_RENDER_ONLY: when set, the advice lane is today's already-posted proposals — no
     # search, no model call, no suppression — instead of a fresh advise → resolve.
     posted_proposals: Callable[[], list[card_types.Proposal]] | None = None
+    # note path → its current claims with the sealed value each replaced; defaulting to none
+    # draws no value look, so a caller that never heard of it renders the card it always did.
+    pairs: Callable[[str], list[card_types.ValuePair] | card_types.PairsUnread] = lambda note: []
 
 
 def _live_collaborators() -> Collaborators:
@@ -237,6 +245,7 @@ def _live_collaborators() -> Collaborators:
         held_repairs=card_live._held_repair_subjects,
         repair_judgments=card_live._live_repair_judgments,
         score=card_live._live_score,
+        pairs=card_live._live_pairs,
     )
 
 
@@ -296,6 +305,35 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         if key not in resolve_cache:
             resolve_cache[key] = collabs.resolve(subject, register)
         return resolve_cache[key]
+
+    #: project → its 「과거 결정」 lines, so the door's /decisions is read once per project per run.
+    decisions_cache: dict[str, list[str]] = {}
+
+    def _decision_lines(project: str) -> list[str]:
+        """The newest DECISION_LINES decisions of `project` that resolve to a note, each led
+        by its note number ("wiki-0900"). The door's /decisions items carry each row's note
+        path, so no /claim-source call per row; a row without a path is skipped — a line
+        without a number is no line. A malformed answer raises, like collect_registers."""
+        if project not in decisions_cache:
+            data = collabs.fetch("/decisions", project)
+            answer = data.get("answer")
+            items = data.get("items")
+            if not isinstance(answer, str) or not isinstance(items, list):
+                raise ValueError(
+                    f"register decisions: expected answer text and items, got keys {sorted(data)!r}"
+                )
+            path_of: dict[str, str] = {}
+            for item in items:
+                path_of.setdefault(item["subject"], item["source_path"])
+            lines: list[str] = []
+            for subject, text in card_advice.parse_decision_rows(answer):
+                if len(lines) >= DECISION_LINES:
+                    break
+                note = path_of.get(subject, "")
+                if note:
+                    lines.append(f"{Path(note).stem} — {text}")
+            decisions_cache[project] = lines
+        return decisions_cache[project]
 
     def cross_check(state: CardState) -> dict:
         """The card's head line, before the model picks: yesterday's 「해」, each checked
@@ -413,7 +451,9 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
                     file=sys.stderr,
                 )
                 warned_empty_vault = True
-            prompt = card_advice.build_advice_prompt(subject, register, hits, state["lang"])
+            prompt = card_advice.build_advice_prompt(
+                subject, register, hits, state["lang"], _decision_lines(project)
+            )
             calls += 1
             superseded_by = {
                 h["source_path"]: card_advice.superseded_names(h) for h in hits if h.get("source_path")
@@ -462,27 +502,46 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         the coarser call-saver; this pair-level filter stays the source of truth."""
         picked: list[card_types.Proposal] = []
         seen_notes: set[str] = set()
+        unresolved = 0
+        same_note = 0
         for proposal in state["proposals"]:
             result = _resolve(proposal.subject, proposal.register_)
             if isinstance(result, card_types.Unresolved):
+                unresolved += 1
                 continue
             if result.note in seen_notes:
+                same_note += 1
                 continue
             seen_notes.add(result.note)
             picked.append(proposal.model_copy(update={"note": result.note}))
         kept, dropped = card_verdicts.suppressed(picked, state["past_verdicts"])
-        return {"proposals": kept, "suppressed_count": len(dropped)}
+        return {
+            "proposals": kept,
+            "suppressed_count": len(dropped),
+            "unresolved_count": unresolved,
+            "same_note_count": same_note,
+        }
 
     def post_card(state: CardState) -> dict:
         lang = state["lang"]
         n_repairs = len(state["repairs"])
+        notes = {p.note for p in state["proposals"]} | {r.note for r in state["reviews"]}
+        looked_up = {note: collabs.pairs(note) for note in sorted(notes) if note}
+
+        def with_pairs(row):
+            match looked_up.get(row.note, []):
+                case card_types.PairsUnread():
+                    return row.model_copy(update={"pairs_unread": True})
+                case found:
+                    return row.model_copy(update={"pairs": found})
+
         fitted = card_view.fit_card(
-            state["proposals"],
+            [with_pairs(p) for p in state["proposals"]],
             confirmation=state["confirmation"],
             repairs=state["repairs"],
             repairs_total_groups=state["repairs_total_groups"],
             merged_yesterday_rows=state["merged_yesterday_rows"],
-            reviews=state["reviews"],
+            reviews=[with_pairs(r) for r in state["reviews"]],
             lang=lang,
             note_links=boring_config.note_links(),
             score=state["score"],
@@ -553,7 +612,8 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
         """The advice step's last node: each proposal that survived advise → resolve is
         rewritten once for a first-time reader (card_advice_write.revise) and stored as one
         card_advice_written 사건, rank in the order the card will show them. The run stamp
-        groups one run's rows, so a second run the same morning replaces the first."""
+        groups one run's rows, so a second run the same morning replaces the first. One
+        card_advice_run row closes every run, zero proposals included, with the reasons."""
         run = datetime.now(UTC).isoformat()
         day = card_advice_write.today_kst()
         revisions: list[str] = []
@@ -566,6 +626,26 @@ def _nodes(collabs: Collaborators) -> dict[str, Callable[[CardState], dict]]:
                     revised.proposal, day=day, run=run, rank=rank, revise=revised.revise
                 ),
             )
+        collabs.record(
+            card_advice_write.RUN_EVENT,
+            card_advice_write.run_event_fields(
+                state["advise_stats"],
+                day=day,
+                run=run,
+                candidates=sum(state["per_project_candidates"].values()),
+                unresolved=state["unresolved_count"],
+                same_note=state["same_note_count"],
+                suppressed=state["suppressed_count"],
+                written=len(revisions),
+                decisions={
+                    project: {
+                        "lines": len(lines),
+                        "notes": [line.split(" — ", 1)[0] for line in lines],
+                    }
+                    for project, lines in decisions_cache.items()
+                },
+            ),
+        )
         return {"advice_revisions": revisions}
 
     return {

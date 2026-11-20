@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use drudge::frontmatter::FrontMatter;
 use drudge::store::Store;
+use drudge::vector::VectorIndex;
 
 fn test_dsn() -> Option<String> {
     std::env::var("BORING_TEST_DATABASE_URL").ok()

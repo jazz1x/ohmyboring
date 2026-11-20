@@ -71,8 +71,9 @@ async fn context_card_returns_structured_sections() {
         .expect("context card");
 
     assert_eq!(card.language, "ko");
-    assert_eq!(card.decisions.len(), 1);
-    assert_eq!(card.decisions[0].kind, "decision");
+    assert_eq!(card.decisions.len(), 2);
+    assert_eq!(card.decisions[0].value, "북극성 없음");
+    assert_eq!(card.decisions[1].kind, "decision");
     assert_eq!(card.risks.len(), 1);
     assert_eq!(card.risks[0].kind, "risk");
     assert_eq!(card.facts.len(), 1);
@@ -176,13 +177,15 @@ async fn context_card_excludes_origins() {
     let all = context_card(&store, Some(&project), &[], 5, "ko")
         .await
         .expect("all");
-    assert_eq!(all.decisions.len(), 2);
+    assert_eq!(all.decisions.len(), 3);
+    assert_eq!(all.decisions[0].value, "북극성 없음");
 
     let personal_only = context_card(&store, Some(&project), &["company".to_owned()], 5, "ko")
         .await
         .expect("personal only");
-    assert_eq!(personal_only.decisions.len(), 1);
-    assert_eq!(personal_only.decisions[0].predicate, "personal-decision");
+    assert_eq!(personal_only.decisions.len(), 2);
+    assert_eq!(personal_only.decisions[0].value, "북극성 없음");
+    assert_eq!(personal_only.decisions[1].predicate, "personal-decision");
 
     store.delete_document(&p_path).await.expect("cleanup p");
     store.delete_document(&c_path).await.expect("cleanup c");

@@ -42,6 +42,7 @@ from card_effects import (  # noqa: F401
 from card_press import CARD_ANSWERABLE_HOURS
 from card_types import (
     NO_CURRENT_CLAIM,
+    PairsUnread,
     PastApproved,
     PastCardHistory,
     PastUnansweredPair,
@@ -53,7 +54,9 @@ from card_types import (
     Scored,
     ScoreReading,
     ScoreUnreadable,
+    SealedValue,
     Unresolved,
+    ValuePair,
 )
 from pydantic import ValidationError
 
@@ -66,6 +69,7 @@ from retriever import BoringRetriever  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 import label_core  # noqa: E402
+import note_ref  # noqa: E402
 import uptake_core  # noqa: E402
 import vault_note  # noqa: E402
 
@@ -249,6 +253,27 @@ def _live_resolve(subject: str, register: str) -> ResolvedNote | Unresolved:
     return ResolvedNote(subject=subject, note=payload["note"])
 
 
+def _live_pairs(note: str) -> list[ValuePair] | PairsUnread:
+    """A note's current claims with what each replaced, from the engine's GET /claim-priors
+    through the door. An unreachable door or a body that does not parse is a PairsUnread value
+    (and a stderr line): the row says it could not read the prior, never draws Absent."""
+    url = f"{_door_url()}/claim-priors?source={urllib.parse.quote(note)}"
+    try:
+        payload = _door_json(url)
+        return [
+            ValuePair(
+                subject=c["subject"],
+                predicate=c["predicate"],
+                value=c["value"],
+                prior=SealedValue(**c["prior"]) if c["state"] == "prior" else None,
+            )
+            for c in payload["claims"]
+        ]
+    except (OSError, KeyError, TypeError, ValueError) as e:
+        print(f"[card] claim-priors for {note!r} unreadable: {e}", file=sys.stderr)
+        return PairsUnread(reason=str(e))
+
+
 def _live_approved(since_hours: int) -> list[PastApproved]:
     url = f"{_door_url()}/approved?since_hours={since_hours}"
     payload = _door_json(url)
@@ -370,7 +395,7 @@ def _proposed_rows(since_hours: int) -> list[ProposedVerdict]:
         try:
             row = ProposedVerdict(
                 session_id=attrs["session_id"],
-                note=attrs["note"],
+                note=note_ref.note_fields(attrs["note"])["note"],
                 kind=attrs["kind"],
                 at=entry["observed_at"],
                 reason=attrs.get("reason") or "",
@@ -587,7 +612,7 @@ def _work_at(notes: list[tuple[int, str, str]], proposal_day: str) -> str:
     if not notes:
         return ""
     before = [n for n in notes if n[1] and n[1] <= proposal_day]
-    return max(before, key=lambda n: n[0])[2] if before else notes[0][2]
+    return max(before, key=lambda n: n[0])[2] if before else min(notes, key=lambda n: (n[0] == 0, n[0]))[2]
 
 
 def _proposal_day(at: str) -> str:

@@ -417,6 +417,20 @@ def test_register_without_boring_home_registers_nothing():
     assert log.error.called
 
 
+def test_the_plugin_reads_the_card_root_the_cards_were_drawn_from():
+    """Cards are drawn from BORING_CARD_ROOT (trunk); BORING_HOME is the main checkout. A press
+    must be handled by the code that drew the button, so the card root wins."""
+    with tempfile.TemporaryDirectory() as tmp:
+        trunk, main = Path(tmp) / "trunk", Path(tmp) / "main"
+        for root in (trunk, main):
+            for sub in ("agents/slack", "agents/shared", "src"):
+                (root / sub).mkdir(parents=True)
+        env = {"BORING_HOME": str(main), "BORING_CARD_ROOT": str(trunk)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            dirs = PLUGIN._repo_module_dirs()
+    assert dirs == (str(trunk / "agents/slack"), str(trunk / "agents/shared"), str(trunk / "src"))
+
+
 def test_register_hands_one_handler_the_card_action_ids():
     ctx = _FakeCtx()
     with _env():
@@ -478,6 +492,25 @@ def test_an_owner_advice_do_press_records_then_consumes_and_marks_the_card():
     assert _status_at(progress[3], 1) == "⏳ 진행 중…"
     _assert_single_row_marked(BLOCKS, final[3], 1)
     assert f"✓ 채택 — <@{OWNER}>" in json.dumps(final[3], ensure_ascii=False)
+
+
+def test_a_review_agree_press_with_the_engine_down_shows_the_failure_and_keeps_the_buttons():
+    """동의 누름도 엔진이 죽어 있으면 말없이 사라지지 않는다: 첫 효과에서 멈춰 verdict_reviewed 가
+    안 남고, 줄은 「✕ 실패 — reason」 이며 단추가 남는다."""
+
+    def dead_engine(session, kind, paths, judge=None):
+        raise RuntimeError("engine down")
+
+    calls = []
+    ctx = _FakeCtx()
+    with _env():
+        _, handler = _register(ctx)[0]
+        with _patched_effects(calls, consumption=dead_engine), mock.patch.object(PLUGIN, "_LOG"):
+            _run(handler, _body("card:3:do", REVIEW_VALUE), calls)
+    assert _without_updates(calls) == ["ack"]
+    _, failed = _updates(calls)
+    assert _status_at(failed[3], 3) == "✕ 실패 — engine down"
+    _assert_buttons_kept_under_the_reason(BLOCKS, failed[3], 3)
 
 
 def test_an_owner_review_delegate_press_consumes_with_the_agent_judge():
@@ -629,6 +662,45 @@ def test_a_delegate_press_with_an_unreadable_note_never_calls_the_model():
     assert not [c for c in calls if isinstance(c, tuple) and c[0] == "consumption"]
     record = next(c for c in calls if isinstance(c, tuple) and c[0] == "record")
     assert "못 읽었다" in record[2]["error"]
+
+
+def test_a_press_on_a_carousel_card_button_reaches_the_same_effects_and_settles_the_row():
+    """The prior-value card's button is the advice 「drop」: the same two effects as before the
+    carousel, and the row settles into its status line with the card buttons gone."""
+    proposal = _PROPOSALS[0].model_copy(
+        update={
+            "pairs": [
+                card_types.ValuePair(
+                    subject="s",
+                    predicate="state",
+                    value="새 값",
+                    prior=card_types.SealedValue(
+                        value="옛 값", note="/vault/wiki/wiki-0001.md", superseded_at="2026-10-28T01:00:00Z"
+                    ),
+                )
+            ]
+        }
+    )
+    blocks = card_view.build_card([proposal], lang="ko").blocks
+    carousel = next(b for b in blocks if b["type"] == "carousel")
+    assert [a["action_id"] for c in carousel["elements"] for a in c["actions"]] == [
+        "card:0:do",
+        "card:0:drop",
+    ]
+    ctx = _FakeCtx()
+    with _env():
+        _, handler = _register(ctx)[0]
+        calls = []
+        with _patched_effects(calls):
+            _run(handler, _body("card:0:drop", ADVICE_VALUE, blocks=blocks), calls)
+    assert calls[2:4] == [
+        ("record", "card_verdict", {"card_ts": CARD_TS, "idx": 0, "choice": "drop"}),
+        ("consumption", "slack:C1:1.0", "contested", ["/vault/wiki/wiki-0576.md"], None),
+    ]
+    final = _updates(calls)[-1][3]
+    settled = next(b for b in final if b["type"] == "carousel")
+    assert not any("actions" in c for c in settled["elements"])
+    assert _status_at(final, 0).startswith(f"✅ <@{OWNER}> · 새 값 다툼 있어요 · ")
 
 
 def test_an_owner_review_hold_press_leaves_no_edge_and_marks_the_row():
@@ -1693,6 +1765,7 @@ if __name__ == "__main__":
     test_the_import_path_stays_langchain_free()
     test_register_without_secretary_owner_id_registers_nothing()
     test_register_without_boring_home_registers_nothing()
+    test_the_plugin_reads_the_card_root_the_cards_were_drawn_from()
     test_register_hands_one_handler_the_card_action_ids()
     test_the_handler_acks_before_any_effect()
     test_a_press_on_a_card_older_than_the_answerable_hours_runs_no_effect()
@@ -1726,6 +1799,7 @@ if __name__ == "__main__":
     test_a_submitted_comment_becomes_an_owner_event_and_the_row_says_it_got_it()
     test_a_comment_on_a_name_repair_row_names_its_subject_and_spellings()
     test_a_submission_whose_card_row_cannot_be_read_records_nothing_and_says_so_on_the_row()
+    test_a_press_on_a_carousel_card_button_reaches_the_same_effects_and_settles_the_row()
     test_a_comment_that_could_not_be_stored_is_never_shown_as_received()
     test_a_submission_nobody_may_make_runs_nothing()
     test_a_submission_on_a_card_past_its_answerable_hours_runs_nothing()

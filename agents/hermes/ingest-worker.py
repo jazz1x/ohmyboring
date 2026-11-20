@@ -30,28 +30,36 @@ hermes-agent container at /host/.cache/boring-distill.
 
 import glob
 import json
+import math
 import os
 import socket
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "src"))
+# Only this job reads BORING_DISTILL_SRC, so hermes can run distillation from a read-only trunk
+# worktree while every other hermes script keeps the main checkout on PYTHONPATH. Unset → unchanged.
+if os.environ.get("BORING_DISTILL_SRC"):
+    sys.path.insert(0, os.environ["BORING_DISTILL_SRC"])
 import distill_core
 import distill_queue
 import markers
 import repo_table
 import transcript
+import verdict_core
 
 from ohmyboring import config as boring_config
 from ohmyboring import config as omb_env
 from ohmyboring.adapters import events as event_log
 from ohmyboring.adapters import llm, workflow_contract
 from ohmyboring.adapters.engine import DrudgeClient, check_drudge_writable
+from ohmyboring.distill import budget as distill_budget
 from ohmyboring.distill import run as distill_run
 from ohmyboring.result import Err, Ok
 
@@ -109,17 +117,31 @@ if _IN_CONTAINER:
 MARK_DIR = DISTILL_MARK_DIR
 BORING_HOME = os.environ.get("BORING_HOME") or omb_env.omb_home()
 TRANSCRIPT_FORMAT = boring_config.agent_config("claude-code").get("format") or "claude-json"
-WINDOW_H = float(os.environ.get("COLLECT_WINDOW_HOURS") or "720")
-MIN_KB = float(os.environ.get("COLLECT_MIN_KB") or "20")
-STABLE_AGE_S = float(os.environ.get("COLLECT_STABLE_AGE_SECONDS") or "1800")
-CLAMP = int(os.environ.get("INGEST_CLAMP") or "4000")  # 12B digest ceiling — above this the agent derails
+match boring_config.collect():
+    case Err(_reason):
+        sys.exit(f"[ingest-worker] {_reason}")
+    case Ok(_collect):
+        pass
+match boring_config.schedule():
+    case Err(_reason):
+        sys.exit(f"[ingest-worker] {_reason}")
+    case Ok(_schedule):
+        pass
+WINDOW_H = _collect.window_hours
+MIN_KB = _collect.min_bytes / 1024
+STABLE_AGE_S = _collect.stable_age_seconds
+# Measured wiki-00000012707 (gemma4:12b, 10 sessions, 30 calls/clamp): 1st-gate misses 7/30 at 4000,
+# 1/30 at 8000, 0/29 at 12000; timeouts 0/30, 0/30, 1/30 (p95 68s/62s/96s of the 120s limit).
+CLAMP = int(os.environ.get("INGEST_CLAMP") or "8000")
 MIN_TEXT = 500  # below this = no real content → skip
 # A pending-marker prevents the same session being re-offered every tick while the agent is still
 # working on it (or just failed). It expires so a crashed tick doesn't pin a session forever.
-PENDING_TTL = float(os.environ.get("INGEST_PENDING_TTL") or "1800")
+PENDING_TTL = _collect.pending_ttl_seconds
 # A retry-marker is a backoff signal, not a terminal state. Once it is stale, Hermes may re-offer it.
-RETRY_TTL = float(os.environ.get("INGEST_RETRY_TTL") or str(PENDING_TTL))
-QUEUE_PER_TICK = int(os.environ.get("BORING_QUEUE_PER_TICK") or "3")
+RETRY_TTL = _collect.retry_ttl_seconds
+QUEUE_PER_TICK = _schedule.queue_per_tick
+# Engine clamps /events at 1000 (drudge/src/serve/http.rs EVENT_LOG_MAX_LIMIT) and marks a page truncated when entries >= the requested limit (~L897): getting this many back means the read may be cut.
+BUDGET_READ_LIMIT = 1000
 
 
 def _repo_slug(cwd):
@@ -214,7 +236,12 @@ def _within_backstop(text):
 
 def _distill(item):
     return distill_run.distill_and_remember(
-        _within_backstop(item.text), item.origin, item.repo, item.session_id, item.since
+        _within_backstop(item.text),
+        item.origin,
+        item.repo,
+        item.session_id,
+        item.since,
+        session_until=item.until,
     )
 
 
@@ -285,10 +312,58 @@ def _log_queue(status, reason="", **fields):
     event_log.try_append_event("hermes-ingest-worker", "ingest_queue", status, reason=reason, **fields)
 
 
+def _hours_since_window_midnight(now):
+    """Whole hours (rounded up, at least 1) from today's WINDOW_TZ midnight to `now`."""
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(1, math.ceil((now - midnight).total_seconds() / 3600))
+
+
+def _budget_state():
+    """Today's (WINDOW_TZ) distillation spend against the daily limit."""
+    match boring_config.distill_budget():
+        case Err(reason):
+            return distill_budget.Unmeasured(reason)
+        case Ok(budget):
+            pass
+    # Engine store only: the local events.ndjson is a failure spool, so reading it would turn an
+    # unreachable engine into a $0 day.
+    # Only today (WINDOW_TZ) is summed, so read back to its midnight: a fixed 48h reaches the 1000-row clamp at ~500 rows/day.
+    now = datetime.now(verdict_core.WINDOW_TZ)
+    rows = event_log.recent_engine_events(
+        BUDGET_READ_LIMIT,
+        component="distill-session",
+        event_name="distill_resolution",
+        since_hours=_hours_since_window_midnight(now),
+    )
+    if rows is None:
+        return distill_budget.Unmeasured("engine events unreadable")
+    # A full page may hide older rows of the day, so it must not be summed as if it were the whole day.
+    if len(rows) >= BUDGET_READ_LIMIT:
+        return distill_budget.Unmeasured(f"events read clamped at {BUDGET_READ_LIMIT}")
+    return distill_budget.judge_day_budget(rows, now.date(), verdict_core.WINDOW_TZ, budget)
+
+
+def _budget_defer_reason(state):
+    """None = go on; else the reason the whole drain waits."""
+    match state:
+        case distill_budget.Within():
+            return None
+        case distill_budget.Exceeded(spent, limit):
+            return f"daily budget: ${spent:.2f} >= ${limit:.2f}"
+        case distill_budget.Unmeasured(reason):
+            return f"daily budget unmeasured: {reason}"
+
+
 def _drain_queue():
     """Distill up to QUEUE_PER_TICK hook-queued sessions, oldest first."""
     items = distill_queue.drain(QUEUE_PER_TICK)
     if not items:
+        return
+    defer_reason = _budget_defer_reason(_budget_state())
+    if defer_reason is not None:
+        print(f"[ingest-worker] queue deferred: {defer_reason}", file=sys.stderr)
+        agents = ",".join(sorted({item.agent for item in items}))
+        _log_queue("deferred", defer_reason, agent=agents, queued=len(items))
         return
     match _reachable():
         case Err(reason):
@@ -346,7 +421,8 @@ def main(argv=None):
         origin, repo, repo_source = _origin_repo(cwd)
         # The shared queue replaces the old printed prompt: enqueue() marks the session pending,
         # and the drain below runs it through the engine in the same tick.
-        distill_queue.enqueue(distill_queue.QueueItem(sid, agent, origin, repo, text))
+        until = transcript.last_timestamp(p)
+        distill_queue.enqueue(distill_queue.QueueItem(sid, agent, origin, repo, text, until=until))
         offered += 1
         _log_worker_event(
             "ingest_offer",
@@ -359,6 +435,7 @@ def main(argv=None):
             source_chars=original_text_chars,
             emitted_chars=len(text),
             clamped=was_clamped,
+            slice_end="missing" if until is None else "transcript",
         )
     # DRAIN — after the offer scan, so a session offered this tick is processed this tick.
     _drain_queue()

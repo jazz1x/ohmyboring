@@ -52,7 +52,7 @@ chmod 600 "$FILE" 2>/dev/null || true
 # retention: keep only the latest $KEEP dumps
 ls -t "$BACKUP_DIR"/ohmyboring_*.dump 2>/dev/null | tail -n +"$((KEEP + 1))" | while IFS= read -r old; do
   echo "[backup] pruning old backup: $old"
-  rm -f "$old"
+  rm -f "$old" "${old%.dump}.surql"
 done
 
 SIZE="$(du -h "$FILE" | cut -f1)"

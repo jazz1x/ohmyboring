@@ -59,6 +59,26 @@ def test_named_ids_in_order_without_duplicates():
     assert named.named_ids("그냥 검색해줘") == []
 
 
+def test_four_and_five_digit_names_each_read_their_own_note():
+    # wiki-1000 과 wiki-10001 이 같이 있는 볼트 — 다섯 자리를 앞 네 자리로 자르면 둘이 뒤바뀐다.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "wiki").mkdir()
+        for note_id in ("wiki-1000", "wiki-10001"):
+            (root / "wiki" / f"{note_id}.md").write_text(
+                f"---\nid: {note_id}\ntitle: {note_id}\n---\n\n본문\n", "utf-8"
+            )
+
+        def answer(query: str) -> str:
+            [note_id] = named.named_ids(query)
+            return note_id + " <- " + str(vault.read_note(str(root), note_id) is not None)
+
+        assert answer("wiki-10001") == "wiki-10001 <- True"
+        assert answer("wiki-1000") == "wiki-1000 <- True"
+        # 여섯 자리는 자르지 않고 그 번호 그대로 찾다가 볼트에 없으면 「못 찾음」
+        assert answer("wiki-100012") == "wiki-100012 <- False"
+
+
 def test_note_block_renders_title_date_and_body_head():
     block = named.note_block("wiki-2121", _NOTE, _split, body_chars=800)
     assert block.startswith("- 노트 wiki-2121 — 카드·주간 브리핑을 hermes 가 실행\n")
@@ -106,8 +126,25 @@ def test_read_note_returns_text_and_none_only_for_missing():
             os.chmod(root / "wiki", 0o755)
 
 
+def test_a_note_is_found_by_its_number_whatever_the_name_width():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "wiki").mkdir()
+        (root / "wiki" / "wiki-00000009572.md").write_text(_NOTE, encoding="utf-8")
+        (root / "wiki" / "wiki-9573.md").write_text(_NOTE, encoding="utf-8")
+        assert vault.read_note(str(root), "wiki-9572") == _NOTE
+        assert vault.read_note(str(root), "wiki-00000009572") == _NOTE
+        assert vault.read_note(str(root), "wiki-00000009573") == _NOTE
+        assert vault.read_note(str(root), "wiki-9574") is None
+        # 같은 번호의 두 표기는 한 노트 — 블록도 한 번만.
+        assert named.named_ids("wiki-9572 과 wiki-00000009572") == ["wiki-9572"]
+        assert named.named_ids("wiki-00000009572 과 wiki-9572") == ["wiki-00000009572"]
+
+
 if __name__ == "__main__":
+    test_a_note_is_found_by_its_number_whatever_the_name_width()
     test_named_ids_in_order_without_duplicates()
+    test_four_and_five_digit_names_each_read_their_own_note()
     test_note_block_renders_title_date_and_body_head()
     test_note_block_body_chars_none_gives_the_whole_body()
     test_note_block_says_missing_out_loud()

@@ -39,6 +39,8 @@ class SearchKnobs:
     related: int = 0
     related_heads: int = 2
     claims: int = 0
+    #: Ask the engine to flag hits over this cosine distance (`over_ceiling: true`); None = no ask.
+    max_dist: float | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class NoteProvenance:
     repo: str | None = None
     author: str | None = None
     judge: str | None = None
+    concepts: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +233,8 @@ class DrudgeClient:
             payload.update(related=knobs.related, related_heads=knobs.related_heads)
         if knobs.claims:
             payload["claims"] = knobs.claims
+        if knobs.max_dist is not None:
+            payload["max_dist"] = knobs.max_dist
         return map_ok(self.request("POST", "/search", payload), _hits_or_empty)
 
     def handover(
@@ -287,6 +292,8 @@ class DrudgeClient:
             payload["supersedes"] = provenance.supersedes
         if provenance.repo:
             payload["repo"] = provenance.repo
+        if provenance.concepts:
+            payload["concepts"] = provenance.concepts
         if provenance.author is not None:
             payload["author"] = provenance.author
         if provenance.judge is not None:
@@ -443,7 +450,18 @@ def _read_remember_reply(data: Any) -> RememberOutcome:
 
 
 def call_remember(  # noqa: PLR0913
-    title, body, origin, repo, tags, tools, concepts, claims, session_id="", sources=None, session_since=None
+    title,
+    body,
+    origin,
+    repo,
+    tags,
+    tools,
+    concepts,
+    claims,
+    session_id="",
+    sources=None,
+    session_since=None,
+    session_until=None,
 ):
     """Call ohmyboring's remember MCP tool.
 
@@ -467,6 +485,8 @@ def call_remember(  # noqa: PLR0913
         arguments["omb_session_id"] = session_id
     if session_since is not None:
         arguments["omb_session_since"] = str(int(session_since))
+    if session_until is not None:
+        arguments["omb_session_until"] = str(int(session_until))
     req = _remember_request(arguments)
 
     max_retries = int(os.environ.get("DISTILL_REMEMBER_RETRIES") or "2")

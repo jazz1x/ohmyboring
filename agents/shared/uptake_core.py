@@ -507,6 +507,28 @@ def consumption_detail(records, transcript_text):
     return used, contested, supersedes, reasons
 
 
+#: Per-note entries one session event may carry. The ledger rows die at session end, so the event
+#: is the only place a per-note answer survives; 50 keeps a long session's event a few KB.
+NOTE_DETAIL_CAP = 50
+
+
+def note_detail(records, transcript_text, cap=NOTE_DETAIL_CAP):
+    """`(entries, handed)` — per handed note `{note, used, handed_ts}`, used ones first, at most `cap`.
+
+    `handed` is the count before the cut, so a reader can see when the list was clamped. `used` is
+    `consumption_detail`'s verdict (a sentence that only reports writing a note down does not
+    count), so it can sit a few notes below the `used_hits` sum, which stays the frozen §2 scorer.
+    """
+    used, _contested, _supersedes, _reasons = consumption_detail(records, transcript_text)
+    handed_at = {}
+    for record in records or []:
+        for hit in record.get("hits") or []:
+            handed_at.setdefault(note_path(hit), record.get("ts"))
+    entries = [{"note": path, "used": path in used, "handed_ts": ts} for path, ts in handed_at.items()]
+    entries.sort(key=lambda entry: not entry["used"])
+    return entries[:cap], len(entries)
+
+
 def consumption(records, transcript_text):
     """`(used, contested, supersedes)` — what this session did with the notes it was handed."""
     used, contested, supersedes, _ = consumption_detail(records, transcript_text)

@@ -23,6 +23,12 @@ TIMEOUT = 2
 
 HEADER = "지켜야 할 규칙 (소유자가 바로잡은 것):"
 
+#: Who matches triggers. Default (unset, or anything but "python"): the engine, via
+#: POST /rules/match — the hook sends the prompt and gets the firing rules back.
+#: BORING_RULES_MATCHER=python is the rollback: GET /rules and match here with `fired`.
+MATCHER_ENV = "BORING_RULES_MATCHER"
+MATCHER_PYTHON = "python"
+
 _SPLIT = re.compile(r"[|\s]+")
 
 
@@ -55,25 +61,36 @@ def _source_name(path: str) -> str:
 
 
 def run_rules(data: dict, is_injection: Callable[[dict], bool]) -> None:
-    """Fetch the door's rules, inject the ones whose triggers fire, record the firings.
+    """Ask the engine which rules fire on the prompt, inject them, record the firings.
 
-    The door's GET /rules holds owner corrections as claims (kind='rule': a 'rule'
-    sentence plus its 'trigger' words per subject). Every prompt fetches them, keeps
-    the ones whose trigger matches, and injects them as additionalContext. Any failure
+    Owner corrections are claims (kind='rule': a 'rule' sentence plus its 'trigger'
+    words per subject). The engine matches the triggers (POST /rules/match); the
+    firing rules are injected as additionalContext. Any failure
     is one stderr line and nothing on stdout — a dead door never costs the user a
     prompt. Each firing is recorded as a rule_fired event so fired rules can later be
     counted against broken ones.
     """
     if is_injection(data):
         return
-    door_url = omb_env.door_url()
+    door_url = omb_env.door_url().rstrip("/")
+    prompt = data.get("prompt") or ""
+    if os.environ.get(MATCHER_ENV) == MATCHER_PYTHON:
+        request: str | urllib.request.Request = f"{door_url}/rules"
+    else:
+        request = urllib.request.Request(
+            f"{door_url}/rules/match",
+            data=json.dumps({"prompt": prompt}).encode(),
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
     try:
-        with urllib.request.urlopen(f"{door_url.rstrip('/')}/rules", timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as resp:
             payload = json.load(resp)
     except (OSError, ValueError) as e:  # URLError/HTTPError/timeout/JSON — one class: the door is gone
         print(f"[omb-rules] rules fetch failed: {e}", file=sys.stderr)
         return
-    hits = fired(payload.get("rules") or [], (data.get("prompt") or ""))
+    rules = payload.get("rules") or []
+    hits = fired(rules, prompt) if os.environ.get(MATCHER_ENV) == MATCHER_PYTHON else rules
     if not hits:
         return
     lines = [HEADER]

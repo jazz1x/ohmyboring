@@ -13,55 +13,37 @@ The write door stays gated, deterministic, and observable; the read door stays f
 
 ## Current Slice
 
-**Injection-channel demand verdict** (2026-08-31 → 09-14 — the first window was reset for an instrumentation fault, PRD §8 D1; no threshold changed). Derived from **[R1]** and the PRD's
-§2 contract. The instrumentation shipped; this slice spends the window collecting, and ships no
-change to the channel being measured.
+**Memory management and use.** Storing knowledge is fine; how it is managed and used now matters
+more. The slice is these five steps, in this order. Each step after the first gets its own
+contract, and that contract names the requirement it carries.
 
 In scope:
 
-- Run the uptake window to its end — treatment and control counts per session **[R1]**.
-- Accumulate labels: the daily pass collects 24, and human `--audit` runs alongside **[R1]**.
-- Two documents: remove the throttle falsehood from the Claude adapter README, and keep this
-  file in step with the PRD **[R1]**.
+1. Measure use path by path, reads only **[R1]**.
+2. Put verdicts and freshness into ranking **[R2]**.
+3. Reduce the paths nobody uses.
+4. Close finished next-actions, group what is related, and name it.
+5. Turn the morning card into advice.
+
+Also in scope:
+
 - Confirm delivery the day a PR merges — `/health.build_sha == HEAD` plus the installer run — for
   anything that reaches `drudge/` or `~/.hermes`. Seven times now a merge has left production on
   the old build, twice on 2026-09-02 alone **[R4]**.
-- Mid-window progress check on 2026-09-08: fewer than 10 scored sessions turns the window into an
-  instrumentation investigation rather than a wait **[R1]**.
-- Measure what a file-scoped anchor lookup would return, without building the surface that would
-  do it — `make anchor-shadow`, over transcripts already on disk **[R1]**. A PostToolUse hook was
-  the obvious shape and is the wrong one twice over: it is an eighth delivery path to get wrong,
-  and calling `/search` from it writes rows into `query_log`, which is exactly where
-  `label-recall.py` samples from — the shadow lookup would enter M1's sample as a query that was
-  never injected. Injecting from it would also change the transcript and contaminate the treatment
-  arm's echo. The transcripts hold every Edit and Write with its path, so the number comes out of
-  data that already exists.
 
-Not enforced by this slice, and why:
+Out of scope for this slice:
 
-- **[R7]** (injection surfaces as declaration rather than per-adapter code) is adopted in the PRD
-  but carries no gate here. Its first consumer is the PostToolUse surface, which this slice only
-  shadow-logs; writing the declaration format before a second surface actually exists would be
-  the speculative taxonomy the PRD warns against. It enters scope with the 09-15 slice.
-
-Out of scope for this slice — and why:
-
-- **Any change to injection frequency, budget, position, or ranking.** The window's sample is
-  defined on the current channel; changing it mid-window voids the contract **[R1]**.
-- **Distillation changes**, including R3's derived work. They change the notes the channel will
-  inject, so they are not orthogonal to the measurement. Starts after 09-14 **[R3]**.
 - Bulk vault mutation, renumbering, DB reset **[R4]**.
-
-Work that is orthogonal to the channel — gate hardening, schema parity, doc corrections — stays
-allowed. The discipline is "do not touch the thing being measured", not "do not build".
 
 Requirements this slice carries no new work for, and why:
 
+- **[R3]** is not one of the five steps.
 - **[R5]** boundaries (origin split, PII gate, injection fence) are in place and enforced by the
   existing gates; this slice guards against regression only. The `forget` path-traversal question
   is the one open item and it is the owner's to confirm.
-- **[R6]** the read door is deliberately frozen: its parameters are the thing being measured.
-  Changing budget, position, or throttle mid-window voids the §2 contract.
+- **[R6]** is not one of the five steps; the read door stays fast and LLM-free.
+- **[R7]** (injection surfaces as declaration rather than per-adapter code) is adopted in the PRD
+  but carries no gate here, and it is not one of the five steps.
 
 ## Verification Contract [R4]
 

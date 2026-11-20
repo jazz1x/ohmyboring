@@ -24,7 +24,10 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import recall_core  # noqa: E402
+import vault_note  # noqa: E402
+import yaml  # noqa: E402
 
+from ohmyboring.adapters import vault as vault_notes  # noqa: E402
 from ohmyboring.adapters.engine import (  # noqa: E402, F401 — OWNER 은 secretary.py 가 secretary_core.OWNER 로 다시 쓴다
     OWNER,
     DrudgeClient,
@@ -32,6 +35,7 @@ from ohmyboring.adapters.engine import (  # noqa: E402, F401 — OWNER 은 secre
     SearchKnobs,
     Verdict,
 )
+from ohmyboring.remember.graph import has_han, slugify  # noqa: E402
 from ohmyboring.result import Err, Ok  # noqa: E402
 
 #: How many notes an answer carries. Three is what the prompt hook injects; a person reading in
@@ -161,6 +165,33 @@ def _first_sentence(text: str, limit: int = 60) -> str:
     return head[:cut][:limit]
 
 
+def inherited_concepts(paths: list[str], vault_dir: str) -> list[str]:
+    """The concepts of the notes a correction replaces, in order, deduped, at most six — only
+    names the graph would keep (a slug and no Han, graph.py). The vault is the only place a
+    note's concepts live that the answer text can reach by path; a note the vault does not hold
+    (or a frontmatter that does not parse) contributes none and says so on stderr."""
+    found: list[str] = []
+    for path in paths:
+        note_id = path.rsplit("/", 1)[-1].removesuffix(".md")
+        text = vault_notes.read_note(vault_dir, note_id)
+        split = vault_note.split_frontmatter(text) if text is not None else None
+        if split is None:
+            print(f"[secretary] no frontmatter to inherit concepts from: {path}", file=sys.stderr)
+            continue
+        try:
+            front = yaml.safe_load(split[0])
+        except yaml.YAMLError as e:
+            print(f"[secretary] frontmatter unreadable for {path}: {e}", file=sys.stderr)
+            continue
+        names = front.get("concepts") if isinstance(front, dict) else None
+        for name in names if isinstance(names, list) else []:
+            if not isinstance(name, str) or has_han(name) or not slugify(name):
+                continue
+            if name not in found:
+                found.append(name)
+    return found[:6]
+
+
 def correct(
     answer_key: str,
     question: str,
@@ -169,6 +200,7 @@ def correct(
     remember: Callable[..., dict] | None = None,
     *,
     author: str | None = None,
+    vault_dir: str | None = None,
 ) -> dict:
     """A thread reply of "정정: …" turned into a new note that replaces the answer's notes. With a
     number ("정정 2:") only that one note is superseded — 1-based, in the order the answer listed
@@ -190,6 +222,7 @@ def correct(
     provenance = NoteProvenance(
         tags=["correction", "slack"],
         supersedes=supersedes,
+        concepts=inherited_concepts(supersedes, vault_dir or os.environ.get("BORING_VAULT_DIR") or "/vault"),
         author=author,
         judge=author,
     )

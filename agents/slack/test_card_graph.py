@@ -41,6 +41,7 @@ CARD_CH = "C1"
 SESSION = f"slack:{CARD_CH}:{CARD_TS}"
 
 FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: 정리하고 재작성할 것", "sources": ["next_action", "loop"]},
     "/risks": {"answer": "risk: 엔진 문 응답 지연", "sources": ["f64_risk", "essential_mode"]},
     "/stalled": {"answer": "stalled: 대기 중인 병합", "sources": ["draft_wiring"]},
@@ -90,6 +91,7 @@ NOTE_TEXTS = {
 # The resting-skip tests' world: three subjects, one per bottleneck register slot,
 # each resolving to its own note, no recurrences, no past approvals.
 SKIP_FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: 없음", "sources": []},
     "/risks": {"answer": "risk: 알파와 베타", "sources": ["alpha_subj", "beta_subj"]},
     "/stalled": {"answer": "stalled: 감마", "sources": ["gamma_subj"]},
@@ -378,6 +380,11 @@ def _blocks_text(blocks) -> str:
 
 class GraphTests(unittest.TestCase):
     def setUp(self):
+        # card.py reads note_links from the host boring.json; boring.example.json ships links,
+        # which lengthen every row and move the char-budget cut on a fresh clone.
+        links = mock.patch.object(card.boring_config, "note_links", return_value=())
+        links.start()
+        self.addCleanup(links.stop)
         self.sends = []
         self.handovers = []
         self.stubs = Stubs()
@@ -1005,8 +1012,8 @@ class GraphTests(unittest.TestCase):
         self.assertNotIn("card_row", [e for e, _ in stubs.records])
 
     def test_every_row_the_card_left_out_leaves_one_whole_card_row_and_no_record_that_it_was_seen(self):
-        # 4,500 chars leaves a row out of every lane: the repair, all three advice rows, the
-        # third review, the second sample. Each is kept whole in card_row (shown False) so the
+        # 4,500 chars leaves a row out of every lane: the repair, the third advice row (advice
+        # gives way last), all three reviews, the second sample. Each is kept whole in card_row (shown False) so the
         # [더보기] page can draw it; "seen" records (card_proposal, verdict_sample_shown, the
         # handover's paths) exist only for what rode, so a row nobody opened is tomorrow's candidate.
         reviews = [
@@ -1026,16 +1033,20 @@ class GraphTests(unittest.TestCase):
         left = [f for e, f in stubs.records if e == "card_row" and f["shown"] is False]
         self.assertEqual(
             [(f["idx"], f["lane"]) for f in left],
-            [(0, "repair"), (1, "advice"), (2, "advice"), (3, "advice"), (6, "review"), (8, "sample")],
+            [(0, "repair"), (3, "advice"), (4, "review"), (5, "review"), (6, "review"), (8, "sample")],
         )
         self.assertEqual({f["card_ts"] for f in left}, {CARD_TS})
         self.assertTrue(all(f["detail"]["item"] and "total" in f["detail"] for f in left))
         self.assertEqual(
             [f["detail"]["item"]["session_id"] for f in left if f["lane"] in ("review", "sample")],
-            ["sr2", self._sample(2).session_id],
+            ["sr0", "sr1", "sr2", self._sample(2).session_id],
         )
-        self.assertNotIn("card_proposal", [e for e, _ in stubs.records])
-        self.assertEqual(self.handovers[-1][2], [])
+        shown_notes = EXPECTED_NOTES[:2]
+        self.assertEqual(
+            [f["note"] for e, f in stubs.records if e == "card_proposal"],
+            shown_notes,
+        )
+        self.assertEqual(self.handovers[-1][2], shown_notes)
         seen = [f["session_id"] for e, f in stubs.records if e == "verdict_sample_shown"]
         self.assertEqual(seen, [self._sample(1).session_id])
         lines = [b["block_id"] for b in self.sends[-1] if b["type"] == "section" and "accessory" in b]
@@ -1279,6 +1290,7 @@ PATH_SEARCH_HITS = [
     {"source_path": "/vault/wiki/wiki-0896.md", "snippet": "unrelated", "claims": []},
 ]
 SUFFICIENCY_FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: none", "sources": []},
     "/risks": {"answer": "risk: none", "sources": []},
     "/stalled": {"answer": "stalled: none", "sources": []},
@@ -1320,6 +1332,7 @@ TOPIC_NOTE_TEXTS = {
     "/vault/wiki/note-c.md": "머리말\n세 번째 다른 노트의 본문입니다\n끝",
 }
 TOPIC_FETCH_DATA = {
+    "/decisions": {"answer": "No decisions recorded yet.", "sources": [], "items": []},
     "/next_actions": {"answer": "next: none", "sources": []},
     "/risks": {"answer": "risk: 하나", "sources": [TOPIC_SUBJECT]},
     "/stalled": {"answer": "stalled: none", "sources": []},
@@ -2180,14 +2193,18 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-0700.md",
+                    "note": "/vault/wiki/wiki-00000000700.md",
                     "kind": "contested",
                     "reason": "채점기가 잡은 문장입니다.",
                 },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-0701.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-2",
+                    "note": "/vault/wiki/wiki-00000000701.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-28T00:00:00+00:00",
             },
         ]
@@ -2201,7 +2218,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-new",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "첫째 근거 문장입니다.",
                 },
@@ -2210,13 +2227,17 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-old",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                 },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-other", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-other",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-28T00:00:00+00:00",
             },
         ]
@@ -2234,11 +2255,19 @@ class LiveProposedTests(unittest.TestCase):
     def test_a_pair_held_within_the_ire_window_stays_off_the_card(self):
         rows = [
             {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "contested",
+                },
                 "observed_at": "2026-09-30T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2498.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-2",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
         ]
@@ -2246,7 +2275,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "1.0",
                     "sessions": ["s-1"],
@@ -2269,11 +2298,15 @@ class LiveProposedTests(unittest.TestCase):
     def test_a_malformed_hold_row_raises_not_skips(self):
         rows = [
             {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2498.md", "kind": "contested"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000002498.md",
+                    "kind": "contested",
+                },
                 "observed_at": "2026-09-30T00:00:00+00:00",
             }
         ]
-        held = [{"attributes": {"choice": "defer", "note": "/vault/wiki/wiki-2498.md"}}]
+        held = [{"attributes": {"choice": "defer", "note": "/vault/wiki/wiki-00000002498.md"}}]
         with mock.patch.object(card_live, "_live_events", side_effect=self._events(rows, held=held)):
             with self.assertRaises(ValueError):
                 card_live._live_proposed(24)
@@ -2285,14 +2318,18 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "채점이 잡은 옛 문장",
                 },
                 "observed_at": "2026-09-30T00:00:00+00:00",
             },
             {
-                "attributes": {"session_id": "s-2", "note": "/vault/wiki/wiki-2300.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-2",
+                    "note": "/vault/wiki/wiki-00000002300.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T00:00:00+00:00",
             },
         ]
@@ -2300,7 +2337,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "1.0",
                     "choice": "delegate",
@@ -2316,8 +2353,8 @@ class LiveProposedTests(unittest.TestCase):
         self.assertEqual(
             [(p.note, p.kind) for p in out],
             [
-                ("/vault/wiki/wiki-2498.md", "contested"),
-                ("/vault/wiki/wiki-2300.md", "used"),
+                ("/vault/wiki/wiki-00000002498.md", "contested"),
+                ("/vault/wiki/wiki-00000002300.md", "used"),
             ],
         )
         self.assertEqual(out[0].reason, "모델이 본 이유")
@@ -2330,7 +2367,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "원래 근거 문장",
                 },
@@ -2339,7 +2376,7 @@ class LiveProposedTests(unittest.TestCase):
         ]
         base = {
             "session_id": "s-1",
-            "note": "/vault/wiki/wiki-2498.md",
+            "note": "/vault/wiki/wiki-00000002498.md",
             "proposed_kind": "contested",
             "card_ts": "1.0",
             "choice": "delegate",
@@ -2364,7 +2401,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "kind": "contested",
                     "reason": "원래 근거 문장",
                 },
@@ -2375,7 +2412,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "1.0",
                     "choice": "delegate",
@@ -2387,7 +2424,7 @@ class LiveProposedTests(unittest.TestCase):
             {
                 "attributes": {
                     "session_id": "s-1",
-                    "note": "/vault/wiki/wiki-2498.md",
+                    "note": "/vault/wiki/wiki-00000002498.md",
                     "proposed_kind": "contested",
                     "card_ts": "2.0",
                     "choice": "delegate",
@@ -2405,15 +2442,19 @@ class LiveProposedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as vault:
             wiki = os.path.join(vault, "wiki")
             os.makedirs(wiki)
-            with open(os.path.join(wiki, "wiki-2216.md"), "w", encoding="utf-8") as f:
-                f.write("---\nid: wiki-2216\ntitle: '폴더 관례'\nproject: ohmyboring\n---\nbody\n")
-            with open(os.path.join(wiki, "wiki-2300.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(wiki, "wiki-00000002216.md"), "w", encoding="utf-8") as f:
+                f.write("---\nid: wiki-00000002216\ntitle: '폴더 관례'\nproject: ohmyboring\n---\nbody\n")
+            with open(os.path.join(wiki, "wiki-00000002300.md"), "w", encoding="utf-8") as f:
                 f.write(
-                    "---\nid: wiki-2300\ntitle: 구조 개편 조각 3d\nproject: ohmyboring\n"
+                    "---\nid: wiki-00000002300\ntitle: 구조 개편 조각 3d\nproject: ohmyboring\n"
                     "date: 2026-09-29\nomb_session_id: s-1\n---\nbody\n"
                 )
             row = {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-2216.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000002216.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T23:54:47+00:00",
             }
             with (
@@ -2429,14 +2470,18 @@ class LiveProposedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as vault:
             wiki = os.path.join(vault, "wiki")
             os.makedirs(wiki)
-            with open(os.path.join(wiki, "wiki-0100.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(wiki, "wiki-00000000100.md"), "w", encoding="utf-8") as f:
                 f.write("---\ntitle: 첫 노트\nproject: p\ndate: 2026-09-01\nomb_session_id: s-1\n---\nb\n")
-            with open(os.path.join(wiki, "wiki-0200.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(wiki, "wiki-00000000200.md"), "w", encoding="utf-8") as f:
                 f.write("---\ntitle: 둘째 노트\nproject: p\ndate: 2026-09-02\nomb_session_id: s-1\n---\nb\n")
-            with open(os.path.join(wiki, "wiki-0300.md"), "wb") as f:
+            with open(os.path.join(wiki, "wiki-00000000300.md"), "wb") as f:
                 f.write(b"---\ntitle: \xff\xfe broken\n---\n")
             row = {
-                "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0300.md", "kind": "used"},
+                "attributes": {
+                    "session_id": "s-1",
+                    "note": "/vault/wiki/wiki-00000000300.md",
+                    "kind": "used",
+                },
                 "observed_at": "2026-09-29T23:54:47+00:00",
             }
             with (
@@ -2458,7 +2503,11 @@ class LiveProposedTests(unittest.TestCase):
                             f"---\ntitle: {title}\nproject: p\ndate: {day}\nomb_session_id: s-1\n---\nb\n"
                         )
                 row = {
-                    "attributes": {"session_id": "s-1", "note": "/vault/wiki/wiki-0900.md", "kind": "used"},
+                    "attributes": {
+                        "session_id": "s-1",
+                        "note": "/vault/wiki/wiki-00000000900.md",
+                        "kind": "used",
+                    },
                     "observed_at": observed_at,
                 }
                 with (
@@ -2668,7 +2717,7 @@ class ScoreAndSampleTests(unittest.TestCase):
     POP = [
         cc.ProposedVerdict(
             session_id=f"s{i}",
-            note=f"/vault/wiki/wiki-{100 + i}.md",
+            note=f"/vault/wiki/wiki-{100 + i:011}.md",
             kind="used",
             at=f"2026-10-0{i + 1}T00:00:00+00:00",
         )
@@ -2739,9 +2788,9 @@ class ScoreAndSampleTests(unittest.TestCase):
 
     def test_a_confirm_press_raises_compared_by_one_and_leaves_the_pool(self):
         owner_rows = [
-            _pressed("t1", "agree", "s5", "/vault/wiki/wiki-105.md"),
-            _pressed("t2", "agree", "s6", "/vault/wiki/wiki-106.md"),
-            _pressed("t3", "flip", "s4", "/vault/wiki/wiki-104.md"),
+            _pressed("t1", "agree", "s5", "/vault/wiki/wiki-00000000105.md"),
+            _pressed("t2", "agree", "s6", "/vault/wiki/wiki-00000000106.md"),
+            _pressed("t3", "flip", "s4", "/vault/wiki/wiki-00000000104.md"),
         ]
         before = self._score(owner_rows)
         self.assertEqual(before.score, cc.Scored(agreed=2, compared=3))
@@ -2754,8 +2803,10 @@ class ScoreAndSampleTests(unittest.TestCase):
         self.assertEqual(len(after.samples), 2)
 
     def test_shown_pairs_and_todays_review_rows_are_left_out(self):
-        shown = [_event("t", session_id="s2", note="/vault/wiki/wiki-102.md", proposed_kind="used")]
-        on_lane = [cc.ProposedVerdict(session_id="s0", note="/vault/wiki/wiki-100.md", kind="used", at="t")]
+        shown = [_event("t", session_id="s2", note="/vault/wiki/wiki-00000000102.md", proposed_kind="used")]
+        on_lane = [
+            cc.ProposedVerdict(session_id="s0", note="/vault/wiki/wiki-00000000100.md", kind="used", at="t")
+        ]
         out = self._score([], shown=shown, reviews=on_lane)
         self.assertEqual(out.score, cc.Scored(agreed=0, compared=0))
         self.assertTrue({"s2", "s0"}.isdisjoint(s.session_id for s in out.samples))
@@ -2869,7 +2920,65 @@ class AdviceAheadTests(unittest.TestCase):
         self.assertEqual(len(stubs.propose_calls), 3)
         self.assertEqual(self.sends, [])
         self.assertEqual(self.handovers, [])
-        self.assertEqual([name for name, _ in events if name != aw.EVENT], [])
+        self.assertEqual([name for name, _ in events if name != aw.EVENT], [aw.RUN_EVENT])
+
+    def test_each_candidate_prompt_carries_the_projects_newest_decisions_read_once(self):
+        subjects = [f"결정{i}" for i in range(5)]
+        rows = "\n".join(
+            f"* {s} — decided: 값{i} (kind=decision, confidence=high)" for i, s in enumerate(subjects)
+        )
+        answer = f"Showing 5 of 5 matching claims (limit_applied=false).\n{rows}"
+        door_calls: list[tuple[str, str]] = []
+
+        def fetch(path: str, project: str = "") -> dict:
+            door_calls.append((path, project))
+            if path == "/decisions":
+                items = [
+                    {"subject": s, "source_path": f"/vault/wiki/wiki-{1000 + i}.md"}
+                    for i, s in enumerate(subjects)
+                ]
+                return {"answer": answer, "sources": subjects, "items": items}
+            return FETCH_DATA[path]
+
+        stubs = Stubs(resolutions=RESOLUTIONS)
+        events: list[tuple[str, dict]] = []
+        collabs = self._collabs(stubs)._replace(
+            fetch=fetch, record=lambda name, fields: events.append((name, fields))
+        )
+        card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        run_row = next(fields for name, fields in events if name == aw.RUN_EVENT)
+        self.assertEqual(
+            run_row["decisions"],
+            {"": {"lines": 3, "notes": ["wiki-1000", "wiki-1001", "wiki-1002"]}},
+        )
+        self.assertEqual(len(stubs.propose_calls), 3)
+        self.assertEqual(door_calls.count(("/decisions", "")), 1)
+        # the note numbers ride in /decisions items: no /claim-source round trip per decision row
+        self.assertEqual([c for c in stubs.resolve_calls if c[0] in subjects], [])
+        for prompt in stubs.propose_calls:
+            head, _, rest = prompt.partition("「과거 결정」\n")
+            section = rest.split("\n\n", 1)[0].splitlines()
+            self.assertTrue(rest, prompt)
+            self.assertLessEqual(len(section), 3)
+            for line in section:
+                self.assertRegex(line, r"^- wiki-\d+ — ")
+            self.assertLess(len(head), prompt.index("이 주어가"))
+
+    def test_a_run_with_no_proposal_still_leaves_one_row_with_the_reasons(self):
+        stubs = Stubs(responses=[NOT_WORTH_JSON] * len(CANDIDATE_QUEUE))
+        events: list[tuple[str, dict]] = []
+        collabs = self._collabs(stubs)._replace(record=lambda name, fields: events.append((name, fields)))
+        card.build_advice_graph(collabs).invoke({}, {"configurable": {"thread_id": "t"}})
+        self.assertEqual([name for name, _ in events], [aw.RUN_EVENT])
+        row = events[0][1]
+        self.assertEqual(row["day"], aw.today_kst())
+        self.assertEqual(row["written"], 0)
+        self.assertEqual(row["candidates"], len(CANDIDATE_QUEUE))
+        self.assertEqual(row["calls"], len(CANDIDATE_QUEUE))
+        self.assertEqual(row["proposals_passed"], 0)
+        self.assertEqual(row["not_worth"], len(CANDIDATE_QUEUE))
+        self.assertEqual(row["not_worth_reasons"], ["근거가 약하다"] * len(CANDIDATE_QUEUE))
+        self.assertEqual((row["unresolved"], row["same_note"], row["suppressed"]), (0, 0, 0))
 
     def test_a_still_flagged_rewrite_is_stored_as_the_original_and_marked(self):
         stubs = Stubs()
@@ -2912,6 +3021,18 @@ class AdviceAheadTests(unittest.TestCase):
             got = card_live._live_advice_written()
         self.assertEqual([p.subject for p in got], ["f64_risk"])
         self.assertEqual(asked, [(aw.EVENT, aw.WINDOW_HOURS)])
+
+
+class WorkAtFallbackTests(unittest.TestCase):
+    def test_no_note_by_proposal_day_names_the_smallest_wiki_number(self) -> None:
+        # `_session_works` is string-sorted, so wiki-10000 comes ahead of wiki-9999.
+        # An unnumbered note (daily-brief-*) is stored as number 0 and must not win.
+        notes = [
+            (0, "2026-11-03", "daily"),
+            (10000, "2026-11-02", "work 10000"),
+            (9999, "2026-11-01", "work 9999"),
+        ]
+        self.assertEqual(card_live._work_at(notes, "2026-10-01"), "work 9999")
 
 
 if __name__ == "__main__":

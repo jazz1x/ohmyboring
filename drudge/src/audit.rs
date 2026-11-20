@@ -31,7 +31,7 @@ fn print_group(label: &str, rows: &[(String, usize)]) {
 }
 
 /// `stats()` return value — used by both the HTTP handler and the CLI.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AuditStats {
     pub total_chunks: usize,
     pub total_files: usize,

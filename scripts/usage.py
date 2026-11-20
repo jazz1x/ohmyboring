@@ -16,6 +16,8 @@ so a rescan costs seconds instead of the ~19s a cold pass over 3 GB takes.
 
 import argparse
 import collections
+import fnmatch
+import glob
 import json
 import os
 import sys
@@ -25,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agents" / "shar
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import distill_core  # noqa: E402
+import verdict_core  # noqa: E402
 
 from ohmyboring import config as boring_config  # noqa: E402
 
@@ -50,8 +53,31 @@ def index_path():
     )
 
 
-def transcript_files():
+#: Orca gives each Claude profile its own home. A profile whose `projects` is a real directory (not a
+#: symlink back to ~/.claude/projects) holds sessions no configured source dir reaches.
+ORCA_PROFILE_PROJECTS = "~/Library/Application Support/orca/claude-profiles/*/home/projects"
+
+
+def _profile_project_dirs():
+    pattern = os.path.expanduser(ORCA_PROFILE_PROJECTS)
+    return [Path(p) for p in sorted(glob.glob(pattern)) if os.path.isdir(p) and not os.path.islink(p)]
+
+
+def _dedupe_by_realpath(paths):
+    seen, out = set(), []
+    for p in paths:
+        real = os.path.realpath(p)
+        if real not in seen:
+            seen.add(real)
+            out.append(p)
+    return out
+
+
+def transcript_files(with_profiles=False):
     """Session transcripts AND the subagent transcripts beside them.
+
+    `with_profiles` adds the Orca profile homes' own `projects` dirs. Off by default because
+    `tool_scope.transcript_files` appends those same dirs itself and would count them twice.
 
     `boring_config.source_dirs` rather than a hardcoded `~/.claude/projects`, so a machine that
     configured its sources somewhere else is not silently reported as having no usage at all.
@@ -65,12 +91,14 @@ def transcript_files():
     """
     out = []
     dirs = boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]
+    if with_profiles:
+        dirs = [*dirs, *_profile_project_dirs()]
     for d in dirs:
         base = Path(d)
         if not base.is_dir():
             continue
         out.extend(sorted(p for p in base.rglob("*.jsonl") if p.is_file()))
-    return out
+    return _dedupe_by_realpath(out)
 
 
 def _lane(path, row):
@@ -121,16 +149,21 @@ def scan_file(path):
       "what did fanning out cost" are different — so they are a separate lane, never a sum.
     """
     totals = collections.defaultdict(lambda: collections.defaultdict(int))
+    titles = {}
     seen = set()
     try:
         fh = open(path, encoding="utf-8", errors="replace")
     except OSError:
-        return {}
+        return {}, {}
     with fh:
         for line in fh:
             try:
                 row = json.loads(line)
             except (ValueError, TypeError):
+                continue
+            if row.get("type") == "custom-title":
+                if row.get("sessionId") and row.get("customTitle"):
+                    titles[row["sessionId"]] = str(row["customTitle"]).replace("|", "/")
                 continue
             if row.get("type") != "assistant":
                 continue
@@ -145,13 +178,15 @@ def scan_file(path):
                 if request_id in seen:
                     continue
                 seen.add(request_id)
-            day = str(row.get("timestamp") or "")[:10]
+            day = verdict_core.window_day(str(row.get("timestamp") or ""))
+            lane = _lane(path, row)
             key = "|".join(
                 (
                     day,
                     str(message.get("model") or "unknown"),
                     _repo_of(row.get("cwd")),
-                    _lane(path, row),
+                    lane,
+                    _seat_in_file(titles, row, lane),
                 )
             )
             bucket = totals[key]
@@ -161,7 +196,38 @@ def scan_file(path):
                     bucket[name] += int(usage.get(name) or 0)
                 except (TypeError, ValueError):
                     pass
-    return {k: dict(v) for k, v in totals.items()}
+    return {k: dict(v) for k, v in totals.items()}, titles
+
+
+#: A subagent file rarely carries the custom-title row, so its rows cannot be named while scanning.
+#: They get this prefix plus the sessionId and `_resolve_seat` swaps in the session's title at fold.
+UNRESOLVED_SEAT = "~"
+
+
+def _seat_in_file(titles, row, lane):
+    """The seat a row belongs to, judged by the titles seen so far in this file (scan order).
+
+    A custom-title row has no timestamp, so only rows after it take the name; earlier rows of a
+    main transcript stay unnamed (""). A subagent row without a title in its own file is left
+    for the fold to resolve through the parent session's title.
+    """
+    session = row.get("sessionId") or ""
+    if session in titles:
+        return titles[session]
+    return UNRESOLVED_SEAT + session if lane == "subagent" and session else ""
+
+
+def _resolve_seat(seat, session_titles):
+    """Unresolved subagent rows take the session's latest title; no title anywhere stays unnamed."""
+    if seat.startswith(UNRESOLVED_SEAT):
+        return session_titles.get(seat[len(UNRESOLVED_SEAT) :], "")
+    return seat
+
+
+#: Prefixed onto each index stamp: entries written before a key field was added carry an older
+#: prefix, so they miss once and get re-read instead of serving totals with the wrong key shape.
+#: kst1 = days on WINDOW_TZ; kst2 = key gained the trailing seat field.
+DAY_BASIS = "kst2"
 
 
 def build_index(files, cached, rescan=False):
@@ -177,18 +243,22 @@ def build_index(files, cached, rescan=False):
             stat = path.stat()
         except OSError:
             continue
-        stamp = f"{stat.st_size}:{int(stat.st_mtime)}"
+        stamp = f"{DAY_BASIS}:{stat.st_size}:{int(stat.st_mtime)}"
         prior = cached.get(str(path))
         if not rescan and prior and prior.get("stamp") == stamp:
             index[str(path)] = prior
             continue
-        index[str(path)] = {"stamp": stamp, "totals": scan_file(path)}
+        totals, titles = scan_file(path)
+        index[str(path)] = {"stamp": stamp, "totals": totals, "titles": titles}
         scanned += 1
     return index, scanned
 
 
 def fold(index, since=None, until=None):
     out = collections.defaultdict(lambda: collections.defaultdict(int))
+    session_titles = {}
+    for entry in index.values():
+        session_titles.update(entry.get("titles") or {})
     for entry in index.values():
         for key, counts in (entry.get("totals") or {}).items():
             day = key.split("|", 1)[0]
@@ -196,13 +266,123 @@ def fold(index, since=None, until=None):
                 continue
             if until and day > until:
                 continue
+            *head, seat = key.split("|")
+            key = "|".join([*head, _resolve_seat(seat, session_titles)])
             for name, value in counts.items():
                 out[key][name] += value
     return out
 
 
+KEY_FIELDS = ("day", "model", "repo", "lane", "seat")
+UNNAMED_SEAT = "(이름 없음)"
+MODEL_FAMILIES = ("fable", "opus", "sonnet", "haiku")
+
+#: Ported in order from ~/.claude/hooks/seat-card.sh:41-43. The hook matches "$name:$word" with
+#: bash `case`, where `word` is the seat name between the first "/" and the closing "]". Patterns
+#: here are fnmatch globs; a literal "[" is spelled "[[]" so fnmatch does not read it as a class.
+EXPECTED_MODEL_PATTERNS = (
+    ("fable", ("[[]global/judge]:*", "[[]global/판정]:*", "[[]global/study]:*")),
+    (
+        "opus",
+        (
+            "[[]global/*:레시피*",
+            "[[]global/*:recipe*",
+            "*:판정*",
+            "*:judge*",
+            "*:오케*",
+            "*:orchest*",
+            "*:ochest*",
+        ),
+    ),
+)
+
+
+def expected_model(seat):
+    """The model family a seat should run on; "" for a seat the hook does not treat as a seat.
+
+    The hook returns before the model case unless the name looks like `[product/word]`.
+    """
+    if not (seat.startswith("[") and "/" in seat and seat.endswith("]")):
+        return ""
+    word = seat.split("/", 1)[1][:-1]
+    subject = f"{seat}:{word}"
+    for family, patterns in EXPECTED_MODEL_PATTERNS:
+        if any(fnmatch.fnmatchcase(subject, p) for p in patterns):
+            return family
+    return "sonnet"
+
+
+def model_family(model_id):
+    return next((f for f in MODEL_FAMILIES if f in model_id), "")
+
+
+def _is_mismatch(expected, actual_model):
+    actual = model_family(actual_model)
+    return bool(expected and actual and actual != expected)
+
+
+def _open_seat_names():
+    """Names beginning with "[" in ~/.claude/sessions-shared/*.json; None when the folder is absent."""
+    folder = os.path.expanduser("~/.claude/sessions-shared")
+    if not os.path.isdir(folder):
+        return None
+    names = []
+    for path in sorted(glob.glob(os.path.join(folder, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                name = json.load(fh).get("name")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(name, str) and name.startswith("["):
+            names.append(name)
+    return names
+
+
+def _print_seat_table(folded, group, limit):
+    others = [g for g in group if g not in ("seat", "model")]
+    picked = [KEY_FIELDS.index(g) for g in others]
+    rolled = collections.defaultdict(lambda: collections.defaultdict(int))
+    for key, counts in folded.items():
+        parts = key.split("|")
+        prefix = " · ".join(parts[i] or "—" for i in picked)
+        seat = parts[4] or UNNAMED_SEAT
+        for name in ("input_tokens", "output_tokens"):
+            rolled[(prefix, seat, parts[1], parts[3] == "main")][name] += counts.get(name, 0)
+    seats_seen = {seat for _, seat, _, _ in rolled}
+    unnamed = sum(
+        v["input_tokens"] + v["output_tokens"] for (_, s, _, _), v in rolled.items() if s == UNNAMED_SEAT
+    )
+    overall = sum(v["input_tokens"] + v["output_tokens"] for v in rolled.values())
+
+    print(f"{'자리':<34} {'기대 모델':<8} {'실제 모델':<28} {'입력':>12} {'출력':>12}  표시")
+    print("-" * 104)
+    ordered = sorted(rolled.items(), key=lambda kv: -kv[1]["output_tokens"])
+    for (prefix, seat, model, is_main), counts in ordered[:limit]:
+        expected = "" if seat == UNNAMED_SEAT else expected_model(seat)
+        # The expected model is the seat's main-session model; workers (subagent/sidechain lanes)
+        # legitimately run elsewhere, so only lane == main rows are checked.
+        mark = "불일치" if is_main and _is_mismatch(expected, model) else ""
+        worker = "" if is_main or "lane" in group else " (워커)"
+        label = f"{prefix} · {seat}" if prefix else seat
+        label += worker
+        print(
+            f"{label:<34} {expected or '—':<8} {model:<28} {_fmt(counts['input_tokens']):>12}"
+            f" {_fmt(counts['output_tokens']):>12}  {mark}"
+        )
+    if len(ordered) > limit:
+        print(f"… {len(ordered) - limit}행 더 (--limit 로 조정)")
+    print("-" * 104)
+    print(f"이름 없음 토큰 {_fmt(unnamed)} / 전체 {_fmt(overall)} (입력+출력, --since/--until 범위 전 행)")
+    open_names = _open_seat_names()
+    if open_names is None:
+        print("열린 자리: 못 잼 (~/.claude/sessions-shared 없음)")
+    else:
+        shown = sum(1 for n in open_names if n in seats_seen)
+        print(f"열린 자리 {len(open_names)} 중 표에 나온 {shown} (범위 전 행의 자리 기준, --limit 무관)")
+
+
 def _rows(folded, group):
-    fields = ("day", "model", "repo", "lane")
+    fields = KEY_FIELDS
     picked = [fields.index(g) for g in group]
     rolled = collections.defaultdict(lambda: collections.defaultdict(int))
     for key, counts in folded.items():
@@ -219,20 +399,21 @@ def _fmt(n):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Token and model usage, read from local transcripts.")
-    ap.add_argument("--group", default="model", help="day,model,repo,lane (comma separated)")
-    ap.add_argument("--since", help="ISO date, inclusive")
-    ap.add_argument("--until", help="ISO date, inclusive")
+    ap.add_argument("--group", default="model", help="day,model,repo,lane,seat (comma separated)")
+    ap.add_argument("--since", help="ISO date on the WINDOW_TZ (UTC+9) calendar, inclusive")
+    ap.add_argument("--until", help="ISO date on the WINDOW_TZ (UTC+9) calendar, inclusive")
     ap.add_argument("--rescan", action="store_true", help="ignore the cached index")
     ap.add_argument("--limit", type=int, default=20)
     args = ap.parse_args(argv)
 
     group = [g.strip() for g in args.group.split(",") if g.strip()]
-    bad = [g for g in group if g not in ("day", "model", "repo", "lane")]
+    bad = [g for g in group if g not in KEY_FIELDS]
     if bad:
         print(f"[usage] 알 수 없는 group: {', '.join(bad)}", file=sys.stderr)
         return 2
 
-    files = transcript_files()
+    files_config = transcript_files()
+    files = transcript_files(with_profiles=True)
     if not files:
         print("[usage] 전사 파일을 못 찾았다 — boring.json 의 session-end source 를 확인하라")
         return 1
@@ -258,6 +439,13 @@ def main(argv=None):
         print("[usage] 그 범위에 사용량이 없다")
         return 1
 
+    print(f"전사 {len(files)}개 · 이번에 읽은 파일 {scanned}개 · 캐시 {path}")
+    print(f"전사 파일: 설정 디렉터리만 {len(files_config)}개 → 오카 프로필 포함 {len(files)}개")
+    print()
+    if "seat" in group:
+        _print_seat_table(folded, group, args.limit)
+        return 0
+
     rolled = _rows(folded, group)
     total = collections.defaultdict(int)
     for counts in rolled.values():
@@ -265,8 +453,6 @@ def main(argv=None):
             total[name] += value
 
     head = " · ".join(group)
-    print(f"전사 {len(files)}개 · 이번에 읽은 파일 {scanned}개 · 캐시 {path}")
-    print()
     print(f"{head:<38} {'메시지':>9} {'입력':>12} {'출력':>12} {'캐시생성':>13} {'캐시읽기':>14}")
     print("-" * 102)
     ordered = sorted(rolled.items(), key=lambda kv: -kv[1]["output_tokens"])

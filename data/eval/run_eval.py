@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import urllib.request
+from dataclasses import dataclass
 
 # The gate scores the predicate the agents actually run, imported rather than restated:
 # a second copy would drift from the shipped behaviour while still reporting green.
@@ -78,7 +79,183 @@ def first_expected_rank(hits, expect):
     return None, None
 
 
+PAIRS = os.path.join(os.path.dirname(__file__), "graph_pairs.json")
+PG_DSN = os.environ.get("BORING_EVAL_PG_DSN") or "postgresql://boring:boring@127.0.0.1:5432/boring"
+WIDE = 20  # how far down the off ranking a target's rank is read
+
+
+def search_full(query, k, related, related_heads, max_tokens=2000):
+    """Like `search` but keeps each hit's `related` and returns None on failure (못 잼, not 0 hits)."""
+    body = json.dumps(
+        {
+            "query": query,
+            "max_results": k,
+            "max_tokens": max_tokens,
+            "related": related,
+            "related_heads": related_heads,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{BORING_URL}/search", data=body, headers={"content-type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read()).get("hits", [])
+    except Exception as e:
+        print(f"search failed for {query!r}: {e}", file=sys.stderr)
+        return None
+
+
+@dataclass(frozen=True)
+class Ground:
+    """What the store says about a pair: the edge score H·T and both updated_at values."""
+
+    shared: int
+    head_at: object
+    target_at: object
+
+
+@dataclass(frozen=True)
+class Invalid:
+    n: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class Valid:
+    n: int
+    target_off_rank: int | None  # rank in the top WIDE of the off ranking, None = not in it
+    target_on: str  # "hit" | "related" | "missing"
+
+
+_SHARED_SQL = (
+    "SELECT coalesce(sum(CASE WHEN a.kind = 'claims' THEN 2 ELSE 1 END), 0)"
+    " FROM edge a JOIN edge b ON a.dst = b.dst AND a.kind = b.kind"
+    " WHERE a.src = %s AND b.src = %s"
+    " AND (a.kind = 'claims' OR (a.kind = 'about' AND a.dst LIKE 'concept:%%'))"
+)
+_UPDATED_SQL = "SELECT source_path, updated_at FROM document WHERE source_path LIKE %s"
+
+
+def ground_from_pg(head, target):
+    """Ground | str. A str is the reason the store could not be read (no psycopg, no DB, missing row)."""
+    try:
+        import psycopg  # CI installs it from requirements.txt; absent -> unmeasurable, not skipped
+    except ImportError as e:
+        return f"cannot measure: psycopg missing ({e})"
+    try:
+        with psycopg.connect(PG_DSN, connect_timeout=5) as conn:
+            rows = {}
+            for name in (head, target):
+                got = conn.execute(_UPDATED_SQL, (f"%/{name}.md",)).fetchall()
+                if len(got) != 1:
+                    return f"cannot measure: {len(got)} document rows for {name}.md (want 1)"
+                rows[name] = got[0]
+            nodes = (f"doc:{rows[head][0]}", f"doc:{rows[target][0]}")
+            (shared,) = conn.execute(_SHARED_SQL, nodes).fetchone()
+            return Ground(int(shared), rows[head][1], rows[target][1])
+    except Exception as e:
+        return f"cannot measure: {type(e).__name__}: {e}"
+
+
+def judge_pair(pair, ground, search):
+    """Invalid(reason) | Valid. Pre-check on the store first, then the off assertion, then the on read."""
+    n, query = pair["n"], pair["query"]
+    head, target = f"eval-mh-{n}-head", f"eval-mh-{n}-target"
+    g = ground(head, target)
+    if isinstance(g, str):
+        return Invalid(n, g)
+    if g.shared < 2:
+        return Invalid(n, f"edge score H·T = {g.shared} (< 2)")
+    if not g.target_at < g.head_at:
+        return Invalid(n, f"T.updated_at {g.target_at} not earlier than H.updated_at {g.head_at}")
+    off = search(query, WIDE, 0, 0, 16384)
+    if off is None:
+        return Invalid(n, "off search failed")
+    ids = source_ids(off)
+    if head not in ids[:K]:
+        return Invalid(n, f"off: H not in top {K} (ids={ids[:K]})")
+    if target in ids[:K]:
+        return Invalid(n, f"off: T already in top {K} at rank {ids.index(target) + 1}")
+    target_off_rank = ids.index(target) + 1 if target in ids else None
+    on = search(query, K, 3, 3)
+    if on is None:
+        return Invalid(n, "on search failed")
+    if target in source_ids(on):
+        where = "hit"
+    elif target in related_names(on):
+        where = "related"
+    else:
+        where = "missing"
+    return Valid(n, target_off_rank, where)
+
+
+def related_names(hits):
+    return [
+        os.path.basename(r.get("source_path") or "").replace(".md", "")
+        for h in hits
+        for r in (h.get("related") or [])
+    ]
+
+
+def simple_lookups_on(queries, search):
+    """(answers in top K, extra docs per query, extra chars per query, failures) with the graph path on."""
+    kept = extra_docs = extra_chars = 0
+    for q in queries:
+        hits = search(q["query"], K, 3, 3)
+        if hits is None:
+            continue
+        ids = source_ids(hits)
+        if any(sid in q["expect"] for sid in ids[:K]):
+            kept += 1
+        seen = set(ids)
+        extra_docs += len({r for r in related_names(hits) if r not in seen})
+        extra_chars += sum(len(r.get("snippet") or "") for h in hits for r in (h.get("related") or []))
+    n = len(queries)
+    return kept, extra_docs / n, extra_chars / n
+
+
+def run_graph(search=search_full, ground=ground_from_pg):
+    """Exit code. Side by side: how many answers the graph path hands over off vs on."""
+    with open(PAIRS, encoding="utf-8") as f:
+        pairs = json.load(f)["pairs"]
+    results = [judge_pair(p, ground, search) for p in pairs]
+    for r in results:
+        match r:
+            case Invalid(n, reason):
+                print(f"pair {n}: INVALID — {reason}")
+            case Valid(n, rank, where):
+                print(f"pair {n}: valid — T off rank {rank if rank else f'>{WIDE}'} · on: {where}")
+    valid = [r for r in results if isinstance(r, Valid)]
+    v = len(valid)
+    a = 0  # off: a valid pair has T outside the top K by construction of the assertion
+    b = sum(1 for r in valid if r.target_on != "missing")
+    print(f"multi-hop off {a}/{v} · on {b}/{v} (valid {v} of {len(pairs)})")
+
+    queries = load_golden().get("queries", [])
+    kept, docs, chars = simple_lookups_on(queries, search)
+    n = len(queries)
+    print(
+        f"simple lookups, graph on: answer in top {K} {kept}/{n} · "
+        f"extra docs/query {docs:.2f} · extra chars/query {chars:.0f}"
+    )
+    print(
+        "scope: synthetic pairs measure plumbing reach (does the graph path hand over the answer) "
+        "and noise on simple lookups; value on real questions is NOT measured here."
+    )
+    if v == 0:
+        print("graph eval: FAIL (no valid pair — denominator 0)")
+        return 1
+    if kept < n:
+        print(f"graph eval: FAIL (regression: {n - kept} of {n} simple lookups lost their answer)")
+        return 1
+    print("graph eval: PASS")
+    return 0
+
+
 def main():
+    if "--graph" in sys.argv[1:]:
+        sys.exit(run_graph())
     golden = load_golden()
     queries = golden.get("queries", [])
     negatives = golden.get("negatives", [])

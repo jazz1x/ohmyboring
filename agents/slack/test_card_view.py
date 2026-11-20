@@ -861,19 +861,19 @@ class CardBudgetTests(unittest.TestCase):
             self.assertGreaterEqual(len(line), 70, line)
             self.assertIn(re.search(r"(\S+)…", line).group(1).lstrip("「*`_"), words, line)
 
-    def test_lanes_give_up_the_second_sample_then_rows_advice_first_then_repairs_then_reviews(self):
+    def test_lanes_give_up_the_second_sample_then_rows_reviews_first_then_repairs_then_advice(self):
         self.assertEqual(
             list(cv._fit_attempts(cv.RowCaps(repairs=2, advice=2, reviews=2), 2))[len(cv.TEXT_MAX_STEPS) :],
             [
                 (cv.TEXT_FLOOR, caps, 1)
                 for caps in (
                     cv.RowCaps(),
-                    cv.RowCaps(advice=1),
-                    cv.RowCaps(advice=0),
-                    cv.RowCaps(advice=0, repairs=1),
-                    cv.RowCaps(advice=0, repairs=0),
-                    cv.RowCaps(advice=0, repairs=0, reviews=1),
-                    cv.RowCaps(advice=0, repairs=0, reviews=0),
+                    cv.RowCaps(reviews=1),
+                    cv.RowCaps(reviews=0),
+                    cv.RowCaps(reviews=0, repairs=1),
+                    cv.RowCaps(reviews=0, repairs=0),
+                    cv.RowCaps(reviews=0, repairs=0, advice=1),
+                    cv.RowCaps(reviews=0, repairs=0, advice=0),
                 )
             ],
         )
@@ -903,6 +903,31 @@ class CardBudgetTests(unittest.TestCase):
         self.assertIn(
             card_i18n.STRINGS["ko"]["overflow_line"].format(n=12 - shown), _blocks_text(fitted.blocks)
         )
+
+    def test_advice_rows_survive_a_review_heavy_card_over_budget(self):
+        proposals = [
+            cc.Proposal(
+                subject=f"주어{i}",
+                note=f"/vault/wiki/wiki-{900 + i:04d}.md",
+                register="stalled",
+                bottleneck="막힌 지점을 설명하는 열 자 넘는 문장",
+                advice=f"조언문{i} 을 열 자 넘게 적은 문장",
+                evidence=[
+                    cc.Evidence(
+                        note=f"/vault/wiki/wiki-{900 + i:04d}.md", quote="근거 인용문 열두자 이상", line=1
+                    )
+                ],
+            )
+            for i in range(3)
+        ]
+        reviews = self._reviews(12)
+        floor = cv.build_blocks(proposals, reviews=reviews, lang="ko", text_max=cv.TEXT_FLOOR)
+        self.assertGreater(cv.card_chars(floor), cv.CARD_CHARS_BUDGET)
+        fitted = cv.fit_card(proposals, reviews=reviews, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), cv.CARD_CHARS_BUDGET)
+        self.assertEqual(fitted.report.left_out.advice, 0)
+        for i in range(3):
+            self.assertIn(f"조언문{i}", _blocks_text(fitted.blocks))
 
     def test_a_card_under_budget_is_left_as_built(self):
         reviews = self._reviews(1)
@@ -1850,6 +1875,85 @@ class MorePageTests(unittest.TestCase):
         failed = cc.Failed(reason="x")
         self.assertIsInstance(cv.more_progress(sent, "advice", failed, lang="ko"), cc.Rejected)
         self.assertIsInstance(cv.more_progress(capped.blocks, "nope", failed, lang="ko"), cc.Rejected)
+
+
+class ValueCarouselCapTests(unittest.TestCase):
+    def test_carousel_rows_past_the_block_cap_move_to_the_more_button(self):
+        sealed = cc.SealedValue(
+            value="옛 값", note="/vault/wiki/wiki-0001.md", superseded_at="2026-10-28T01:00:00Z"
+        )
+        pair = cc.ValuePair(subject="s", predicate="p", value="새 값", prior=sealed)
+        reviews = [
+            cc.ProposedVerdict(
+                session_id=f"sess-{i}",
+                note=f"/vault/wiki/wiki-07{i:02d}.md",
+                kind="used",
+                at="t",
+                pairs=[pair],
+            )
+            for i in range(6)
+        ]
+        built = cv.build_card([], reviews=reviews, lang="ko", block_limit=14)
+        drawn = [b for b in built.blocks if b["type"] == "carousel"]
+        self.assertGreater(len(drawn), 0)
+        self.assertLessEqual(len(built.blocks), 14)
+        self.assertEqual(built.left_out.reviews, 6 - len(drawn))
+        left = [r for r in built.rows if not r.shown]
+        self.assertEqual(len(left), built.left_out.reviews)
+        self.assertEqual(len(_overflows(built.blocks)), 1)
+
+        # The advice lane reserves the review lane's tail at its real size (a carousel row is
+        # four blocks, not three): all two review rows ride, the extra advice rows go to [더보기].
+        proposals = [
+            cc.Proposal(
+                subject=f"주어 {i}",
+                note=f"/vault/wiki/wiki-09{i:02d}.md",
+                register="stalled",
+                bottleneck=f"병목 설명 {i} 열자 이상",
+                advice=f"오늘 할 일 {i} 열자 이상",
+                evidence=[
+                    cc.Evidence(
+                        note="/vault/wiki/wiki-0900.md", quote="근거 인용문 열두자 이상입니다", line=1
+                    )
+                ],
+            )
+            for i in range(5)
+        ]
+        tight = cv.build_card(proposals, reviews=reviews[:2], lang="ko", block_limit=20)
+        self.assertEqual(tight.left_out.reviews, 0)
+        self.assertLessEqual(len(tight.blocks), 20)
+        self.assertGreater(tight.left_out.advice, 0)
+
+        # The 9000-char cap: long values would run past it, so rows go to [더보기] until it holds.
+        long_pair = pair.model_copy(update={"value": "가" * 400})
+        long_rows = [
+            cc.ProposedVerdict(
+                session_id=f"long-{i}",
+                note=f"/vault/wiki/wiki-08{i:02d}.md",
+                kind="used",
+                at="t",
+                pairs=[long_pair],
+            )
+            for i in range(11)
+        ]
+        self.assertGreater(cv.card_chars(cv.build_card([], reviews=long_rows, lang="ko").blocks), 9000)
+        fitted = cv.fit_card([], reviews=long_rows, lang="ko")
+        self.assertLessEqual(cv.card_chars(fitted.blocks), 9000)
+
+        # Failure branch of the pair/Absent split: Absent is a note with no sealed prior; a prior
+        # the engine could not be asked for is its own card, with no drop button on it.
+        review = cc.ProposedVerdict(
+            session_id="s", note="/vault/wiki/wiki-0700.md", kind="used", at="t", pairs_unread=True
+        )
+        blocks = cv.build_card([], reviews=[review], lang="ko").blocks
+        carousel = next(b for b in blocks if b["type"] == "carousel")
+        new_card, prior_card = carousel["elements"]
+        self.assertIn("못 읽었어요", prior_card["body"]["text"])
+        self.assertNotIn("actions", prior_card)
+        self.assertEqual([a["action_id"] for a in new_card["actions"]], ["card:0:do"])
+        top = next(b for b in blocks if b["type"] == "actions")
+        self.assertEqual([a["action_id"].split(":")[-1] for a in top["elements"]][:2], ["delegate", "defer"])
+        self.assertNotIn("card:0:drop", _blocks_text(blocks))
 
 
 if __name__ == "__main__":

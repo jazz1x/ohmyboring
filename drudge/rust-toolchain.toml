@@ -1,3 +1,4 @@
 [toolchain]
-channel = "stable"
+# Dockerfile:3 의 rust 이미지 태그와 같은 판. 올릴 때 두 값을 한 커밋에서 같이 바꾼다.
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]

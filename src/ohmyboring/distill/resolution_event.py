@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from ohmyboring.adapters import events, workflow_contract
+from ohmyboring.adapters import events, llm, workflow_contract
 from ohmyboring.distill import polish
 
 
@@ -39,13 +39,15 @@ def log_resolution_event(  # noqa: PLR0913
             remember_status=remember_status,
             polish_status=polish_status,
             polish_reason=polish_reason,
+            **llm.run_usage_fields(),
             **workflow_contract.resolution_fields(verifier_status, remember_status),
         )
     except OSError as e:
         print(f"[distill-session] event log write failed: {e}", file=sys.stderr)
 
 
-def log_skip_event(session_id, origin, repo, resolution, reason):
+def log_skip_event(session_id, origin, repo, resolution, reason, llm_usage=None):  # noqa: PLR0913
+    """llm_usage: only the in-graph skip passes it; skips before any LLM call carry no llm_* fields."""
     events.try_append_event(
         "distill-session",
         "distill_resolution",
@@ -61,5 +63,6 @@ def log_skip_event(session_id, origin, repo, resolution, reason):
         numbers_kept=0,
         remember_status="skipped",
         reason=reason,
+        **(llm_usage or {}),
         **workflow_contract.skip_fields(),
     )

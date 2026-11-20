@@ -111,7 +111,7 @@
     "allow_company_origin": {
       "type": "boolean",
       "default": false,
-      "description": "When true, origin:company notes (session experience from company work) are accepted corpus and do not flip the audit 'clean' flag. Default false flags them for review. Governs session experience only — company KB originals stay off-policy."
+      "description": "When true, origin:company notes (session experience from company work) are accepted corpus and do not flip the audit 'clean' flag. Default false flags them for review and also leaves them out of the decisions, risks, next_actions and stalled registers. Governs session experience only — company KB originals stay off-policy."
     },
     "repos": {
       "type": "array",
@@ -159,6 +159,56 @@
         }
       },
       "additionalProperties": false
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How often the scheduled work runs. An env variable of the same job (named in each description) takes over from this file.",
+      "properties": {
+        "sync_hours": {"type": "integer", "minimum": 1, "default": 4, "description": "Vault re-index period. Env BORING_SYNC_HOURS."},
+        "compact_hours": {"type": "integer", "minimum": 1, "default": 24, "description": "Database compact period (rides the next sync tick). Env BORING_COMPACT_HOURS."},
+        "brief_hour": {"type": ["integer", "null"], "minimum": 0, "maximum": 23, "default": 8, "description": "Local hour of the daily brief; null = off. Env BORING_BRIEF_HOUR (the engine's compose line BORING_ENGINE_BRIEF_HOUR; `off` = off)."},
+        "ingest_tick_minutes": {"type": "integer", "minimum": 1, "default": 20, "description": "Period of the session-ingest tick (the hermes memory-ingest-worker job and the host codex-ingest job). Applied when `agent_wiring --install` runs."},
+        "queue_per_tick": {"type": "integer", "minimum": 1, "default": 3, "description": "Sessions distilled per ingest tick. Env BORING_QUEUE_PER_TICK."}
+      }
+    },
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Vector index backend of the Rust engine.",
+      "properties": {
+        "backend": {"type": "string", "enum": ["pgvector", "surreal"], "default": "pgvector", "description": "pgvector or surreal. surreal reads vectors from the SurrealDB in `surreal`, frozen at the last `vector-fill`; recurrences stays on pgvector. Any other value does not stop the engine: it runs on pgvector and config_get / the startup log say so."},
+        "surreal": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "SurrealDB connection, used when backend is surreal and by `vector-fill`. Env BORING_SURREAL_URL takes over `url`.",
+          "properties": {
+            "url": {"type": "string", "default": "http://localhost:8000"},
+            "namespace": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "default": "boring"},
+            "database": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "default": "boring"},
+            "user": {"type": "string", "default": "root"},
+            "password_env": {"type": "string", "default": "BORING_SURREAL_PASSWORD", "description": "Name of the env variable holding the password; the password itself never goes in this file."},
+            "ef": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 400, "description": "HNSW query candidate list size (<|k,ef|>)."}
+          }
+        }
+      }
+    },
+    "collect": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which past sessions the collectors pick up. An env variable of the same value (named in each description) takes over from this file.",
+      "properties": {
+        "window_hours": {"type": "integer", "minimum": 1, "default": 720, "description": "Ignore sessions older than this. Env COLLECT_WINDOW_HOURS."},
+        "min_bytes": {"type": "integer", "minimum": 0, "default": 20480, "description": "Skip sessions smaller than this. Env COLLECT_MIN_KB (in KB)."},
+        "stable_age_seconds": {"type": "integer", "minimum": 0, "default": 1800, "description": "A transcript modified more recently than this is still open and is left alone. Env COLLECT_STABLE_AGE_SECONDS."},
+        "pending_ttl_seconds": {"type": "integer", "minimum": 1, "default": 1800, "description": "How long a pending marker holds a session. Env COLLECT_PENDING_TTL / INGEST_PENDING_TTL."},
+        "retry_ttl_seconds": {"type": "integer", "minimum": 1, "description": "How long a retry marker holds a session. When omitted, it follows pending_ttl_seconds (no default of its own). Env COLLECT_RETRY_TTL / INGEST_RETRY_TTL."}
+      }
+    },
+    "checkout_roots": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Directories whose git checkouts the vault hygiene pass compares against project names. ~ is expanded."
     },
     "hermes_cron_jobs": {
       "type": "object",

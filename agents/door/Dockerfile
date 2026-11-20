@@ -6,7 +6,8 @@ WORKDIR /app
 
 # One source of versions: requirements.txt is the whole Python surface here — fastapi/uvicorn/
 # psycopg for the door itself, langgraph/langchain/slack-sdk/pydantic for the card programs
-# the POST /run/* routes execute as subprocesses (installed into the image, not mounted).
+# (the door no longer runs them: hermes cron does, through agents/hermes/card_runner.py).
+# deepagents (pyproject extra `memory`, agents/memory/deep_agent.py) is not installed: no door code imports it.
 COPY requirements.txt requirements.txt
 # requirements.txt names bare psycopg; the slim image has no libpq, so the door needs the binary wheel.
 RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]>=3.2"

@@ -53,6 +53,11 @@ class PolishTests(unittest.TestCase):
         )
         self.assertIsInstance(polish.polish(WALL, "ko", lambda prompt: {"body": table}), polish.Polished)
 
+    def test_a_wiki_id_is_a_fact_in_full_at_four_five_and_six_digits(self):
+        wiki_ids = {"wiki-2278", "wiki-10001", "wiki-100012"}
+        found = {t for t in polish.facts("참고 wiki-2278 wiki-10001 wiki-100012") if t.startswith("wiki-")}
+        self.assertEqual(found, wiki_ids)
+
     def test_a_linter_rule_code_may_be_left_out(self):
         with_code = WALL.replace("참고,", "참고, PLR0913 은 불변 요청 타입,")
         self.assertIsInstance(polish.polish(with_code, "ko", lambda prompt: {"body": TIDY}), polish.Polished)

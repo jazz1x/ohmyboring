@@ -39,7 +39,10 @@ def pick_current(subject: str, rows: list[tuple[str, Any, Any, str]]) -> dict[st
     payload, not just the path. No rows → None, the door's 404."""
     if not rows:
         return None
-    ordered = sorted(rows, key=lambda row: (row[3] == "owner", row[1]), reverse=True)
+    # Tie rule: owner first, valid_from descending, source_path ascending (code point).
+    # The first sort fixes path order; the second is stable, so equal keys keep it.
+    by_path = sorted(rows, key=lambda row: row[0])
+    ordered = sorted(by_path, key=lambda row: (row[3] == "owner", row[1]), reverse=True)
     note, valid_from, value, _ = ordered[0]
     return {
         "subject": subject,

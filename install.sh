@@ -17,8 +17,8 @@ die()  { printf '\033[1;31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 
 # 1) Prerequisites — fail fast with an actionable message (start.sh re-checks in depth).
 say "Checking prerequisites…"
-for c in git docker jq python3 curl; do
-  command -v "$c" >/dev/null 2>&1 || die "$c not found. Need: docker, jq, python3, git, curl, make (+ ollama or any OpenAI-compatible server)."
+for c in git docker jq uv curl; do
+  command -v "$c" >/dev/null 2>&1 || die "$c not found. Need: docker, jq, uv, git, curl, make (+ ollama or any OpenAI-compatible server)."
 done
 # `make up` (below) is this installer's entrypoint into the stack — catch a missing make here,
 # not with a cryptic 'make: command not found' right after this friendly check passes.
@@ -44,7 +44,7 @@ make up
 #    Idempotent + backs up settings files. BORING_WIRE=0 to skip.
 if [ "${BORING_WIRE:-1}" = 1 ]; then
   say "Wiring ohmyboring adapters for enabled agents (Claude hooks + Cursor/Codex MCP + Codex worker)…"
-  if python3 "$BORING_HOME/agents/shared/agent_wiring.py" \
+  if uv run --locked --project "$BORING_HOME" python "$BORING_HOME/agents/shared/agent_wiring.py" \
        --install \
        --boring-home "$BORING_HOME" \
        --server-name ohmyboring \

@@ -217,6 +217,19 @@ def build_batch(rows: list[tuple]) -> list[Req]:
                 "nested": {"list": ["clean", SK_ANT], "token": SK_ANT},
             },
         ),
+        # No live row has ever been written (0 in the 10-24 seed), so replay never samples it.
+        Req(
+            "post",
+            "owner_supersede_refused probe",
+            "/events",
+            {
+                "component": "drudge.owner",
+                "event": "owner_supersede_refused",
+                "status": "warn",
+                "door": "mcp",
+                "targets": ["wiki/wiki-0000.md"],
+            },
+        ),
         Req("get", "get default", "/events", {}),
         Req("get", "get limit=2", "/events?limit=2", {}),
         Req("get", "get limit=5000", "/events?limit=5000", {}),

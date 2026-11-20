@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +45,25 @@ def _door_url() -> str:
 def event_log_path() -> Path:
     raw = os.environ.get("BORING_EVENT_LOG") or DEFAULT_EVENT_LOG
     return Path(os.path.expanduser(raw))
+
+
+def foreign_dsn_refusal(dsn: str, env: Mapping[str, str]) -> str | None:
+    """사본 DB(--dsn != DOOR_PG_DSN)로 사건을 낼 때 라이브·기본 spool 로 새지 않게 하는 한 곳의 판단.
+
+    거부 이유 한 줄, 통과면 None. 문 안 정상 실행(--dsn 미지정 = DOOR_PG_DSN)은 항상 통과한다.
+    """
+    if dsn == env.get("DOOR_PG_DSN", ""):
+        return None
+    if env.get("BORING_EVENT_SINK_URL"):
+        return "BORING_EVENT_SINK_URL 이 명시돼 있다 — 사본 DB 실행은 라이브로 사건을 못 낸다."
+    if env.get("BORING_EVENT_SINK", "").strip().lower() != "spool":
+        return "사본 DB(--dsn)는 BORING_EVENT_SINK=spool 과 임시 BORING_EVENT_LOG 가 있어야 돈다."
+    log = env.get("BORING_EVENT_LOG", "")
+    if not log:
+        return "사본 DB(--dsn)는 BORING_EVENT_LOG 를 임시 파일로 줘야 돈다."
+    if Path(os.path.expanduser(log)).resolve() == Path(os.path.expanduser(DEFAULT_EVENT_LOG)).resolve():
+        return "BORING_EVENT_LOG 가 기본 spool 경로다 — 임시 파일을 줘야 한다."
+    return None
 
 
 def append_event(component: str, event: str, status: str, **fields: Any) -> None:
@@ -257,12 +276,14 @@ def _fetch_engine_events(
     component: str | None = None,
     event_name: str | None = None,
     status: str | None = None,
+    since_hours: int | None = None,
 ) -> list[dict[str, Any]] | None:
     url = _event_sink_url()
     if not url:
         return None
     params = {
         "limit": str(limit),
+        "since_hours": None if since_hours is None else str(since_hours),
         "component": component,
         "event": event_name,
         "status": status,
@@ -309,6 +330,18 @@ def iter_events() -> list[dict[str, Any]]:
         if isinstance(event, dict):
             events.append(event)
     return events
+
+
+def recent_engine_events(
+    limit: int,
+    component: str | None = None,
+    event_name: str | None = None,
+    status: str | None = None,
+    since_hours: int | None = None,
+) -> list[dict[str, Any]] | None:
+    """The engine store only; None = it could not be read. Unlike `recent_events` there is no
+    fallback to the local log, which holds rows only when the DB sink failed."""
+    return _fetch_engine_events(limit, component, event_name, status, since_hours)
 
 
 def recent_events(

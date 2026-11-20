@@ -73,8 +73,8 @@ class RetrieverPipelineTests(unittest.TestCase):
             consumption_counts=lambda conn, paths: Ok({"/a.md": rank.Counts(used=1, contested=2)}),
             said_by_owner_counts=lambda conn, paths: Ok({"/a.md": 1}),
             superseded_by=lambda conn, paths: Ok({"/b.md": ["/b2.md"]}),
-            declared_claims=self.declared,
-            related_by_shared_ground=lambda conn, path, limit: Ok([]),
+            current_claims=self.declared,
+            related_by_shared_ground=lambda conn, path, limit, **_: Ok([]),
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -173,7 +173,7 @@ class RetrieverPipelineTests(unittest.TestCase):
                 self.fail(f"search: {failure}")
         self.assertNotIn("claims", documents[0].metadata)
         self.assertNotIn("claims_total", documents[0].metadata)
-        self.assertEqual(self.declared.call_count, 1, "claims=0 이면 declared_claims 질의도 안 탄다")
+        self.assertEqual(self.declared.call_count, 1, "claims=0 이면 current_claims 질의도 안 탄다")
 
     def test_related_attaches_to_heads_only_with_seen_dedup(self):
         """머리 hit related_heads 개 에만 related, seen(전체 hit 경로) 에 있는 노트는 안 실린다 — http.rs:543-561."""
@@ -193,7 +193,9 @@ class RetrieverPipelineTests(unittest.TestCase):
             ),
         }
         with mock.patch.object(
-            retriever.pg, "related_by_shared_ground", side_effect=lambda conn, path, limit: per_path[path]
+            retriever.pg,
+            "related_by_shared_ground",
+            side_effect=lambda conn, path, limit, **_: per_path[path],
         ):
             match retriever.PgRetriever(dsn=DSN, related=2, related_heads=2).search("q"):
                 case Err(failure):
@@ -258,10 +260,10 @@ class RetrieverPipelineTests(unittest.TestCase):
                 self.fail("related 읽기 실패는 Err — 조용히 related 없이 답하지 않는다")
 
     def test_related_clamps_to_three_and_heads_to_hit_count(self):
-        calls: list[tuple[str, int]] = []
+        calls: list[tuple[str, int, int]] = []
 
-        def fake(conn, path, limit):
-            calls.append((path, limit))
+        def fake(conn, path, limit, min_shared=1):
+            calls.append((path, limit, min_shared))
             return Ok([])
 
         with mock.patch.object(retriever.pg, "related_by_shared_ground", side_effect=fake):
@@ -272,8 +274,9 @@ class RetrieverPipelineTests(unittest.TestCase):
                     pass
         self.assertEqual(
             calls,
-            [("/a.md", 3), ("/c.md", 3), ("/b.md", 3)],
-            "related 는 3 으로, related_heads 는 max_results(기본 5) 안에서 — 실제 hit 세 개",
+            [("/a.md", 3, 2), ("/c.md", 3, 2), ("/b.md", 3, 2)],
+            "related 는 3 으로, related_heads 는 max_results(기본 5) 안에서 — 실제 hit 세 개."
+            " /search 는 공유 점수 2 이상만 붙인다",
         )
 
     def test_embed_failure_is_err(self):

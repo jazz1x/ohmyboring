@@ -1,0 +1,408 @@
+//! `GET /claim-source` — a register subject's current claim, as the note path a card cites.
+//! Same contract as `agents/door/claim_source.py::pick_current`: pure, rows in, struct out.
+//! Struct field order is the JSON key order, so bytes match Python's insertion order.
+
+use chrono::{DateTime, FixedOffset};
+use serde::Serialize;
+
+/// Verbatim from `agents/door/claim_source.py::SQL` (`%s` -> `$1`).
+pub const SQL: &str = "select c.source_path, c.valid_from, c.value, coalesce(d.author, 'unknown') from claim c \
+    left join document d on d.source_path = c.source_path \
+    where c.subject = $1 and c.superseded_at is null \
+    order by c.valid_from desc";
+
+#[derive(Debug, Clone)]
+pub struct ClaimRow {
+    pub source_path: String,
+    pub valid_from: DateTime<FixedOffset>,
+    pub value: String,
+    pub author: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct Candidate {
+    pub note: String,
+    pub valid_from: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ClaimSource {
+    pub subject: String,
+    pub note: String,
+    pub valid_from: String,
+    pub value: String,
+    pub candidates: Vec<Candidate>,
+}
+
+/// What the `subject` query param turned out to be; the handler folds it into a status.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubjectCheck {
+    Blank,
+    Nul,
+    Valid(String),
+}
+
+/// Python `str.isspace()` — Unicode White_Space plus U+001C..U+001F, which `strip()` also eats.
+pub(crate) fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).and_then(|d| u8::try_from(d).ok())
+}
+
+/// `urllib.parse.unquote(s.replace("+", " "), errors="replace")`: a `%` not followed by two hex
+/// digits stays literal; decoded bytes that are not UTF-8 become U+FFFD.
+fn decode_component(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = bytes.get(i + 1).copied().and_then(hex_val);
+        let lo = bytes.get(i + 2).copied().and_then(hex_val);
+        match (bytes[i], hi, lo) {
+            (b'%', Some(h), Some(l)) => {
+                out.push(h * 16 + l);
+                i += 3;
+            }
+            (b'+', _, _) => {
+                out.push(b' ');
+                i += 1;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Starlette `request.query_params.getlist(name)`: `parse_qsl(keep_blank_values=True)`, empty
+/// pairs skipped, a pair without `=` has an empty value, every repeat kept in order.
+pub(crate) fn all_params(raw_query: Option<&str>, name: &str) -> Vec<String> {
+    raw_query
+        .unwrap_or("")
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode_component(key) == name).then(|| decode_component(value))
+        })
+        .collect()
+}
+
+/// Starlette `request.query_params.get(name)`: the last duplicate wins.
+/// `None` when the key is absent, so a caller can tell "missing" from "empty".
+pub(crate) fn last_param_opt(raw_query: Option<&str>, name: &str) -> Option<String> {
+    all_params(raw_query, name).pop()
+}
+
+fn last_param(raw_query: Option<&str>, name: &str) -> String {
+    last_param_opt(raw_query, name).unwrap_or_default()
+}
+
+pub fn check_subject(raw_query: Option<&str>) -> SubjectCheck {
+    check_param(raw_query, "subject")
+}
+
+/// Same verdicts for any single-valued query param (`subject`, `predicate`).
+pub fn check_param(raw_query: Option<&str>, name: &str) -> SubjectCheck {
+    let value = last_param(raw_query, name);
+    if value.trim_matches(is_py_space).is_empty() {
+        SubjectCheck::Blank
+    } else if value.contains('\0') {
+        SubjectCheck::Nul
+    } else {
+        SubjectCheck::Valid(value)
+    }
+}
+
+/// Python renders `valid_from.isoformat(timespec="seconds")`: fractions truncated, `+HH:MM` offset.
+fn iso_seconds(at: &DateTime<FixedOffset>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S%:z").to_string()
+}
+
+/// Owner-written first, then `valid_from` descending, then `source_path` ascending (code point,
+/// which is UTF-8 byte order). Duplicates of one note stay candidates, as in Python.
+pub fn pick_current(subject: &str, mut rows: Vec<ClaimRow>) -> Option<ClaimSource> {
+    rows.sort_by(|a, b| {
+        let owner = |r: &ClaimRow| r.author == "owner";
+        owner(b)
+            .cmp(&owner(a))
+            .then_with(|| b.valid_from.cmp(&a.valid_from))
+            .then_with(|| a.source_path.cmp(&b.source_path))
+    });
+    let candidates = rows
+        .iter()
+        .map(|r| Candidate {
+            note: r.source_path.clone(),
+            valid_from: iso_seconds(&r.valid_from),
+        })
+        .collect();
+    let win = rows.into_iter().next()?;
+    Some(ClaimSource {
+        subject: subject.to_string(),
+        valid_from: iso_seconds(&win.valid_from),
+        note: win.source_path,
+        value: win.value,
+        candidates,
+    })
+}
+
+/// Verbatim from `agents/door/claim_source.py::LIST_SQL` (`%s` -> `$1`).
+pub const LIST_SQL: &str = "select c.subject, c.source_path, c.valid_from, c.value, coalesce(d.author, 'unknown') from claim c \
+    left join document d on d.source_path = c.source_path \
+    where c.predicate = $1 and c.superseded_at is null \
+    order by c.valid_from desc";
+
+#[derive(Debug, Clone)]
+pub struct ListRow {
+    pub subject: String,
+    pub row: ClaimRow,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ClaimList {
+    pub predicate: String,
+    pub claims: Vec<ClaimSource>,
+}
+
+/// One `pick_current` per subject, subjects in code-point order (a `BTreeMap<String, _>` sorts
+/// by UTF-8 bytes, which is code-point order) — never the SQL collation.
+pub fn group_current(predicate: &str, rows: Vec<ListRow>) -> ClaimList {
+    let mut by_subject: std::collections::BTreeMap<String, Vec<ClaimRow>> =
+        std::collections::BTreeMap::default();
+    for r in rows {
+        by_subject.entry(r.subject).or_default().push(r.row);
+    }
+    ClaimList {
+        predicate: predicate.to_string(),
+        claims: by_subject
+            .into_iter()
+            .filter_map(|(subject, rows)| pick_current(&subject, rows))
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<FixedOffset> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s)
+            .unwrap()
+            .fixed_offset()
+    }
+
+    fn row(path: &str, valid_from: DateTime<FixedOffset>, value: &str, author: &str) -> ClaimRow {
+        ClaimRow {
+            source_path: path.into(),
+            valid_from,
+            value: value.into(),
+            author: author.into(),
+        }
+    }
+
+    fn body(subject: &str, rows: Vec<ClaimRow>) -> String {
+        serde_json::to_string(&pick_current(subject, rows).unwrap()).unwrap()
+    }
+
+    // Expected values: Python claim_source.pick_current + Starlette JSONResponse
+    // (ensure_ascii=False, separators=(",", ":")) run with the repo .venv `python -I`, 2026-10-28.
+    #[test]
+    fn owner_older_beats_newer_other() {
+        let rows = vec![
+            row("/b.md", at(2026, 9, 20, 0, 0, 0), "new", "agent:x"),
+            row("/a.md", at(2026, 9, 1, 0, 0, 0), "mine", "owner"),
+        ];
+        assert_eq!(
+            body("s", rows),
+            r#"{"subject":"s","note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00","value":"mine","candidates":[{"note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/b.md","valid_from":"2026-09-20T00:00:00+00:00"}]}"#
+        );
+    }
+
+    #[test]
+    fn newest_wins_among_several_and_input_order_is_irrelevant() {
+        let rows = vec![
+            row("/1.md", at(2026, 9, 1, 0, 0, 0), "v1", "unknown"),
+            row("/2.md", at(2026, 9, 20, 3, 4, 5), "v2", "inferred"),
+            row("/3.md", at(2026, 9, 10, 0, 0, 0), "v3", "agent:hermes"),
+        ];
+        let want = r#"{"subject":"s","note":"/2.md","valid_from":"2026-09-20T03:04:05+00:00","value":"v2","candidates":[{"note":"/2.md","valid_from":"2026-09-20T03:04:05+00:00"},{"note":"/3.md","valid_from":"2026-09-10T00:00:00+00:00"},{"note":"/1.md","valid_from":"2026-09-01T00:00:00+00:00"}]}"#;
+        let mut rev = rows.clone();
+        rev.reverse();
+        assert_eq!(body("s", rows), want);
+        assert_eq!(body("s", rev), want);
+    }
+
+    #[test]
+    fn ties_break_by_source_path_code_point_ascending() {
+        let t = at(2026, 9, 1, 0, 0, 0);
+        let rows = vec![
+            row("/vault/b.md", t, "vb", "unknown"),
+            row("/vault/a.md", t, "va", "unknown"),
+            row("/vault/가.md", t, "vg", "unknown"),
+        ];
+        let want = r#"{"subject":"s","note":"/vault/a.md","valid_from":"2026-09-01T00:00:00+00:00","value":"va","candidates":[{"note":"/vault/a.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/vault/b.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/vault/가.md","valid_from":"2026-09-01T00:00:00+00:00"}]}"#;
+        let mut rev = rows.clone();
+        rev.reverse();
+        assert_eq!(body("s", rows), want);
+        assert_eq!(body("s", rev), want);
+    }
+
+    #[test]
+    fn fractional_seconds_truncate_and_escapes_stay_python_shaped() {
+        let frac = Utc
+            .with_ymd_and_hms(2026, 9, 1, 12, 30, 45)
+            .unwrap()
+            .fixed_offset()
+            + chrono::Duration::microseconds(999_999);
+        let rows = vec![row("/f.md", frac, "f \"q\" \\ \n 한글 🙂", "unknown")];
+        assert_eq!(
+            body("s", rows),
+            r#"{"subject":"s","note":"/f.md","valid_from":"2026-09-01T12:30:45+00:00","value":"f \"q\" \\ \n 한글 🙂","candidates":[{"note":"/f.md","valid_from":"2026-09-01T12:30:45+00:00"}]}"#
+        );
+    }
+
+    #[test]
+    fn duplicate_notes_stay_as_candidates() {
+        let rows = vec![
+            row("/same.md", at(2026, 9, 2, 0, 0, 0), "v", "unknown"),
+            row("/same.md", at(2026, 9, 1, 0, 0, 0), "old", "unknown"),
+        ];
+        assert_eq!(
+            body("s", rows),
+            r#"{"subject":"s","note":"/same.md","valid_from":"2026-09-02T00:00:00+00:00","value":"v","candidates":[{"note":"/same.md","valid_from":"2026-09-02T00:00:00+00:00"},{"note":"/same.md","valid_from":"2026-09-01T00:00:00+00:00"}]}"#
+        );
+    }
+
+    #[test]
+    fn subject_is_echoed_raw() {
+        let rows = vec![row("/a.md", at(2026, 9, 1, 0, 0, 0), "v", "unknown")];
+        assert_eq!(
+            body("한 글 %+", rows),
+            r#"{"subject":"한 글 %+","note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00","value":"v","candidates":[{"note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00"}]}"#
+        );
+    }
+
+    #[test]
+    fn empty_rows_is_none_the_404() {
+        assert_eq!(pick_current("x", vec![]), None);
+    }
+
+    fn valid(s: &str) -> SubjectCheck {
+        SubjectCheck::Valid(s.into())
+    }
+
+    // Expected values: Starlette QueryParams(q).get("subject", "") run with the repo .venv, 2026-10-28.
+    #[test]
+    fn query_decoding_matches_starlette() {
+        let cases: [(&str, SubjectCheck); 12] = [
+            ("subject=%ED%95%9C%EA%B8%80", valid("한글")),
+            ("subject=a+b%20c%25d%2Be", valid("a b c%d+e")),
+            ("subject=a&subject=b", valid("b")),
+            ("subject=a&subject=", SubjectCheck::Blank),
+            ("subject=&subject=z", valid("z")),
+            ("&&subject=q&", valid("q")),
+            ("subject=a=b", valid("a=b")),
+            ("subject=%zz%4", valid("%zz%4")),
+            ("subject=%FFx", valid("\u{fffd}x")),
+            ("subject", SubjectCheck::Blank),
+            ("x=1", SubjectCheck::Blank),
+            ("Subject=a", SubjectCheck::Blank),
+        ];
+        for (q, want) in cases {
+            assert_eq!(check_subject(Some(q)), want, "{q}");
+        }
+        assert_eq!(check_subject(None), SubjectCheck::Blank);
+    }
+
+    // Python str.strip() whitespace: the 29 code points `str.isspace()` accepts, incl. \x1c-\x1f.
+    #[test]
+    fn blank_means_python_strip_is_empty() {
+        for q in [
+            "subject=%1F",
+            "subject=%1f%20",
+            "subject=%E3%80%80",
+            "subject=%C2%85",
+            "subject=+%09%0A",
+            "subject=%1C%1D%1E",
+        ] {
+            assert_eq!(check_subject(Some(q)), SubjectCheck::Blank, "{q}");
+        }
+        assert_eq!(check_subject(Some("subject=%C2%85x")), valid("\u{85}x"));
+    }
+
+    #[test]
+    fn nul_is_its_own_verdict() {
+        assert_eq!(check_subject(Some("subject=a%00b")), SubjectCheck::Nul);
+        assert_eq!(check_subject(Some("subject=%00")), SubjectCheck::Nul);
+    }
+
+    fn lrow(
+        subject: &str,
+        path: &str,
+        valid_from: DateTime<FixedOffset>,
+        value: &str,
+        author: &str,
+    ) -> ListRow {
+        ListRow {
+            subject: subject.into(),
+            row: row(path, valid_from, value, author),
+        }
+    }
+
+    fn list_body(predicate: &str, rows: Vec<ListRow>) -> String {
+        serde_json::to_string(&group_current(predicate, rows)).unwrap()
+    }
+
+    // Expected values: Python claim_source.group_current + Starlette JSONResponse, `python -I`, 2026-10-28.
+    #[test]
+    fn subjects_come_out_in_code_point_order_one_pick_each() {
+        let t = at(2026, 9, 1, 0, 0, 0);
+        let frac = at(2026, 9, 3, 1, 2, 3) + chrono::Duration::microseconds(999_999);
+        let rows = vec![
+            lrow("b", "/b1.md", t, "vb", "unknown"),
+            lrow("B", "/B1.md", at(2026, 9, 2, 0, 0, 0), "vB", "unknown"),
+            lrow("가", "/g.md", t, "vg", "unknown"),
+            lrow("a b", "/ab.md", frac, "vab", "unknown"),
+            lrow("_x", "/x.md", t, "vx", "unknown"),
+            lrow("b", "/b0.md", t, "vb0", "unknown"),
+            lrow("a b", "/ab2.md", t, "mine", "owner"),
+        ];
+        let want = r#"{"predicate":"p","claims":[{"subject":"B","note":"/B1.md","valid_from":"2026-09-02T00:00:00+00:00","value":"vB","candidates":[{"note":"/B1.md","valid_from":"2026-09-02T00:00:00+00:00"}]},{"subject":"_x","note":"/x.md","valid_from":"2026-09-01T00:00:00+00:00","value":"vx","candidates":[{"note":"/x.md","valid_from":"2026-09-01T00:00:00+00:00"}]},{"subject":"a b","note":"/ab2.md","valid_from":"2026-09-01T00:00:00+00:00","value":"mine","candidates":[{"note":"/ab2.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/ab.md","valid_from":"2026-09-03T01:02:03+00:00"}]},{"subject":"b","note":"/b0.md","valid_from":"2026-09-01T00:00:00+00:00","value":"vb0","candidates":[{"note":"/b0.md","valid_from":"2026-09-01T00:00:00+00:00"},{"note":"/b1.md","valid_from":"2026-09-01T00:00:00+00:00"}]},{"subject":"가","note":"/g.md","valid_from":"2026-09-01T00:00:00+00:00","value":"vg","candidates":[{"note":"/g.md","valid_from":"2026-09-01T00:00:00+00:00"}]}]}"#;
+        let mut rev = rows.clone();
+        rev.reverse();
+        assert_eq!(list_body("p", rows), want);
+        assert_eq!(list_body("p", rev), want);
+    }
+
+    #[test]
+    fn predicate_is_echoed_raw_and_no_rows_is_an_empty_list() {
+        let rows = vec![lrow("s", "/a.md", at(2026, 9, 1, 0, 0, 0), "v", "unknown")];
+        assert_eq!(
+            list_body("한 글+%", rows),
+            r#"{"predicate":"한 글+%","claims":[{"subject":"s","note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00","value":"v","candidates":[{"note":"/a.md","valid_from":"2026-09-01T00:00:00+00:00"}]}]}"#
+        );
+        assert_eq!(list_body("p", vec![]), r#"{"predicate":"p","claims":[]}"#);
+    }
+
+    #[test]
+    fn predicate_query_uses_the_same_decoding() {
+        assert_eq!(
+            check_param(Some("predicate=%ED%95%9C+%EA%B8%80%2B%25"), "predicate"),
+            valid("한 글+%")
+        );
+        assert_eq!(
+            check_param(Some("subject=a"), "predicate"),
+            SubjectCheck::Blank
+        );
+        assert_eq!(
+            check_param(Some("predicate=a%00"), "predicate"),
+            SubjectCheck::Nul
+        );
+    }
+}

@@ -6,9 +6,12 @@ Run: python3 src/ohmyboring/adapters/test_llm.py   (no pytest dependency)
 
 from __future__ import annotations
 
+import importlib
 import io
 import json
+import os
 import sys
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -16,7 +19,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from ohmyboring import config as omb_env  # noqa: E402
+from ohmyboring.adapters import embed as embedder  # noqa: E402
 from ohmyboring.adapters import llm  # noqa: E402
+from ohmyboring.result import Ok  # noqa: E402
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -104,6 +110,92 @@ class CallLlmTests(unittest.TestCase):
             parsed, _seen = self._call("not json")
         self.assertIsNone(parsed)
         self.assertIn("failed to parse LLM output", err.getvalue())
+
+
+class DistillSplitTests(unittest.TestCase):
+    def test_distill_settings_move_chat_only_and_embed_keeps_the_local_address(self):
+        env = {
+            "BORING_LLM_BASE_URL": "http://local.test/v1",
+            "BORING_LLM_MODEL": "local-chat",
+            "BORING_LLM_API_KEY": "local-key",
+            "BORING_DISTILL_BASE_URL": "http://remote.test/v1",
+            "BORING_DISTILL_MODEL": "remote-chat",
+            "BORING_DISTILL_API_KEY": "remote-key",
+        }
+        seen = {}
+
+        class _Opened:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"data": [{"embedding": [1.0]}]}'
+
+        def opener(req, timeout):
+            seen["embed"] = req
+            return _Opened()
+
+        try:
+            with mock.patch.dict(os.environ, env):
+                importlib.reload(llm)
+                embedder.embed("x", opener=opener)
+                chat = (llm.LLM_BASE_URL, llm.LLM_MODEL, llm.LLM_API_KEY)
+        finally:
+            importlib.reload(llm)
+        self.assertEqual(chat, ("http://remote.test/v1", "remote-chat", "remote-key"))
+        self.assertEqual(seen["embed"].full_url, "http://local.test/v1/embeddings")
+        self.assertEqual(seen["embed"].get_header("Authorization"), "Bearer local-key")
+
+
+class AnthropicProviderTests(unittest.TestCase):
+    def test_anthropic_branch_asks_for_json_schema_output_without_openai_knobs(self):
+        # The SDK is not a locked dependency (only the runtime image ships it), so the test hands
+        # call_llm a stand-in module instead of importing the real one.
+        sdk = types.ModuleType("anthropic")
+        seen = {}
+
+        class _Block:
+            type = "text"
+            text = '{"title": "t", "body": "b"}'
+
+        class _Resp:
+            stop_reason = "end_turn"
+            content = [_Block()]
+
+            class usage:
+                input_tokens = 7
+                output_tokens = 3
+
+        class _Messages:
+            def create(self, **kwargs):
+                seen["kwargs"] = kwargs
+                return _Resp()
+
+        class _Client:
+            def __init__(self, **kwargs):
+                seen["client"] = kwargs
+                self.messages = _Messages()
+
+        sdk.Anthropic = _Client
+        err = io.StringIO()
+        with (
+            mock.patch.object(llm, "DISTILL_PROVIDER", Ok(omb_env.AnthropicProvider())),
+            mock.patch.object(llm, "LLM_MODEL", "claude-haiku-5-5"),
+            mock.patch.object(llm, "LLM_API_KEY", "k"),
+            mock.patch.dict(sys.modules, {"anthropic": sdk}),
+            redirect_stderr(err),
+        ):
+            parsed = llm.call_llm("PROMPT")
+        kwargs = seen["kwargs"]
+        self.assertEqual(parsed, {"title": "t", "body": "b"})
+        self.assertEqual(kwargs["output_config"]["format"]["type"], "json_schema")
+        self.assertEqual(kwargs["output_config"]["effort"], "low")
+        for forbidden in ("temperature", "response_format", "reasoning_effort", "thinking"):
+            self.assertNotIn(forbidden, kwargs)
+        self.assertIn("[distill-session] usage input_tokens=7 output_tokens=3", err.getvalue())
 
 
 if __name__ == "__main__":

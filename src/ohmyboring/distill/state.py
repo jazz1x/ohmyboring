@@ -11,6 +11,7 @@ class DistillState(TypedDict, total=False):
     repo: str
     session_id: str
     session_since: float | None
+    session_until: float | None
     resolution: str
     prompt: str
     parsed: dict[str, Any] | None

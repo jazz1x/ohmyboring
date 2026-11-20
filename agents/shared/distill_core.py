@@ -24,6 +24,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers  # noqa: E402
+import note_ref  # noqa: E402
 import repo_table  # noqa: E402
 import transcript  # noqa: E402
 import uptake_core  # noqa: E402
@@ -303,7 +304,7 @@ def write_consumption_to_graph(session_id, records, transcript_text):
                     "verdict_proposed",
                     "ok",
                     session_id=session_id,
-                    note=note,
+                    **note_ref.note_fields(note),
                     kind=kind,
                     judge="inferred",
                     reason=reasons.get((kind, note), ""),
@@ -348,6 +349,7 @@ def log_uptake_event(session_id, repo, transcript_text, agent, *, distill_skippe
         if not records:
             return
         uptake = uptake_core.session_uptake(records, transcript_text)
+        notes, notes_handed = uptake_core.note_detail(records, transcript_text)
         event_log.try_append_event(
             "recall-uptake",
             "injection_uptake",
@@ -369,6 +371,9 @@ def log_uptake_event(session_id, repo, transcript_text, agent, *, distill_skippe
             # question the contract asks. Same denominator as the treatment rate, which is what
             # makes the two comparable as a difference in percentage points.
             used_control_prompts=uptake.used_control_prompts,
+            # Per note, because prune_session below deletes the ledger rows this is computed from.
+            notes=notes,
+            notes_handed=notes_handed,
         )
         write_consumption_to_graph(session_id, records, transcript_text)
         _ok, aged_sessions, aged_rows = uptake_core.prune_session(session_id)

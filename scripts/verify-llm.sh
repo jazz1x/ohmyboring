@@ -157,7 +157,7 @@ if [ "$KNOWN_DIM" != "unknown" ]; then
     if [ "$KNOWN_DIM" = "$EMBED_DIM" ]; then
         ok "embed_dim matches $EMBED_MODEL ($KNOWN_DIM)"
     else
-        bad "embed_dim mismatch: $EMBED_MODEL expects $KNOWN_DIM, but boring.json has $EMBED_DIM — update llm.embed_dim and run 'make reset'"
+        bad "embed_dim mismatch: $EMBED_MODEL expects $KNOWN_DIM, but boring.json has $EMBED_DIM — to change the model: 'make backup-db', edit llm.embed_model + llm.embed_dim in boring.json, then 'make reset', 'make up', 'make verify-llm'"
         errors=$((errors + 1))
     fi
 else
@@ -213,7 +213,7 @@ PY
         if [ "$probe_out" = "$EMBED_DIM" ]; then
             ok "actual embedding dimension is $probe_out"
         else
-            bad "actual embedding dimension mismatch: endpoint returned $probe_out, boring.json has $EMBED_DIM — update llm.embed_dim and run 'make reset'"
+            bad "actual embedding dimension mismatch: endpoint returned $probe_out, boring.json has $EMBED_DIM — to change the model: 'make backup-db', edit llm.embed_model + llm.embed_dim in boring.json, then 'make reset', 'make up', 'make verify-llm'"
             errors=$((errors + 1))
         fi
     else

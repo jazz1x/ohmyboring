@@ -3,10 +3,12 @@ import io
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -36,6 +38,10 @@ class IngestWorkerTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parent.parent.parent
         os.environ["BORING_CONFIG"] = str(repo_root / "boring.json")
         self.addCleanup(self._restore_env)
+        # No engine in tests: an empty day, so the budget gate lets the drain through.
+        engine_events = mock.patch.object(ingest_worker.event_log, "recent_engine_events", return_value=[])
+        engine_events.start()
+        self.addCleanup(engine_events.stop)
 
         # Default scan root lives under a .claude path so the agent axis maps to claude-code.
         self.sessions_root = str(Path(self.tmp.name) / ".claude" / "projects")
@@ -118,6 +124,39 @@ class IngestWorkerTest(unittest.TestCase):
         drained = [e for e in self._events() if e["event"] == "ingest_queue" and e.get("session_id") == "s1"]
         self.assertEqual(drained[-1]["status"], "ok")
 
+    def test_the_engine_receives_the_timestamp_of_the_slices_last_transcript_line(self):
+        root = Path(self.sessions_root) / "proj"
+        root.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "cwd": self.tmp.name,
+                "timestamp": "2026-11-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "q" * 300},
+            },
+            {
+                "cwd": self.tmp.name,
+                "timestamp": "2026-11-01T10:05:30.000Z",
+                "message": {"role": "assistant", "content": "a" * 300},
+            },
+        ]
+        (root / "s-until.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+        _stdout, run = self._run_main()
+        last = datetime(2026, 11, 1, 10, 5, 30, tzinfo=UTC).timestamp()
+        self.assertEqual(run.call_args.kwargs["session_until"], last)
+
+    def test_the_offer_event_says_where_the_slice_end_came_from(self):
+        self._write_session("s-no-ts")  # its only row carries no timestamp
+        root = Path(self.sessions_root) / "proj"
+        row = {
+            "cwd": self.tmp.name,
+            "timestamp": "2026-11-01T10:00:00Z",
+            "message": {"role": "user", "content": "q" * 600},
+        }
+        (root / "s-ts.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        self._run_main()
+        self.assertEqual(self._offer_events("s-ts")[0]["slice_end"], "transcript")
+        self.assertEqual(self._offer_events("s-no-ts")[0]["slice_end"], "missing")
+
     def test_the_worker_takes_origin_and_repo_from_the_host_table(self):
         self._write_session("s-host")
         ingest_worker.repo_table.write(self.tmp.name, "company", "ds-governance")
@@ -165,7 +204,7 @@ class IngestWorkerTest(unittest.TestCase):
         os.utime(pending, (stale, stale))
         stdout, run = self._run_main()
         # the drain ran the pre-queued item; the scan did not overwrite it
-        run.assert_called_once_with("preset-text", "personal", "repo", "s-q", None)
+        run.assert_called_once_with("preset-text", "personal", "repo", "s-q", None, session_until=None)
         self.assertEqual(self._offer_events("s-q"), [])
 
     def test_scan_tops_up_queue_to_one_ticks_worth(self):
@@ -287,14 +326,15 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertEqual(drained[-1]["agent"], "codex")
 
     def test_scan_records_clamp_when_transcript_is_cut(self):
-        self._write_session("s-big", text="z" * 6000)
+        source_chars = ingest_worker.CLAMP + 2000
+        self._write_session("s-big", text="z" * source_chars)
         stdout, run = self._run_main()
         queued = self._offer_events("s-big")
         self.assertTrue(queued[-1]["clamped"])
         # clamp_text snaps cuts to newline boundaries, so the emitted size is CLAMP plus
         # at most one kept line — well under the unclamped source, and byte-identical to
         # what the engine received.
-        self.assertLess(queued[-1]["emitted_chars"], 6000)
+        self.assertLess(queued[-1]["emitted_chars"], source_chars)
         self.assertLessEqual(queued[-1]["emitted_chars"], ingest_worker.CLAMP + 600)
         self.assertEqual(len(run.call_args.args[0]), queued[-1]["emitted_chars"])
 
@@ -353,7 +393,7 @@ class IngestWorkerTest(unittest.TestCase):
         self._queue("q-a-boom")
         self._queue("q-b-good")
 
-        def graph(text, origin, repo, sid, since):
+        def graph(text, origin, repo, sid, since, session_until=None):
             if sid == "q-a-boom":
                 raise TypeError("expected string or bytes-like object, got 'int'")
             return True
@@ -398,6 +438,45 @@ class IngestWorkerTest(unittest.TestCase):
         self.assertEqual(self._last_event()["status"], "deferred")
         self.assertIn("llm down", self._last_event()["reason"])
 
+    def test_a_day_over_the_distill_budget_defers_the_drain_and_leaves_items_queued(self):
+        self._queue("q-over-budget")
+        now = datetime.now(UTC).isoformat()
+        # 2.5M input x $0.10 + 1M output x $0.50 per 1M = $0.75 per row; two rows = $1.50 > $1.00.
+        row = {"ts": now, "llm_input_tokens": 2_500_000, "llm_output_tokens": 1_000_000}
+        with mock.patch.object(
+            ingest_worker.event_log, "recent_engine_events", return_value=[row, row]
+        ) as read:
+            run = self._drain_with(True)
+        self.assertIn(read.call_args.kwargs["since_hours"], range(1, 25))
+        run.assert_not_called()
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-over-budget"))
+        self.assertEqual(self._last_event()["status"], "deferred")
+        self.assertIn("daily budget: $1.50 >= $1.00", self._last_event()["reason"])
+
+    def test_budget_read_reaches_back_to_todays_window_midnight_not_utc_midnight(self):
+        kst = timezone(timedelta(hours=9))
+        cases = [
+            (datetime(2026, 11, 12, 0, 30, tzinfo=kst), 1),
+            (datetime(2026, 11, 12, 23, 59, tzinfo=kst), 24),
+            # 2026-11-11T23:00Z: the UTC date is a day behind the KST date.
+            (datetime(2026, 11, 12, 8, 0, tzinfo=kst), 8),
+        ]
+        for now, hours in cases:
+            with self.subTest(now=now.isoformat()):
+                self.assertEqual(ingest_worker._hours_since_window_midnight(now), hours)
+
+    def test_a_clamped_engine_event_read_defers_the_drain_even_when_its_cost_is_small(self):
+        self._queue("q-clamped")
+        now = datetime.now(UTC).isoformat()
+        # 1000 rows x ~$0.000002 is far under $1.00, but a full page may hide older rows of the day.
+        rows = [{"ts": now, "llm_input_tokens": 10, "llm_output_tokens": 1}] * 1000
+        with mock.patch.object(ingest_worker.event_log, "recent_engine_events", return_value=rows):
+            run = self._drain_with(True)
+        run.assert_not_called()
+        self.assertTrue(ingest_worker.distill_queue.is_queued("q-clamped"))
+        self.assertEqual(self._last_event()["status"], "deferred")
+        self.assertIn("clamped at 1000", self._last_event()["reason"])
+
     def test_a_downed_door_defers_the_tick_without_spending_a_try(self):
         # E3a-1 — remember 는 문을 지나니, 문이 답이 없으면 시도를 태우지 않고 그대로 미룬다.
         self._queue("q-door-down")
@@ -431,7 +510,7 @@ class IngestWorkerTest(unittest.TestCase):
     def test_queue_success_marks_done_and_removes_file(self):
         self._queue("q-ok")
         run = self._drain_with(True)
-        run.assert_called_once_with("text", "personal", "repo", "q-ok", None)
+        run.assert_called_once_with("text", "personal", "repo", "q-ok", None, session_until=None)
         self.assertTrue(self._done_exists("q-ok"))
         self.assertFalse(ingest_worker.distill_queue.is_queued("q-ok"))
         self.assertEqual(self._last_event()["status"], "ok")
@@ -569,6 +648,19 @@ class ReachableTests(unittest.TestCase):
             mock.patch.object(ingest_worker, "_llm_reachable", return_value=Ok(None)),
         ):
             self.assertEqual(ingest_worker._reachable(), Ok(None))
+
+
+class ImportWithoutPsycopgTest(unittest.TestCase):
+    def test_worker_imports_when_psycopg_is_unavailable(self):
+        code = (
+            "import sys, importlib.util; sys.modules['psycopg'] = None; "
+            f"s = importlib.util.spec_from_file_location('iw', {_ingest_worker_path!r}); "
+            "m = importlib.util.module_from_spec(s); sys.modules['iw'] = m; s.loader.exec_module(m)"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", code], env=os.environ.copy(), capture_output=True, text=True
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 if __name__ == "__main__":

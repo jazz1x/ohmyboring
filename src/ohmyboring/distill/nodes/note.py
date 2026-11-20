@@ -140,7 +140,7 @@ def prepare_note(parsed):
         "body": body,
         "tags": _strings(parsed, "tags", 6),
         "tools": _strings(parsed, "tools", 8),
-        "concepts": _strings(parsed, "concepts", 8),
+        "concepts": _strings(parsed, "concepts", 6),
         "claims": _claims(parsed),
     }
 
