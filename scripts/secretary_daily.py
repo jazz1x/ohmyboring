@@ -498,15 +498,32 @@ def build_page(day, rows, notes, meta, frame_text):
       <div><div class="lb">BASIS</div><div class="vv">전사 {meta["files"]} · {meta["secs"]}s</div></div>
       <div><div class="lb">KIND</div><div class="vv">일간 · 잠정 문턱</div></div>
     </div>
+    <div class="tally">
+      <div class="hot"><b>{len(out_rows)}</b>벗어남</div>
+      <div><b>{len(rows) - len(waiting)}</b>비교한 지표</div>
+      <div><b>{len(waiting) + len(notes)}</b>아직 · 못 셈</div>
+    </div>
   </div></div>
-  <article class="prose">
-    <section class="sec" id="s1"><h2><span class="num">01</span>벗어남</h2>
-      {table}
-    </section>
-    <section class="sec" id="s2"><h2><span class="num">02</span>아직 · 못 셈</h2>
-      <ol class="nongoals">{wait}{cant}</ol>
-    </section>
-  </article>
+  <div class="body-grid">
+    <aside class="rail">
+      <div class="th">TREE</div>
+      <nav class="tree">
+        <a href="#s1"><span class="br">└</span>벗어남<span class="cnt">{len(out_rows)}</span></a>
+        <a href="#s2"><span class="br">└</span>아직 · 못 셈<span class="cnt">{len(waiting) + len(notes)}</span></a>
+      </nav>
+      <div class="th">BASIS</div>
+      <span class="item"><span class="br">└</span>계약 wiki-00000021376</span>
+      <span class="item"><span class="br">└</span>~/Documents/ohmyboring/secretary/{day}-daily.json</span>
+    </aside>
+    <article class="prose">
+      <section class="sec" id="s1"><h2><span class="num">01</span>벗어남<span class="cnt">[{len(out_rows)}]</span></h2>
+        {table}
+      </section>
+      <section class="sec" id="s2"><h2><span class="num">02</span>아직 · 못 셈<span class="cnt">[{len(waiting) + len(notes)}]</span></h2>
+        <ol class="nongoals">{wait}{cant}</ol>
+      </section>
+    </article>
+  </div>
   <footer class="colophon">
     <span class="wm">ohmyboring</span> · 일간 점검 · {day} · 계약 wiki-00000021376. 전체 값은 같은 폴더 JSON. 모델 0 · 장부 쓰기 0.<br>
     basis: 문턱 {HIGH}/{LOW} 잠정 · status: 첫 판
