@@ -493,7 +493,6 @@ def build_page(day, rows, notes, meta, frame_text):
     <p class="standfirst">맨 위는 벗어난 지표만. 독자는 [omb/judge].</p>
     <p class="thesis">{e(thesis)}</p>
     <div class="meta">
-      <div><div class="lb">AUTHOR</div><div class="vv">scripts/secretary_daily.py</div></div>
       <div><div class="lb">DATE</div><div class="vv">{day} (WINDOW_TZ)</div></div>
       <div><div class="lb">BASIS</div><div class="vv">전사 {meta["files"]} · {meta["secs"]}s</div></div>
       <div><div class="lb">KIND</div><div class="vv">일간 · 잠정 문턱</div></div>
@@ -525,7 +524,7 @@ def build_page(day, rows, notes, meta, frame_text):
     </article>
   </div>
   <footer class="colophon">
-    <span class="wm">ohmyboring</span> · 일간 점검 · {day} · 계약 wiki-00000021376. 전체 값은 같은 폴더 JSON. 모델 0 · 장부 쓰기 0.<br>
+    <span class="wm">ohmyboring</span> · 일간 점검 · {day} · 작성 scripts/secretary_daily.py · 계약 wiki-00000021376. 전체 값은 같은 폴더 JSON. 모델 0 · 장부 쓰기 0.<br>
     basis: 문턱 {HIGH}/{LOW} 잠정 · status: 첫 판
   </footer>
 </main>
