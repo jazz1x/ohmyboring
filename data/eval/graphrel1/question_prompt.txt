@@ -1,0 +1,6 @@
+Below is one note from a person's work notes. Write ONE question that a user might ask whose answer requires following on from this note (for example what came after it, what replaced it, or what else is connected to it). Do not quote the note's distinctive words more than needed, do not mention that a note exists, and do not answer the question. Write in the same language as the note. Output only the question, on a single line.
+
+NOTE TITLE: {title}
+
+NOTE BODY:
+{body}

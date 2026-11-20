@@ -1,0 +1,1008 @@
+{
+ "meta": {
+  "stage": "C-GRAPHREL1 s1",
+  "pin_first_seen_at_lte": "2026-11-20T00:00:00Z",
+  "stats": {
+   "pin": "2026-11-20T00:00:00Z",
+   "supersedes_edges": 9338,
+   "claims_total": 55510,
+   "claims_shared_ge2": 10902,
+   "a_hub_claims_dropped": 150,
+   "a_hub_pairs_dropped": 407375,
+   "shared_claim_pairs_nonhub_unique": 55847,
+   "shared_pairs_dropped_also_supersedes": 9386,
+   "shared_pairs_dropped_duplicate_docpair": 6755,
+   "stopwords": 1333,
+   "vault_wiki_notes": 36557,
+   "supersedes_missing_note_dropped": 0,
+   "b_supersedes_overlap_dropped": 9163,
+   "supersedes_survivors_after_ab": 175,
+   "shared_claim_missing_note_dropped": 0,
+   "b_shared_claim_overlap_dropped": 51214,
+   "shared_claim_survivors_after_ab": 4633
+  },
+  "cells": {
+   "design/supersedes": {
+    "pool": 88,
+    "drawn": 22,
+    "c_dropped": 2,
+    "draw_order": [
+     "supersedes|doc:/vault/wiki/wiki-00000002786.md|doc:/vault/wiki/wiki-00000002399.md",
+     "supersedes|doc:/vault/wiki/wiki-00000023430.md|doc:/vault/wiki/wiki-00000023267.md",
+     "supersedes|doc:/vault/wiki/wiki-00000033531.md|doc:/vault/wiki/wiki-00000032689.md",
+     "supersedes|doc:/vault/wiki/wiki-00000022466.md|doc:/vault/wiki/wiki-00000022458.md",
+     "supersedes|doc:/vault/wiki/wiki-00000010501.md|doc:/vault/wiki/wiki-00000010493.md",
+     "supersedes|doc:/vault/wiki/wiki-00000021613.md|doc:/vault/wiki/wiki-00000021608.md",
+     "supersedes|doc:/vault/wiki/wiki-00000009523.md|doc:/vault/wiki/wiki-00000009519.md",
+     "supersedes|doc:/vault/wiki/wiki-00000017115.md|doc:/vault/wiki/wiki-00000016779.md",
+     "supersedes|doc:/vault/wiki/wiki-00000023399.md|doc:/vault/wiki/wiki-00000023273.md",
+     "supersedes|doc:/vault/wiki/wiki-00000013058.md|doc:/vault/wiki/wiki-00000009358.md",
+     "supersedes|doc:/vault/wiki/wiki-00000014938.md|doc:/vault/wiki/wiki-00000014910.md",
+     "supersedes|doc:/vault/wiki/wiki-00000005985.md|doc:/vault/wiki/wiki-00000005984.md",
+     "supersedes|doc:/vault/wiki/wiki-00000008168.md|doc:/vault/wiki/wiki-00000008156.md",
+     "supersedes|doc:/vault/wiki/wiki-00000013808.md|doc:/vault/wiki/wiki-00000013806.md",
+     "supersedes|doc:/vault/wiki/wiki-00000029175.md|doc:/vault/wiki/wiki-00000029163.md",
+     "supersedes|doc:/vault/wiki/wiki-00000005564.md|doc:/vault/wiki/wiki-00000005562.md",
+     "supersedes|doc:/vault/wiki/wiki-00000013873.md|doc:/vault/wiki/wiki-00000013401.md",
+     "supersedes|doc:/vault/wiki/wiki-00000024438.md|doc:/vault/wiki/wiki-00000023422.md",
+     "supersedes|doc:/vault/wiki/wiki-00000002780.md|doc:/vault/wiki/wiki-00000001820.md",
+     "supersedes|doc:/vault/wiki/wiki-00000025604.md|doc:/vault/wiki/wiki-00000025525.md",
+     "supersedes|doc:/vault/wiki/wiki-00000016098.md|doc:/vault/wiki/wiki-00000016051.md",
+     "supersedes|doc:/vault/wiki/wiki-00000020821.md|doc:/vault/wiki/wiki-00000020771.md"
+    ],
+    "kept": 20
+   },
+   "holdout/supersedes": {
+    "pool": 87,
+    "drawn": 20,
+    "c_dropped": 0,
+    "draw_order": [
+     "supersedes|doc:/vault/wiki/wiki-00000005499.md|doc:/vault/wiki/wiki-00000005492.md",
+     "supersedes|doc:/vault/wiki/wiki-00000023348.md|doc:/vault/wiki/wiki-00000023264.md",
+     "supersedes|doc:/vault/wiki/wiki-00000023131.md|doc:/vault/wiki/wiki-00000023121.md",
+     "supersedes|doc:/vault/wiki/wiki-00000018127.md|doc:/vault/wiki/wiki-00000018093.md",
+     "supersedes|doc:/vault/wiki/wiki-00000013042.md|doc:/vault/wiki/wiki-00000013039.md",
+     "supersedes|doc:/vault/wiki/wiki-00000006689.md|doc:/vault/wiki/wiki-00000002203.md",
+     "supersedes|doc:/vault/wiki/wiki-00000028670.md|doc:/vault/wiki/wiki-00000028665.md",
+     "supersedes|doc:/vault/wiki/wiki-00000004779.md|doc:/vault/wiki/wiki-00000004778.md",
+     "supersedes|doc:/vault/wiki/wiki-00000015787.md|doc:/vault/wiki/wiki-00000015779.md",
+     "supersedes|doc:/vault/wiki/wiki-00000023781.md|doc:/vault/wiki/wiki-00000023672.md",
+     "supersedes|doc:/vault/wiki/wiki-00000031021.md|doc:/vault/wiki/wiki-00000031009.md",
+     "supersedes|doc:/vault/wiki/wiki-00000005863.md|doc:/vault/wiki/wiki-00000005560.md",
+     "supersedes|doc:/vault/wiki/wiki-00000029689.md|doc:/vault/wiki/wiki-00000029670.md",
+     "supersedes|doc:/vault/wiki/wiki-00000015339.md|doc:/vault/wiki/wiki-00000015329.md",
+     "supersedes|doc:/vault/wiki/wiki-00000020861.md|doc:/vault/wiki/wiki-00000020842.md",
+     "supersedes|doc:/vault/wiki/wiki-00000030884.md|doc:/vault/wiki/wiki-00000030816.md",
+     "supersedes|doc:/vault/wiki/wiki-00000016108.md|doc:/vault/wiki/wiki-00000016098.md",
+     "supersedes|doc:/vault/wiki/wiki-00000006482.md|doc:/vault/wiki/wiki-00000006270.md",
+     "supersedes|doc:/vault/wiki/wiki-00000016357.md|doc:/vault/wiki/wiki-00000016012.md",
+     "supersedes|doc:/vault/wiki/wiki-00000010620.md|doc:/vault/wiki/wiki-00000010615.md"
+    ],
+    "kept": 20
+   },
+   "design/shared_claim": {
+    "pool": 2329,
+    "drawn": 20,
+    "c_dropped": 0,
+    "draw_order": [
+     "claim|claim:ds-pilot-prod-db-check:blocked|doc:/vault/wiki/wiki-00000021915.md|doc:/vault/wiki/wiki-00000022239.md",
+     "claim|claim:omm/orchestration/queue:branch-cleanup-owner|doc:/vault/wiki/wiki-00000030017.md|doc:/vault/wiki/wiki-00000032608.md",
+     "claim|claim:omm/orchestration/queue:branch-cleanup-owner|doc:/vault/wiki/wiki-00000028731.md|doc:/vault/wiki/wiki-00000030017.md",
+     "claim|claim:kb-graph-front/all-work:stopped|doc:/vault/wiki/wiki-00000025833.md|doc:/vault/wiki/wiki-00000035131.md",
+     "claim|claim:managed-agent/agile/stop-state:blocked|doc:/vault/wiki/wiki-00000023267.md|doc:/vault/wiki/wiki-00000024726.md",
+     "claim|claim:kb-ingest-briefing/shape:next|doc:/vault/wiki/wiki-00000010870.md|doc:/vault/wiki/wiki-00000014577.md",
+     "claim|claim:front-agent/ma-relay-handoff:next|doc:/vault/wiki/wiki-00000008856.md|doc:/vault/wiki/wiki-00000009205.md",
+     "claim|claim:ds-pilot-judge-handoff:owner-wait|doc:/vault/wiki/wiki-00000021205.md|doc:/vault/wiki/wiki-00000021419.md",
+     "claim|claim:front레시피/judge/admin-effect-cases:next|doc:/vault/wiki/wiki-00000019769.md|doc:/vault/wiki/wiki-00000019924.md",
+     "claim|claim:next-session:start-point|doc:/vault/wiki/wiki-00000015257.md|doc:/vault/wiki/wiki-00000019320.md",
+     "claim|claim:foodspring-front:storybook-verification|doc:/vault/wiki/wiki-00000027041.md|doc:/vault/wiki/wiki-00000028813.md",
+     "claim|claim:local-machine:db-connectivity|doc:/vault/wiki/wiki-00000002900.md|doc:/vault/wiki/wiki-00000003892.md",
+     "claim|claim:kb-ingest-judge/confluence-markkeep:next|doc:/vault/wiki/wiki-00000031990.md|doc:/vault/wiki/wiki-00000032005.md",
+     "claim|claim:omcr-agile/next:next|doc:/vault/wiki/wiki-00000024480.md|doc:/vault/wiki/wiki-00000031973.md",
+     "claim|claim:ds-governance-orchestration:current-task|doc:/vault/wiki/wiki-00000004897.md|doc:/vault/wiki/wiki-00000005608.md",
+     "claim|claim:session-management:handoff-strategy|doc:/vault/wiki/wiki-00000019326.md|doc:/vault/wiki/wiki-00000020226.md",
+     "claim|claim:boro-plugins-c-feinfra2/contract:next|doc:/vault/wiki/wiki-00000030856.md|doc:/vault/wiki/wiki-00000031005.md",
+     "claim|claim:front레시피/contract/c-qparen1:next|doc:/vault/wiki/wiki-00000030055.md|doc:/vault/wiki/wiki-00000030096.md",
+     "claim|claim:omcr/repo-gates/admin-section:next|doc:/vault/wiki/wiki-00000019776.md|doc:/vault/wiki/wiki-00000019816.md",
+     "claim|claim:[주문서/judge]/checks-missed:checks-missed|doc:/vault/wiki/wiki-00000028928.md|doc:/vault/wiki/wiki-00000028977.md"
+    ],
+    "kept": 20
+   },
+   "holdout/shared_claim": {
+    "pool": 2304,
+    "drawn": 20,
+    "c_dropped": 0,
+    "draw_order": [
+     "claim|claim:ds-pilot:fact|doc:/vault/wiki/wiki-00000021642.md|doc:/vault/wiki/wiki-00000024466.md",
+     "claim|claim:ds-pilot-infra-1.6:blocked|doc:/vault/wiki/wiki-00000006479.md|doc:/vault/wiki/wiki-00000007258.md",
+     "claim|claim:주문서/scene/next-shoot:next|doc:/vault/wiki/wiki-00000027045.md|doc:/vault/wiki/wiki-00000027717.md",
+     "claim|claim:omb:handoff-note|doc:/vault/wiki/wiki-00000012620.md|doc:/vault/wiki/wiki-00000027013.md",
+     "claim|claim:front레시피/s-pr159:next|doc:/vault/wiki/wiki-00000014545.md|doc:/vault/wiki/wiki-00000014645.md",
+     "claim|claim:omcr-rereview:real-run-target|doc:/vault/wiki/wiki-00000003555.md|doc:/vault/wiki/wiki-00000003879.md",
+     "claim|claim:fds-16814/server-log-usr:next|doc:/vault/wiki/wiki-00000020005.md|doc:/vault/wiki/wiki-00000020041.md",
+     "claim|claim:kb-ingest-briefing/shape:next|doc:/vault/wiki/wiki-00000011075.md|doc:/vault/wiki/wiki-00000011732.md",
+     "claim|claim:deployment:next-action|doc:/vault/wiki/wiki-00000010337.md|doc:/vault/wiki/wiki-00000022007.md",
+     "claim|claim:front레시피/ts7-upgrade:next|doc:/vault/wiki/wiki-00000021911.md|doc:/vault/wiki/wiki-00000022083.md",
+     "claim|claim:ds-pilot-vrt-unmeasured:eight-parts|doc:/vault/wiki/wiki-00000018944.md|doc:/vault/wiki/wiki-00000019702.md",
+     "claim|claim:[주문서/judge]:checks-missed|doc:/vault/wiki/wiki-00000029279.md|doc:/vault/wiki/wiki-00000029422.md",
+     "claim|claim:ds-pilot:next-action|doc:/vault/wiki/wiki-00000017997.md|doc:/vault/wiki/wiki-00000035094.md",
+     "claim|claim:working-in-seats/agile-seat:next|doc:/vault/wiki/wiki-00000010523.md|doc:/vault/wiki/wiki-00000010712.md",
+     "claim|claim:ds-pilot-judge-handoff:owner-wait|doc:/vault/wiki/wiki-00000020698.md|doc:/vault/wiki/wiki-00000021413.md",
+     "claim|claim:kb-ingest-confluence-403:next|doc:/vault/wiki/wiki-00000018059.md|doc:/vault/wiki/wiki-00000018604.md",
+     "claim|claim:주문서/tracking/epic:next|doc:/vault/wiki/wiki-00000016222.md|doc:/vault/wiki/wiki-00000016351.md",
+     "claim|claim:pr-review/orchestration/handoff/resume:next|doc:/vault/wiki/wiki-00000017855.md|doc:/vault/wiki/wiki-00000034896.md",
+     "claim|claim:scaffold-base:typing|doc:/vault/wiki/wiki-00000002280.md|doc:/vault/wiki/wiki-00000002281.md",
+     "claim|claim:boro-vibe-ds-kit:owner-pending-remote-branch|doc:/vault/wiki/wiki-00000009644.md|doc:/vault/wiki/wiki-00000010088.md"
+    ],
+    "kept": 20
+   }
+  },
+  "model": "haiku",
+  "claude_calls_this_run": 82,
+  "prompt_file": "question_prompt.txt",
+  "content_word_definition": "lowercase token from [a-z0-9]+|[가-힣]+ over title+body (no frontmatter), length >=2, containing a letter or Hangul (not pure digits), Hangul tokens of length >=3 lose one trailing particle char from 은는이가을를의에도로와과, not a stopword. Stopwords = fixed English list + every token in more than 2% of all vault wiki notes (document frequency, computed here).",
+  "half": "holdout"
+ },
+ "items": [
+  {
+   "id": "gr1-h-C-000e2905",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:ds-pilot:fact|doc:/vault/wiki/wiki-00000021642.md|doc:/vault/wiki/wiki-00000024466.md",
+    "claim": "claim:ds-pilot:fact",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000021642.md",
+     "doc:/vault/wiki/wiki-00000024466.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000021642.md",
+     "doc:/vault/wiki/wiki-00000024466.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000021642.md",
+   "answer_note": "/vault/wiki/wiki-00000024466.md",
+   "start_body_sha256": "990d8d468bd74f3d49de99b21af8e9b1f3e0f3f9dc0ff1cb56b72f517d646e37",
+   "answer_body_sha256": "a4184d99835f439f39b2d4b2d6b0a5ae3c6dd9a993b449e81fb379d8bfb1c1e3",
+   "question": "앞서 작성된 아이콘 이름 짝 표에서 별칭으로 묶인 12개 항목은 어떻게 처리하기로 했고, 그 결정이 Figma 쪽 아이콘 이름을 실제로 바꾸는 작업으로 이어졌는지 알려줘?"
+  },
+  {
+   "id": "gr1-h-C-0012e3e3",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:ds-pilot-infra-1.6:blocked|doc:/vault/wiki/wiki-00000006479.md|doc:/vault/wiki/wiki-00000007258.md",
+    "claim": "claim:ds-pilot-infra-1.6:blocked",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000006479.md",
+     "doc:/vault/wiki/wiki-00000007258.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000006479.md",
+     "doc:/vault/wiki/wiki-00000007258.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000006479.md",
+   "answer_note": "/vault/wiki/wiki-00000007258.md",
+   "start_body_sha256": "a215bc32dcae592c4fd1942a4e5b614cf3055f5c7c3f5e840ff7475e40632098",
+   "answer_body_sha256": "26bdba29f03eca62fb832ff2b0135d76fa0364f04fdea96293cb8dc0ba789486",
+   "question": "일 순서 1번 SearchField realrun 결과가 판정에 올라왔을 때, 모델이 rounded-xl을 rounded-10으로 바꾸지 않았다면 판정은 어떻게 다음 행동을 정해야 하나요?"
+  },
+  {
+   "id": "gr1-h-C-00200758",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:주문서/scene/next-shoot:next|doc:/vault/wiki/wiki-00000027045.md|doc:/vault/wiki/wiki-00000027717.md",
+    "claim": "claim:주문서/scene/next-shoot:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000027045.md",
+     "doc:/vault/wiki/wiki-00000027717.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000027045.md",
+     "doc:/vault/wiki/wiki-00000027717.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000027045.md",
+   "answer_note": "/vault/wiki/wiki-00000027717.md",
+   "start_body_sha256": "26036a009ef6f0729661687a52215a15dec01abcd13534152b503a75903575a7",
+   "answer_body_sha256": "1b876665921480ef34d6c74decda243650c785c62a00e25d6ffca2cba985795f",
+   "question": "b6과 b7·b8에서 틀린 카드 3장과 판매자 줄 296 문제는 이후 어떻게 처리됐어?"
+  },
+  {
+   "id": "gr1-h-C-0022c9ab",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:omb:handoff-note|doc:/vault/wiki/wiki-00000012620.md|doc:/vault/wiki/wiki-00000027013.md",
+    "claim": "claim:omb:handoff-note",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000012620.md",
+     "doc:/vault/wiki/wiki-00000027013.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000012620.md",
+     "doc:/vault/wiki/wiki-00000027013.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000012620.md",
+   "answer_note": "/vault/wiki/wiki-00000027013.md",
+   "start_body_sha256": "002b49d07b0b416952bfc44ca43b671c39e3d1f707eb31451001460d3a0cd962",
+   "answer_body_sha256": "056cce80ca06b43cd271ae48d601915080948f266c0c68fc240d89ae10ff1366",
+   "question": "성공적으로 세션을 넘긴 뒤 10-31 01:07 측정(C-OWNEREDGE1, C-NOTEID1)은 새 세션에서 실제로 실행됐나요? 실행 결과가 있다면 어디에 기록돼 있는지도 알려주세요."
+  },
+  {
+   "id": "gr1-h-C-004b1147",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:front레시피/s-pr159:next|doc:/vault/wiki/wiki-00000014545.md|doc:/vault/wiki/wiki-00000014645.md",
+    "claim": "claim:front레시피/s-pr159:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000014545.md",
+     "doc:/vault/wiki/wiki-00000014645.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000014545.md",
+     "doc:/vault/wiki/wiki-00000014645.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000014645.md",
+   "answer_note": "/vault/wiki/wiki-00000014545.md",
+   "start_body_sha256": "6f4d4aa242d01838c9e6baf45fdac5d81f01dc556d67d348d336e3ccf360de89",
+   "answer_body_sha256": "dfad74676fabe62c16929642fbe92a348b2413e7df376cfe9c5210206e553614",
+   "question": "screen-verify 작업을 ds-pilot로 넘긴 뒤 노트 번호 회신은 어떻게 확인하고, 소유자에게는 어떤 형식으로 알리면 돼?"
+  },
+  {
+   "id": "gr1-h-C-0066cd89",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:omcr-rereview:real-run-target|doc:/vault/wiki/wiki-00000003555.md|doc:/vault/wiki/wiki-00000003879.md",
+    "claim": "claim:omcr-rereview:real-run-target",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000003555.md",
+     "doc:/vault/wiki/wiki-00000003879.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000003555.md",
+     "doc:/vault/wiki/wiki-00000003879.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000003555.md",
+   "answer_note": "/vault/wiki/wiki-00000003879.md",
+   "start_body_sha256": "e2b2e5682b671a96348b665cbd8baf6301c93fa99e3fd161c1d9f675e5436111",
+   "answer_body_sha256": "e7784acccabec6bd4a465bf0bb72da05ab9ac28cc0aace29e721ee8829781c44",
+   "question": "PR 3153이 실제로 머지됐는지 확인하려면 pipe-get --json으로 state를 어떻게 조회하면 되나요?"
+  },
+  {
+   "id": "gr1-h-C-007bd23b",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:fds-16814/server-log-usr:next|doc:/vault/wiki/wiki-00000020005.md|doc:/vault/wiki/wiki-00000020041.md",
+    "claim": "claim:fds-16814/server-log-usr:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000020005.md",
+     "doc:/vault/wiki/wiki-00000020041.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000020005.md",
+     "doc:/vault/wiki/wiki-00000020041.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000020005.md",
+   "answer_note": "/vault/wiki/wiki-00000020041.md",
+   "start_body_sha256": "2a87eb436c44a8c5153ee03311d7bbf5a323d03c67fc235655248133e9210a44",
+   "answer_body_sha256": "0264c622bbf3e79a7c8eb94c2a5e7182f4214b524a516b6e8637158d9a407840",
+   "question": "다음 세션에서 omcr 코멘트 2건을 읽고 판단한 뒤 parse, don't validate 수정과 함께 한 번에 push하려면 어떤 순서로 진행해야 하나요?"
+  },
+  {
+   "id": "gr1-h-C-00b9b0ab",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:kb-ingest-briefing/shape:next|doc:/vault/wiki/wiki-00000011075.md|doc:/vault/wiki/wiki-00000011732.md",
+    "claim": "claim:kb-ingest-briefing/shape:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000011075.md",
+     "doc:/vault/wiki/wiki-00000011732.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000011075.md",
+     "doc:/vault/wiki/wiki-00000011732.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000011732.md",
+   "answer_note": "/vault/wiki/wiki-00000011075.md",
+   "start_body_sha256": "5fe2a5760c93384e9a22d61ef374e93d18f65cfc95ddb4899c14cf540e4b4dd8",
+   "answer_body_sha256": "b3794ebb437b52a45d40e4b727bcaf0b3f19b0b578a6edb3a36669cc027bbcfd",
+   "question": "identity-callers.tsv 이메일 추출은 소유자 허락을 받아 진행됐는지, 그 결과 몇 건이 찾아졌는지 알려줘?"
+  },
+  {
+   "id": "gr1-h-C-00ddc87a",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:deployment:next-action|doc:/vault/wiki/wiki-00000010337.md|doc:/vault/wiki/wiki-00000022007.md",
+    "claim": "claim:deployment:next-action",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000010337.md",
+     "doc:/vault/wiki/wiki-00000022007.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000010337.md",
+     "doc:/vault/wiki/wiki-00000022007.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000010337.md",
+   "answer_note": "/vault/wiki/wiki-00000022007.md",
+   "start_body_sha256": "2764dc158210dc3b4f3742988b17fbccba3faf35e512842e9b943d4c52458307",
+   "answer_body_sha256": "d73b253dcdde9b621e409d48f94143c25b35ebf4c1bfe76d917e3edaf800e35a",
+   "question": "운영 보류 중인 FDS-19014 쿠폰 라벨 변경 건을 push/PR로 진행하라는 오너 지시가 떨어지면, 어떤 순서로 처리하면 되나요?"
+  },
+  {
+   "id": "gr1-h-C-00ffad9f",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:front레시피/ts7-upgrade:next|doc:/vault/wiki/wiki-00000021911.md|doc:/vault/wiki/wiki-00000022083.md",
+    "claim": "claim:front레시피/ts7-upgrade:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000021911.md",
+     "doc:/vault/wiki/wiki-00000022083.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000021911.md",
+     "doc:/vault/wiki/wiki-00000022083.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000022083.md",
+   "answer_note": "/vault/wiki/wiki-00000021911.md",
+   "start_body_sha256": "4295b7aa16f6147dd6d5e26e0328bf9a3dac69382e4eba7a617a1f25ca89410d",
+   "answer_body_sha256": "d7c476d3f1aac58596bc2b27c0a9ce27d696c2687ac972ad6f517ae1a3f1d28a",
+   "question": "FEDEV-823 PR 사진 첨부는 judge 결정이 났는지, 누가 붙이기로 했는지 알려줘?"
+  },
+  {
+   "id": "gr1-h-C-0107c1ae",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:ds-pilot-vrt-unmeasured:eight-parts|doc:/vault/wiki/wiki-00000018944.md|doc:/vault/wiki/wiki-00000019702.md",
+    "claim": "claim:ds-pilot-vrt-unmeasured:eight-parts",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000018944.md",
+     "doc:/vault/wiki/wiki-00000019702.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000018944.md",
+     "doc:/vault/wiki/wiki-00000019702.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000019702.md",
+   "answer_note": "/vault/wiki/wiki-00000018944.md",
+   "start_body_sha256": "a6657200c394c5a88fbdea29b802dd65c412bda21c21b020c455afd7e534bd59",
+   "answer_body_sha256": "3f455be4399ea208b294fc87f9d3cf5903eb74738f8cdc774583299e7935238d",
+   "question": "최종 칸 8개 중 TabsNavigation만 계약 예상과 달라진 이유를 확인하고, Badge 엔진 결함 계약을 C-MAPPERV와 묶을지 판정하는 결과는 어떻게 나왔나요?"
+  },
+  {
+   "id": "gr1-h-C-010d7deb",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:[주문서/judge]:checks-missed|doc:/vault/wiki/wiki-00000029279.md|doc:/vault/wiki/wiki-00000029422.md",
+    "claim": "claim:[주문서/judge]:checks-missed",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000029279.md",
+     "doc:/vault/wiki/wiki-00000029422.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000029279.md",
+     "doc:/vault/wiki/wiki-00000029422.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000029422.md",
+   "answer_note": "/vault/wiki/wiki-00000029279.md",
+   "start_body_sha256": "9246824a8d15446b52b58cb3495d5947b250bdc1d0ed80a51f53f376baeff23d",
+   "answer_body_sha256": "8acadcc37a6cdb6b398d63a868de26804e10c3b9cd69e8defcd821649ff0f899",
+   "question": "주문서 judge의 X2 통과 기준을 네 축 표로 바꾸면, 기존 front레시피 C-EFX2 2판과 pr-review 쪽 Effect 지적은 어떻게 정리되나요?"
+  },
+  {
+   "id": "gr1-h-C-0117a61b",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:ds-pilot:next-action|doc:/vault/wiki/wiki-00000017997.md|doc:/vault/wiki/wiki-00000035094.md",
+    "claim": "claim:ds-pilot:next-action",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000017997.md",
+     "doc:/vault/wiki/wiki-00000035094.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000017997.md",
+     "doc:/vault/wiki/wiki-00000035094.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000017997.md",
+   "answer_note": "/vault/wiki/wiki-00000035094.md",
+   "start_body_sha256": "7c50187009d8e8c2c028f74c4a50ad240f361cfc660ce7f465c87480e80daaa7",
+   "answer_body_sha256": "b18ea698437fcd8a7441109af702744c81ee76511f535b35a15562c8663c49a5",
+   "question": "오늘 작업 범위로 정한 FEDEV-610 합격 조건을 실제로 실행했을 때 fix 카드가 생성되는지 어떻게 확인하면 되나요?"
+  },
+  {
+   "id": "gr1-h-C-0120430f",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:working-in-seats/agile-seat:next|doc:/vault/wiki/wiki-00000010523.md|doc:/vault/wiki/wiki-00000010712.md",
+    "claim": "claim:working-in-seats/agile-seat:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000010523.md",
+     "doc:/vault/wiki/wiki-00000010712.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000010523.md",
+     "doc:/vault/wiki/wiki-00000010712.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000010712.md",
+   "answer_note": "/vault/wiki/wiki-00000010523.md",
+   "start_body_sha256": "d699b123ab32d7b48febc19fd1110d0b7318374f6e5b6b6b7b3c5866c89e9527",
+   "answer_body_sha256": "2aa37a984c9ee9e2c93e7e1cbc5c0556960cfbc4d444496d6969d91391ad30b3",
+   "question": "언제 판정 세션이 넘어간다는 건가요? 그리고 C-LOOP1 초안 핑퐁은 새 판정 세션에서 어떻게 이어지나요?"
+  },
+  {
+   "id": "gr1-h-C-015632be",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:ds-pilot-judge-handoff:owner-wait|doc:/vault/wiki/wiki-00000020698.md|doc:/vault/wiki/wiki-00000021413.md",
+    "claim": "claim:ds-pilot-judge-handoff:owner-wait",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000020698.md",
+     "doc:/vault/wiki/wiki-00000021413.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000020698.md",
+     "doc:/vault/wiki/wiki-00000021413.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000021413.md",
+   "answer_note": "/vault/wiki/wiki-00000020698.md",
+   "start_body_sha256": "8dbbb9af6f7fea25e0174fa0a9b8b553932ed15d0551f25f68e86c5a91d79107",
+   "answer_body_sha256": "75bfa1688b53c7dd2e3e319c89446b0220d67639f2ce54f0047c74d90edea289",
+   "question": "Rust 실험을 접기로 한 판정에 대해 소유자가 Python 고침으로 가기로 답했는지, 그리고 그 뒤 문서 페이지 촬영 계약 점검 결과가 어땠는지 알려줘?"
+  },
+  {
+   "id": "gr1-h-C-015e0794",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:kb-ingest-confluence-403:next|doc:/vault/wiki/wiki-00000018059.md|doc:/vault/wiki/wiki-00000018604.md",
+    "claim": "claim:kb-ingest-confluence-403:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000018059.md",
+     "doc:/vault/wiki/wiki-00000018604.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000018059.md",
+     "doc:/vault/wiki/wiki-00000018604.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000018604.md",
+   "answer_note": "/vault/wiki/wiki-00000018059.md",
+   "start_body_sha256": "5163ce6558b1abe9cf0b6c252eff62617e93ecfb49c6b18d6272984f0c9f3044",
+   "answer_body_sha256": "7e4bb31145b77aa8b2e241d3bdd5c1b4822363ee80de4f774e4304c427e307f2",
+   "question": "제가 11-06에 막혔던 temporal-worker 재시작 권한 문제를 DevOps 쪽에 넘기려면, 소유자에게 보낼 요청 문안에 무엇을 넣어야 하고 CONFLUENCE_EMAIL 값은 어떻게 처리해야 하나요?"
+  },
+  {
+   "id": "gr1-h-C-016f8ea9",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:주문서/tracking/epic:next|doc:/vault/wiki/wiki-00000016222.md|doc:/vault/wiki/wiki-00000016351.md",
+    "claim": "claim:주문서/tracking/epic:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000016222.md",
+     "doc:/vault/wiki/wiki-00000016351.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000016222.md",
+     "doc:/vault/wiki/wiki-00000016351.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000016351.md",
+   "answer_note": "/vault/wiki/wiki-00000016222.md",
+   "start_body_sha256": "51349551a5f1486930c06033516cfa8ce07adf308ae951d328b94047ad488dcf",
+   "answer_body_sha256": "a762fafc85eec687542bb8973af7011c24e0aa1bc2d8a94dbaf01bdf1e650360",
+   "question": "FEDEV-649 제목을 「[주문서 개편 1차] 프론트」로 바꾼 뒤에 wiki-00000016319의 나머지 확인 항목이나 후속 작업이 있었나요?"
+  },
+  {
+   "id": "gr1-h-C-01a7f834",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:pr-review/orchestration/handoff/resume:next|doc:/vault/wiki/wiki-00000017855.md|doc:/vault/wiki/wiki-00000034896.md",
+    "claim": "claim:pr-review/orchestration/handoff/resume:next",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000017855.md",
+     "doc:/vault/wiki/wiki-00000034896.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000017855.md",
+     "doc:/vault/wiki/wiki-00000034896.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000034896.md",
+   "answer_note": "/vault/wiki/wiki-00000017855.md",
+   "start_body_sha256": "4f0c4d3bd3183e61d4fdbfbd91373963f207a32edb8672ce5a4284273af4e9a1",
+   "answer_body_sha256": "80f30d682296740ce737f66254df4917c2964a1f9595d83d2f9ea94d0d58b422",
+   "question": "이 회차 PR 묶음이 멈춘 뒤 판정 쪽 회신(34321)을 어떻게 처리해야 하는지, 재개 뒤 첫 걸음은 무엇인지 알려줘?"
+  },
+  {
+   "id": "gr1-h-C-01d50036",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:scaffold-base:typing|doc:/vault/wiki/wiki-00000002280.md|doc:/vault/wiki/wiki-00000002281.md",
+    "claim": "claim:scaffold-base:typing",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000002280.md",
+     "doc:/vault/wiki/wiki-00000002281.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000002280.md",
+     "doc:/vault/wiki/wiki-00000002281.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000002280.md",
+   "answer_note": "/vault/wiki/wiki-00000002281.md",
+   "start_body_sha256": "f11750f5634aac4b6f16fa884d00c9f261e8773d66e154c3180ba7b4d2f566f6",
+   "answer_body_sha256": "d70cf4ae5fd51c6993281ad92723ac5ef1a8865097401d611912b1bd915d5bae",
+   "question": "ANN401 게이트에 걸린 기존 건수는 어떻게 집계됐고, 소유자가 그 결과를 보고 어떤 판단을 내렸어?"
+  },
+  {
+   "id": "gr1-h-C-021a1655",
+   "half": "holdout",
+   "source": "shared_claim",
+   "source_pair": {
+    "pair_id": "claim|claim:boro-vibe-ds-kit:owner-pending-remote-branch|doc:/vault/wiki/wiki-00000009644.md|doc:/vault/wiki/wiki-00000010088.md",
+    "claim": "claim:boro-vibe-ds-kit:owner-pending-remote-branch",
+    "docs": [
+     "doc:/vault/wiki/wiki-00000009644.md",
+     "doc:/vault/wiki/wiki-00000010088.md"
+    ],
+    "documents": [
+     "doc:/vault/wiki/wiki-00000009644.md",
+     "doc:/vault/wiki/wiki-00000010088.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000009644.md",
+   "answer_note": "/vault/wiki/wiki-00000010088.md",
+   "start_body_sha256": "49ad36d9b7bc1eafa2fa7f81b334b4b1eeef3cdb4c457a1e180adc2403fda51b",
+   "answer_body_sha256": "fa03b3c1c164595f0f6b71e4c15680c94fcbdfbada2f9e53aaa62ad481af61e0",
+   "question": "다음 원격 브랜치 정리가 끝난 뒤, 같은 저장소에서 남아 있는 오래된 원격 브랜치들을 어떻게 찾아서 정리하면 좋을까?"
+  },
+  {
+   "id": "gr1-h-S-0047a3a5",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000005499.md|doc:/vault/wiki/wiki-00000005492.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000005499.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000005492.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000005499.md",
+     "doc:/vault/wiki/wiki-00000005492.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000005492.md",
+   "answer_note": "/vault/wiki/wiki-00000005499.md",
+   "start_body_sha256": "776ee09d852d8b28f54399535f786f2547603ab2fda09bed65bf8570313f0fe0",
+   "answer_body_sha256": "38b1a2fd5e47dc6aa2ad0986a8f649a75efda6b689830215b0fc1211fa6824cf",
+   "question": "어드민 웹을 SPA로 따로 서빙하기로 한 결정 이후, 웹 쪽 첫 작업을 진행하려면 봇 주소 설정은 어디서 어떻게 바꾸고 브라우저에서 결정 대기 실제 값이 뜨는지는 어떻게 확인하면 되나요?"
+  },
+  {
+   "id": "gr1-h-S-00c263a7",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000023348.md|doc:/vault/wiki/wiki-00000023264.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000023348.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000023264.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000023348.md",
+     "doc:/vault/wiki/wiki-00000023264.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000023264.md",
+   "answer_note": "/vault/wiki/wiki-00000023348.md",
+   "start_body_sha256": "f5643a8f78fa36d9a19e4605a7767a98abe0edf0e19b72e80a54f0da0a34676e",
+   "answer_body_sha256": "9a52a86159209c9be714a64b42aeda9e82b0a2a0b227268c64294d164f162760",
+   "question": "대화를 이어 가려면 어떤 조건이 충족되어야 정지된 omcr-cookbook 작업을 재개할 수 있나요?"
+  },
+  {
+   "id": "gr1-h-S-050959a6",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000023131.md|doc:/vault/wiki/wiki-00000023121.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000023131.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000023121.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000023131.md",
+     "doc:/vault/wiki/wiki-00000023121.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000023121.md",
+   "answer_note": "/vault/wiki/wiki-00000023131.md",
+   "start_body_sha256": "9e10a87a98358c6f094d67bb96a4b2a26468b2eb10dc6be0e11baa2128b19acc",
+   "answer_body_sha256": "b323007a362b913563c08691ff0f8cefd9cb15957585c54f9fa9ee49f6953f69",
+   "question": "운영 환경에서 `ds-pilot-audit` 일정을 실행하기 전에 소유자에게 받아야 할 허락의 범위와 절차는 무엇인가요?"
+  },
+  {
+   "id": "gr1-h-S-0578eff5",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000018127.md|doc:/vault/wiki/wiki-00000018093.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000018127.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000018093.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000018127.md",
+     "doc:/vault/wiki/wiki-00000018093.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000018093.md",
+   "answer_note": "/vault/wiki/wiki-00000018127.md",
+   "start_body_sha256": "92301d5fbff01930cd80994bb28f3b9591f776645fb29453de234a27672e133d",
+   "answer_body_sha256": "f6dc1c41ed8690cefcb85868886f3cb403e6ee5c0eb030b9e72550570b331f08",
+   "question": "왜 11-06 에 \"수 아직 없음은 고쳤다\"고 해놓고 오케스트에 보정을 지시한 건데, 그 보정이 rc.22 배포 이후에도 실제 브리핑의 수 줄을 없애지 못한 이유가 뭐고, 이후에 어떤 후속 조치가 있었는지 알려줘?"
+  },
+  {
+   "id": "gr1-h-S-0a8a5063",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000013042.md|doc:/vault/wiki/wiki-00000013039.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000013042.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000013039.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000013042.md",
+     "doc:/vault/wiki/wiki-00000013039.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000013039.md",
+   "answer_note": "/vault/wiki/wiki-00000013042.md",
+   "start_body_sha256": "229db25daef117e201d68702499b641ead1d0743030e3567805024166e9ef10d",
+   "answer_body_sha256": "df83adfbc90f274b96cca873db816d67557c3c9773ee23a3f7751427901f190d",
+   "question": "Korean-language question, one line, no answer:"
+  },
+  {
+   "id": "gr1-h-S-11b1622c",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000006689.md|doc:/vault/wiki/wiki-00000002203.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000006689.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000002203.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000006689.md",
+     "doc:/vault/wiki/wiki-00000002203.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000002203.md",
+   "answer_note": "/vault/wiki/wiki-00000006689.md",
+   "start_body_sha256": "2d9dddea7ab3ef8ccd6baf51bead3475dabdf6ec2adbf8dc3a2e4689d8f34940",
+   "answer_body_sha256": "10b7cdf6547df28c5dca4b623abbbad373040326379d8427c9b8098ee6b92d73",
+   "question": "bitbucket-pipelines.yml에서 이미지 빌드와 푸시 단계를 최적화한 뒤 실제로 CI 실행 시간이 얼마나 줄었는지 확인하려면 어떤 지표를 봐야 하나요?"
+  },
+  {
+   "id": "gr1-h-S-14d10273",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000028670.md|doc:/vault/wiki/wiki-00000028665.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000028670.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000028665.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000028670.md",
+     "doc:/vault/wiki/wiki-00000028665.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000028665.md",
+   "answer_note": "/vault/wiki/wiki-00000028670.md",
+   "start_body_sha256": "e7f88a36b869ae31b38ad3d8f046d81f57407cd1cda24eddf8728de56d4daf2f",
+   "answer_body_sha256": "e6c49778bf666106ffd20a92c2400f07ed7eeb6d554cf952f1ba1c53f72cf331",
+   "question": "줄 7 소유자 몫이 비었을 때 첫 줄에 그걸 밝히는 문장을 넣었는데, 이 변경이 실제 세션에서 judge 의 첫 실사용 피드백으로 이어졌는지, 그리고 그 결과를 어디서 확인할 수 있는지 알려줄 수 있어?"
+  },
+  {
+   "id": "gr1-h-S-15f03ad5",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000004779.md|doc:/vault/wiki/wiki-00000004778.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000004779.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000004778.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000004779.md",
+     "doc:/vault/wiki/wiki-00000004778.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000004778.md",
+   "answer_note": "/vault/wiki/wiki-00000004779.md",
+   "start_body_sha256": "34ced170dd8ef8827e6f8a6d6798f81840685a7b96c6cc9df143664e9684162f",
+   "answer_body_sha256": "0de443fba0528d036c0b5873b33c50fb13635690f08459d6d4f1e71c4ec53ba4",
+   "question": "FEDEV-405 기한을 10-30으로 연장한 뒤 지금까지 머지 결정이 나왔는지, 그 내용이 티켓에 반영됐는지 확인하려면 어떤 순서로 보면 되나요?"
+  },
+  {
+   "id": "gr1-h-S-1662a082",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000015787.md|doc:/vault/wiki/wiki-00000015779.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000015787.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000015779.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000015787.md",
+     "doc:/vault/wiki/wiki-00000015779.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000015779.md",
+   "answer_note": "/vault/wiki/wiki-00000015787.md",
+   "start_body_sha256": "4fbbaba5611556ad84e4f6a1ce4a5efb8bbd3375eee6909a90e29df95b4a6cbe",
+   "answer_body_sha256": "d5a5363df520ad63e87f1126f81bc174d474c398e8483a0b8723b3a77e8358b7",
+   "question": "판정이 끝난 뒤 커밋하고 #138을 push한 다음 pr-checks까지 가려면 어떤 순서로 진행해야 해?"
+  },
+  {
+   "id": "gr1-h-S-1d1f18e7",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000023781.md|doc:/vault/wiki/wiki-00000023672.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000023781.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000023672.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000023781.md",
+     "doc:/vault/wiki/wiki-00000023672.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000023672.md",
+   "answer_note": "/vault/wiki/wiki-00000023781.md",
+   "start_body_sha256": "80f93cfe37d783ff0755479ef915e7caabc33d1f4c04ce2bb2244d7c9ebaeac3",
+   "answer_body_sha256": "0fd388de5d4db9e08ef4980783c4f374150f4264aa718524656058f5f4ee83d7",
+   "question": "안 2026-11-12 에 운영 점검 결과 줄이 나왔는데 「고침 storybook」 부품에서 예산 멈춤이 걸렸다면, 그다음에 어떤 PR을 내야 하나요?"
+  },
+  {
+   "id": "gr1-h-S-1e285154",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000031021.md|doc:/vault/wiki/wiki-00000031009.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000031021.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000031009.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000031021.md",
+     "doc:/vault/wiki/wiki-00000031009.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000031009.md",
+   "answer_note": "/vault/wiki/wiki-00000031021.md",
+   "start_body_sha256": "6eb14278cfed8499fa4d84ddf30a92f38c12fb2f2f575d2625eb3c67e4ee2f1a",
+   "answer_body_sha256": "52a56bfbb663fc0a69e6067b89968bf06f906a8297eb2a4ea14f231e15138be2",
+   "question": "재개 신호가 왔으니, 보류해 둔 bb 명령 요청 판정은 지금 어떤 순서로 진행하면 되나요?"
+  },
+  {
+   "id": "gr1-h-S-1ec99377",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000005863.md|doc:/vault/wiki/wiki-00000005560.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000005863.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000005560.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000005863.md",
+     "doc:/vault/wiki/wiki-00000005560.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000005560.md",
+   "answer_note": "/vault/wiki/wiki-00000005863.md",
+   "start_body_sha256": "1cb7edd33fb05fa3b9c243afb97e73cccfd8655da197ddf94532b2cb84e5604b",
+   "answer_body_sha256": "5a488ce3ec5468ff4dba57cf5ec4b46b56415ed21106aaeccbe868dbd275f79a",
+   "question": "PR 머지 판정에서 omcr 재확인과 독립 컨텍스트 리뷰가 모두 통과해야 머지한다는 조건이 정해진 뒤, 철학게이트 막음 0은 어떻게 확인하나요?"
+  },
+  {
+   "id": "gr1-h-S-1fb6042e",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000029689.md|doc:/vault/wiki/wiki-00000029670.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000029689.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000029670.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000029689.md",
+     "doc:/vault/wiki/wiki-00000029670.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000029670.md",
+   "answer_note": "/vault/wiki/wiki-00000029689.md",
+   "start_body_sha256": "97bcb378c51926b10f16334f3157fa98576f1cb1d3792e4bf95a593607cfb303",
+   "answer_body_sha256": "e5a0d7f3dbcaf429cb3d409551abdffcf9ae91da7e9733496ad61e5ccfa0dffa",
+   "question": "무엇을 근거로 소유자 로그인 확인 문장을 받으면, 그 뒤에 scene에 알리고 3장 판정을 진행하면 되나요?"
+  },
+  {
+   "id": "gr1-h-S-2212a523",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000015339.md|doc:/vault/wiki/wiki-00000015329.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000015339.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000015329.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000015339.md",
+     "doc:/vault/wiki/wiki-00000015329.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000015329.md",
+   "answer_note": "/vault/wiki/wiki-00000015339.md",
+   "start_body_sha256": "075d5b2c462096d0d7dd40aac25cbfeb8d79eb8fb80868833c2b7258380bae0a",
+   "answer_body_sha256": "a1f5e99d6d908ead8cf176724bfb3f49124de9977da1d849f55f441c3e2b634c",
+   "question": "FEDEV-697과 FEDEV-703 리뷰 중 상태가 실제로 반영됐는지 확인하고, 남은 PR 머지 후 본문 4절 정리는 어떻게 진행할지 알려줘"
+  },
+  {
+   "id": "gr1-h-S-23a1034d",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000020861.md|doc:/vault/wiki/wiki-00000020842.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000020861.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000020842.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000020861.md",
+     "doc:/vault/wiki/wiki-00000020842.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000020842.md",
+   "answer_note": "/vault/wiki/wiki-00000020861.md",
+   "start_body_sha256": "45702d87f92d6250f5996e50febc640ffe0d1557602229a9dd355a43172c6a59",
+   "answer_body_sha256": "df5b77a6678534a42fde7bd463b6d1a4b03795375cf72bc506c770fe35814499",
+   "question": "내일 게시하기 전에 #3514와 #3512의 head를 다시 확인해야 하는데, 초안 시점 head와 지금 head가 달라졌으면 어떤 코멘트를 어떻게 고쳐야 하나요?"
+  },
+  {
+   "id": "gr1-h-S-2f270393",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000030884.md|doc:/vault/wiki/wiki-00000030816.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000030884.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000030816.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000030884.md",
+     "doc:/vault/wiki/wiki-00000030816.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000030816.md",
+   "answer_note": "/vault/wiki/wiki-00000030884.md",
+   "start_body_sha256": "9e97bc57adf7a029a77a955021c20dfd92942c0d24b3ef94f6357df8e1a21a99",
+   "answer_body_sha256": "f3d34e6495a5e6ab71e1bb576da65b6786a04dbe3bfd2802b2f40dd0fa362ba4",
+   "question": "응답 대상인 메인 체크아웃의 foodspring-screen-verify SKILL.md가 워크트리 쪽 문안과 같은지 확인하고, 같다면 rule-checks.tsv의 821·825행 기간을 연장해도 되는지 어떻게 판단하면 되나요?"
+  },
+  {
+   "id": "gr1-h-S-3328c214",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000016108.md|doc:/vault/wiki/wiki-00000016098.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000016108.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000016098.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000016108.md",
+     "doc:/vault/wiki/wiki-00000016098.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000016098.md",
+   "answer_note": "/vault/wiki/wiki-00000016108.md",
+   "start_body_sha256": "764dabc8a51bb356da6e0457247c3bdaffc1a6cc62c3a1bf294ab6a6059a9c16",
+   "answer_body_sha256": "c9ef64d889689803695d8334625e2e2d39f7b879275a78d27eb53a36338158d0",
+   "question": "나머지 78/84건은 [global/recipe]에 다시 보낸 뒤 어떻게 처리됐나요?"
+  },
+  {
+   "id": "gr1-h-S-3347ae1a",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000006482.md|doc:/vault/wiki/wiki-00000006270.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000006482.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000006270.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000006482.md",
+     "doc:/vault/wiki/wiki-00000006270.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000006270.md",
+   "answer_note": "/vault/wiki/wiki-00000006482.md",
+   "start_body_sha256": "ede44e6aba2c8eab0b29fa4877384e1d6a001b312456134360f21a994a359f75",
+   "answer_body_sha256": "516a4ea9dc494995d51844b7d8589558b95e089127da97ec012e9455ae566dd5",
+   "question": "CLAUDE.md §5에 있던 foodspring 예외 줄을 되돌렸는데, 그러면 실험대 533958ada의 시험 3개(변경 전 2개 실패, 1개 대조)는 지금 어떻게 처리해야 하나요?"
+  },
+  {
+   "id": "gr1-h-S-34b5c432",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000016357.md|doc:/vault/wiki/wiki-00000016012.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000016357.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000016012.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000016357.md",
+     "doc:/vault/wiki/wiki-00000016012.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000016012.md",
+   "answer_note": "/vault/wiki/wiki-00000016357.md",
+   "start_body_sha256": "608c3cdec910f36e009508ce5ef642cc326e459b60d5bdc2e60a19f726137ac4",
+   "answer_body_sha256": "70a7418dff7ddc249c0d61460dbcbdbfbc40c9a0d322d477c9e9b904c71498b1",
+   "question": "외부 조건 확인: 계약 C를 새 세션에서 이어받을 때 seller 레포에서 ts-pattern·ts-belt를 실제로 쓰는지 `rg`로 센 결과, 판정에 어떻게 보고해야 하는지 알려줘."
+  },
+  {
+   "id": "gr1-h-S-3d4bdb89",
+   "half": "holdout",
+   "source": "supersedes",
+   "source_pair": {
+    "pair_id": "supersedes|doc:/vault/wiki/wiki-00000010620.md|doc:/vault/wiki/wiki-00000010615.md",
+    "edge": {
+     "src_new": "doc:/vault/wiki/wiki-00000010620.md",
+     "dst_old": "doc:/vault/wiki/wiki-00000010615.md"
+    },
+    "documents": [
+     "doc:/vault/wiki/wiki-00000010620.md",
+     "doc:/vault/wiki/wiki-00000010615.md"
+    ]
+   },
+   "start_note": "/vault/wiki/wiki-00000010615.md",
+   "answer_note": "/vault/wiki/wiki-00000010620.md",
+   "start_body_sha256": "8847b356b59507b4d1179c4b7ec9795c76151958ea110c23e85d4e65887c71f7",
+   "answer_body_sha256": "3e44ebd57f4f25d45d1644f95b49ce4b029b6975cbea611d9151334e1ed6eb39",
+   "question": "CLAUDE.md 30줄 기준 보고 규칙 개정안에 소유자가 동의했는지, 그리고 동의 후 실제로 CLAUDE.md가 어떻게 바뀌었는지 알려줘?"
+  }
+ ]
+}
