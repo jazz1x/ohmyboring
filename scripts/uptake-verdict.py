@@ -230,6 +230,13 @@ def main(argv=None):
         default=verdict_core.WINDOW_SINCE,
         help=f"ISO date; drop events observed before it (default: the window's start, {verdict_core.WINDOW_SINCE})",
     )
+    # A reading of a past period (not the registered window) needs its own ceiling; with only
+    # --since, the ceiling stayed at WINDOW_UNTIL and `--since 2026-11-01` read 0 rows.
+    ap.add_argument(
+        "--until",
+        default=verdict_core.WINDOW_UNTIL,
+        help=f"ISO date, inclusive on the WINDOW_TZ calendar (default: the window's end, {verdict_core.WINDOW_UNTIL})",
+    )
     ap.add_argument("--agent", help="report only this adapter")
     ap.add_argument(
         "--midpoint",
@@ -259,10 +266,8 @@ def main(argv=None):
     pre_rows, post_rows = partition_at_repair(rows)
     # The ceiling matters from 09-15: without it this counts events the pre-registered window
     # excludes while `peek` filters them out, and the two surfaces stop describing the same sample.
-    pre_agent, _ = collect(pre_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL)
-    per_agent, skipped_old = collect(
-        post_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL
-    )
+    pre_agent, _ = collect(pre_rows, since=args.since, agent=args.agent, until=args.until)
+    per_agent, skipped_old = collect(post_rows, since=args.since, agent=args.agent, until=args.until)
     # `--json` keeps stdout to exactly one line. A caller that pipes this into a parser should not
     # have to strip advisory prose, and prose on stdout is how a machine-readable mode stops being
     # machine-readable without anybody noticing.
@@ -335,8 +340,8 @@ def main(argv=None):
         # instrumentation defect that clause warns about. With no session-end signal, zero uptake
         # rows is a window nobody has finished a session in — indistinguishable from a broken
         # hook, and saying which would be a claim the data does not carry.
-        ended, _scored, _automated, source = session_counts(rows, args.since, verdict_core.WINDOW_UNTIL)
-        sample = uptake_core.window_sample(verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL)
+        ended, _scored, _automated, source = session_counts(rows, args.since, args.until)
+        sample = uptake_core.window_sample(args.since, args.until)
         floors = (
             f" 표본 하한은 장부에서 지금 읽힌다: 세션 {sample.sessions}/{verdict_core.MIN_SESSIONS}"
             f" · 주입 프롬프트 {sample.prompts}/{verdict_core.MIN_INJECTED_PROMPTS}"
@@ -403,7 +408,8 @@ def main(argv=None):
             # and becomes an instrument investigation. Reported raw here because this script
             # cannot read transcripts — the automated share that made the raw ratio read 14%
             # against 83% for people (§8 D8) has to come from a caller that can classify.
-            "coverage": _coverage_payload(rows, args.since, verdict_core.WINDOW_UNTIL),
+            "window": {"since": args.since, "until_inclusive": args.until, "tz": str(verdict_core.WINDOW_TZ)},
+            "coverage": _coverage_payload(rows, args.since, args.until),
         }
         print(json.dumps(payload, ensure_ascii=False))
         return 0
@@ -425,7 +431,7 @@ def main(argv=None):
     sensitive = uptake_core.detector_is_sensitive()
     # §2 puts coverage before the thresholds: a rate over a seventh of the channel is not a
     # smaller version of the right answer, it is an answer about a different population.
-    cov = _coverage_payload(rows, args.since, verdict_core.WINDOW_UNTIL)
+    cov = _coverage_payload(rows, args.since, args.until)
     for who, c in sorted(per_agent.items()):
         v = verdict_core.verdict(
             c["sessions"],
