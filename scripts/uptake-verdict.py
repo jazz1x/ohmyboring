@@ -17,8 +17,11 @@ rate answers neither product's question.
 """
 
 import argparse
+import csv
+import io
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -124,6 +127,70 @@ def fetch_events(base_url, limit, since_hours=None):
             " not the sample. §2 is a contract about a population, and a truncated one is not it.",
             file=sys.stderr,
         )
+    return rows
+
+
+#: `--source db` reads through `docker exec psql`, as scripts/data-parity.py does, so no DSN or
+#: password ever sits on a command line; only names come from the environment.
+PSQL_CONTAINER = os.environ.get("UPTAKE_PSQL_CONTAINER", "boring-postgres")
+PSQL_USER = os.environ.get("UPTAKE_PSQL_USER", "boring")
+PSQL_DB = os.environ.get("UPTAKE_PSQL_DB", "boring")
+
+#: The engine's `recent_events` (drudge/src/store.rs:2645-2657) minus its LIMIT, each row shaped
+#: like one `/events` entry (drudge/src/serve/http.rs handle_events): `/events` stops at 1000 rows
+#: newest-first, so a 20-day window never reached its own start. The upper bound stays out of the
+#: SQL on purpose — the window is cut in `collect` alone, for both sources.
+EVENT_ROWS_SQL = """
+SELECT json_build_object(
+  'id', id, 'observed_at', observed_at, 'time_unix_nano', time_unix_nano,
+  'severity_text', severity_text, 'severity_number', severity_number,
+  'service_name', service_name, 'component', component, 'event', event_name, 'status', status,
+  'trace_id', trace_id, 'span_id', span_id, 'run_id', run_id, 'session_id', session_id,
+  'workflow', workflow, 'workflow_node', workflow_node, 'workflow_outcome', workflow_outcome,
+  'body', body, 'attributes', attributes, 'resource', resource,
+  'otel', json_build_object(
+    'observed_timestamp', observed_at, 'time_unix_nano', time_unix_nano,
+    'severity_text', severity_text, 'severity_number', severity_number,
+    'body', body, 'attributes', attributes, 'resource', resource,
+    'trace_id', trace_id, 'span_id', span_id, 'event_name', event_name))
+FROM event_log
+WHERE event_name = :'event_name'
+  AND (NULLIF(:'since_hours', '') IS NULL
+       OR observed_at >= now() - make_interval(hours => NULLIF(:'since_hours', '')::int))
+ORDER BY observed_at DESC, id DESC;
+"""
+
+
+def fetch_events_db(since_hours=None):
+    """The same rows as `fetch_events`, read from the event table without the 1000-row cap.
+
+    None when psql fails, so a broken read exits 2 like an unreachable engine instead of
+    arriving as an empty sample. The session is read-only and in UTC, so `observed_at`
+    serialises as the engine's RFC3339 UTC string.
+    """
+    rows, counts = [], []
+    for name in VERDICT_EVENT_NAMES:
+        cmd = [
+            "docker", "exec", "-i",
+            "-e", "PGOPTIONS=-c default_transaction_read_only=on -c TimeZone=UTC",
+            PSQL_CONTAINER, "psql", "-U", PSQL_USER, "-d", PSQL_DB,
+            "-X", "--csv", "-v", "ON_ERROR_STOP=1",
+            "-v", f"event_name={name}",
+            "-v", f"since_hours={int(since_hours) if since_hours else ''}",
+            "-f", "-",
+        ]  # fmt: skip
+        try:
+            proc = subprocess.run(cmd, input=EVENT_ROWS_SQL, capture_output=True, text=True)
+        except OSError as exc:
+            print(f"[uptake-verdict] psql could not start: {exc}", file=sys.stderr)
+            return None
+        if proc.returncode != 0:
+            print(f"[uptake-verdict] psql failed for {name!r}: {proc.stderr.strip()}", file=sys.stderr)
+            return None
+        lines = list(csv.reader(io.StringIO(proc.stdout)))[1:]
+        rows.extend(json.loads(line[0]) for line in lines)
+        counts.append(f"{name}={len(lines)}")
+    print(f"[uptake-verdict] db rows: {', '.join(counts)}", file=sys.stderr)
     return rows
 
 
@@ -237,6 +304,12 @@ def main(argv=None):
         default=verdict_core.WINDOW_UNTIL,
         help=f"ISO date, inclusive on the WINDOW_TZ calendar (default: the window's end, {verdict_core.WINDOW_UNTIL})",
     )
+    ap.add_argument(
+        "--source",
+        choices=("events", "db"),
+        default="events",
+        help="events: the engine's /events (1000 rows per name at most); db: the event table read-only",
+    )
     ap.add_argument("--agent", help="report only this adapter")
     ap.add_argument(
         "--midpoint",
@@ -250,7 +323,12 @@ def main(argv=None):
     )
     args = ap.parse_args(argv)
 
-    rows = fetch_events(args.url, args.limit, since_hours=hours_since(args.since))
+    since_hours = hours_since(args.since)
+    rows = (
+        fetch_events_db(since_hours)
+        if args.source == "db"
+        else fetch_events(args.url, args.limit, since_hours=since_hours)
+    )
     if rows is None:
         # Exit 2, distinct from "no events" (1) and "verdict printed" (0). A caller that cannot
         # tell an unreachable engine from an empty one reads absence as a measurement, which is
