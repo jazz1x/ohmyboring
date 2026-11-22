@@ -8,7 +8,7 @@ The product definition for this repository. `GOALS.md` is the "current-slice exe
 ## 0. BLUF
 
 - The **primary user = the agent** conclusion stands, but **its grounds are replaced**: not supply (1,472 injections/week) but **uptake** (the #224 ledger: injected fingerprints reappearing in assistant turns). The verdict contract is pre-registered in this document (§2): **if, over a two-week window, per-prompt uptake does not significantly exceed the control (hits that were not injected), the injection channel in its current form is declared not working and the R6 parameters are reopened.** Measured against a floor, not an absolute threshold.
-- **Throttle decision** (product decision, §5-R6): the session-throttle concept is dropped. `agents/claude-code/README.md:10` "(throttled to once per session)" is false and is deleted; injection frequency is frozen for the two-week uptake window — changing the channel mid-measurement kills the sample.
+- **Throttle decision** (product decision, §5-R6): the session-throttle concept is dropped. `agents/claude-code/README.md:10` "(throttled to once per session)" is false and is deleted; injection frequency is frozen for the seven-day uptake window — changing the channel mid-measurement kills the sample.
 - **Metric hierarchy corrected**: M8 uptake (new) is the first-class outcome metric, M1 precision is demoted to diagnostic, and M2 is renamed from "the measurement of R1" to a **regression floor (smoke)** (22/22 on an 18-document fixture corpus).
 - **R3 stays unresolved**: the defect where a session's biggest decision drops out of distillation (the #218 loss) cannot be answered by renaming a metric. The derived work and its honest cost (1–2 weeks) are recorded in §5-R3, and the start is pinned to after the measurement window — changing distillation changes the notes that get injected.
 - **Adoption decision (§7)**: **commit to `docs/PRD.md` in this slice** — so that it can be the pre-registration site for the §2 contract. Anti-drift is designed in its minimal form (§6).
@@ -37,12 +37,12 @@ The control is free: `drudge/src/retrieve.rs:93` has `pool = (max_results*4).max
 
 | Item | Value |
 |---|---|
-| Window | Two weeks. The dates are registered in code — `verdict_core.WINDOW_SINCE`, `verdict_core.WINDOW_UNTIL`, `verdict_core.MIDPOINT` — with the commit history as the timestamp of registration. A reset is a dated decision commit that moves those constants before any row exists under the new instrument (§8 D1, D9); metric, floors and thresholds never move with them |
+| Window | Seven days, both dates inclusive, never extended. During the window the sample is read once a day, and those reads never bring the close forward. The dates are registered in code — `verdict_core.WINDOW_SINCE`, `verdict_core.WINDOW_UNTIL`, `verdict_core.MIDPOINT` — with the commit history as the timestamp of registration. A reset is a dated decision commit that moves those constants before any row exists under the new instrument (§8 D1, D9); metric, floors and thresholds never move with them |
 | Metric | per-prompt uptake (treatment) vs per-prompt control |
 | **Sample floor** | sessions ≥20 **AND** injected prompts ≥200. Below it, the **verdict is refused** — no number is produced (same shape as the `MIN_DECIDED` precedent in `agents/shared/label_core.py`) |
 | **Works** | treatment ≥ **2**× control AND gap ≥ **3**pp |
 | **Not working** | treatment ≤ control + 1pp → the injection channel in its current form is declared not working; R6 parameters (form, timing, on-demand) reopened |
-| **Withheld** | anything in between → the window is extended once, no forced action |
+| **Withheld** | anything in between → recorded as withheld; the window is not extended, no forced action |
 | Instrumentation-fault clause | sessions end but zero `injection_uptake` events within 48h → not a verdict but an **instrumentation investigation** |
 | Instrument self-check | the same transcript is also scored against **another session's** ledger hits. It must be ≈0; if it is at or above the treatment, the instrument is broken |
 
@@ -78,7 +78,7 @@ Recorded here because the clause above demands it of the scorer, and a change to
 
 **The midpoint is one-time** — it does not apply to an extended window. An extension changes none of the metric, floors or thresholds, and a daily progress alarm turns the red light into a background that trains itself to be ignored.
 
-If the floor is not met at the close, a refused verdict is recorded and the window is **extended exactly once, by two weeks** (metric, floors, thresholds unchanged). If it is still short after the extension, **the floor is not lowered.** Instead, "the injection channel could not produce a judgeable sample in four weeks" is adopted as a product signal on par with "not working", and the R6 parameters are reopened. Because the exit is fixed as "the shortfall itself is the verdict" rather than "lower the floor", there is no freedom to adjust after seeing partial numbers at the close.
+If the floor is not met at the close, a refused verdict is recorded and the window is **not extended** (metric, floors, thresholds unchanged). **The floor is not lowered.** Instead, "the injection channel could not produce a judgeable sample in seven days" is adopted as a product signal on par with "not working", and the R6 parameters are reopened. Because the exit is fixed as "the shortfall itself is the verdict" rather than "lower the floor", there is no freedom to adjust after seeing partial numbers at the close.
 
 **2×, 3pp and 1pp were chosen without priors.** But they are **superiority margins above a measured floor**, not absolute thresholds, and there is a withheld band with no forced action when neither side is met — that is the difference from 0.514. The contract binds **behaviour**, not truth.
 
@@ -176,7 +176,7 @@ Facts (all verified): the Claude Code hook injects on every prompt with no throt
    **And 34% of those are notes already given in the same session** — of 3,795 in-session injected hits, 2,521 are unique; one note was re-injected up to **25 times** in one session. That text is already in the agent's context, so this part is not even noise but **pure duplication**.
 
    Even with ground 1 rejected, **the decision (dropping the throttle concept) stands** — grounds 2 and 3 hold it up independently, and a throttle would not fix duplication anyway (it kills the good injections too). But **the claim that there is no cost can no longer be made**, and in-session dedup is the first candidate after the window closes (frozen under §5-R6, so no change during the window). The real cost is still noise, but **tokens were not free either.**
-2. **Measurement integrity** — the two-week uptake sample is defined on the current injection frequency. Changing frequency mid-window voids the §2 contract. Frozen for the window.
+2. **Measurement integrity** — the seven-day uptake sample is defined on the current injection frequency. Changing frequency mid-window voids the §2 contract. Frozen for the window.
 3. **The verdict supersedes the decision** — if not working, the channel itself is redesigned and the throttle debate is moot; if working, per-prompt injection has proven its value.
 Derived: ① remove the falsehood in `agents/claude-code/README.md:10` (immediately, a doc fix). The AI PM's point that "nothing is offered at the moment of demand (being stuck)" is right, and that surface goes to §8 Q8 as a **next-design candidate** with M7 as input.
 
