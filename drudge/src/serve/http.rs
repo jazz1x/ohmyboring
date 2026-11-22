@@ -586,8 +586,7 @@ fn log_search_query(
         vec![],
         mapped
             .first()
-            .map(|h| h.snippet.chars().take(200).collect())
-            .unwrap_or_default(),
+            .map_or_default(|h| h.snippet.chars().take(200).collect()),
         started.elapsed(),
     );
 }
