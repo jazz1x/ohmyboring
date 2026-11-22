@@ -6,6 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning per [
 ## [Unreleased]
 
 ### Changed
+- **feat(verdict): 주입 채널 판정 기간을 2026-11-23~11-29(7일, 연장 없음)로 미리 등록한다** — `verdict_core` 의 `WINDOW_SINCE`·`WINDOW_UNTIL`·`MIDPOINT`(11-26)를 옮겼다. 끝 날짜를 포함한다. 지표·하한(세션 20, 주입 프롬프트 200)·문턱(2배, 3pp, +1pp)은 그대로다. PRD §2 의 기간 줄도 「7일, 하한 미달·사이 칸 모두 연장 없음, 날마다 한 줄 읽기」로 바꿨다.
+- **feat(uptake-verdict): `--until` 로 지난 기간을 자기 위 경계로 읽는다** — `--since` 만 있으면 위 경계가 `WINDOW_UNTIL` 에 묶여 지난 기간이 0행으로 나오던 것. 기본값은 등록된 창의 끝이다.
+- **feat(uptake-verdict): `--source db` 가 이벤트 표를 1000행 상한 없이 읽는다** — `/events` 는 사건 이름마다 최신 1000행에서 잘려 긴 창의 앞쪽에 닿지 못했다. `docker exec psql` 로 읽기 전용·UTC 세션에서 엔진과 같은 질의를 LIMIT 없이 돌린다. 기본은 `events` 그대로다.
 - **fix(distill): 근거 낱말 0 전사는 모델 부르기 전에 건너뛴다** — 전사에 근거 낱말이 하나도 없으면 해상도 게이트를 본문이 무엇이든 못 넘는데도 모델을 부르고 재시도하다 dead letter 로 쌓였다. 그래프 시작 간선에서 게이트와 같은 함수·같은 입력으로 가려 `no_evidence_tokens` 로 건너뛴다(모델 호출 0). 하한 0 인 compact 는 그대로 둔다.
 - **fix(doctor): 노트가 인자 한도를 넘어도 가장 최근 노트를 읽는다** — 노트 19,280개에서 `ls` 가 Argument list too long 으로 죽고 stderr 를 버려 「노트 없음」으로 나오던 것. 목록을 `find` 로 읽고, 목록 실패는 「cannot measure newest note」 빨강으로 가른다.
 - **fix(doctor): 가장 최근 노트를 번호 순으로 고른다** — 노트 번호가 다섯 자리(wiki-10000~)로 넘어가자 글자 순 정렬이 wiki-9999 를 최신으로 골라, 신선도(d5)가 오래된 노트를 재고 2026-10-29 23:12 에 거짓 빨강을 낼 참이었다. `wiki-` 뒤 숫자로 정렬한다.

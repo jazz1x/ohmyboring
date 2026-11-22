@@ -17,8 +17,11 @@ rate answers neither product's question.
 """
 
 import argparse
+import csv
+import io
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -127,6 +130,70 @@ def fetch_events(base_url, limit, since_hours=None):
     return rows
 
 
+#: `--source db` reads through `docker exec psql`, as scripts/data-parity.py does, so no DSN or
+#: password ever sits on a command line; only names come from the environment.
+PSQL_CONTAINER = os.environ.get("UPTAKE_PSQL_CONTAINER", "boring-postgres")
+PSQL_USER = os.environ.get("UPTAKE_PSQL_USER", "boring")
+PSQL_DB = os.environ.get("UPTAKE_PSQL_DB", "boring")
+
+#: The engine's `recent_events` (drudge/src/store.rs:2645-2657) minus its LIMIT, each row shaped
+#: like one `/events` entry (drudge/src/serve/http.rs handle_events): `/events` stops at 1000 rows
+#: newest-first, so a 20-day window never reached its own start. The upper bound stays out of the
+#: SQL on purpose — the window is cut in `collect` alone, for both sources.
+EVENT_ROWS_SQL = """
+SELECT json_build_object(
+  'id', id, 'observed_at', observed_at, 'time_unix_nano', time_unix_nano,
+  'severity_text', severity_text, 'severity_number', severity_number,
+  'service_name', service_name, 'component', component, 'event', event_name, 'status', status,
+  'trace_id', trace_id, 'span_id', span_id, 'run_id', run_id, 'session_id', session_id,
+  'workflow', workflow, 'workflow_node', workflow_node, 'workflow_outcome', workflow_outcome,
+  'body', body, 'attributes', attributes, 'resource', resource,
+  'otel', json_build_object(
+    'observed_timestamp', observed_at, 'time_unix_nano', time_unix_nano,
+    'severity_text', severity_text, 'severity_number', severity_number,
+    'body', body, 'attributes', attributes, 'resource', resource,
+    'trace_id', trace_id, 'span_id', span_id, 'event_name', event_name))
+FROM event_log
+WHERE event_name = :'event_name'
+  AND (NULLIF(:'since_hours', '') IS NULL
+       OR observed_at >= now() - make_interval(hours => NULLIF(:'since_hours', '')::int))
+ORDER BY observed_at DESC, id DESC;
+"""
+
+
+def fetch_events_db(since_hours=None):
+    """The same rows as `fetch_events`, read from the event table without the 1000-row cap.
+
+    None when psql fails, so a broken read exits 2 like an unreachable engine instead of
+    arriving as an empty sample. The session is read-only and in UTC, so `observed_at`
+    serialises as the engine's RFC3339 UTC string.
+    """
+    rows, counts = [], []
+    for name in VERDICT_EVENT_NAMES:
+        cmd = [
+            "docker", "exec", "-i",
+            "-e", "PGOPTIONS=-c default_transaction_read_only=on -c TimeZone=UTC",
+            PSQL_CONTAINER, "psql", "-U", PSQL_USER, "-d", PSQL_DB,
+            "-X", "--csv", "-v", "ON_ERROR_STOP=1",
+            "-v", f"event_name={name}",
+            "-v", f"since_hours={int(since_hours) if since_hours else ''}",
+            "-f", "-",
+        ]  # fmt: skip
+        try:
+            proc = subprocess.run(cmd, input=EVENT_ROWS_SQL, capture_output=True, text=True)
+        except OSError as exc:
+            print(f"[uptake-verdict] psql could not start: {exc}", file=sys.stderr)
+            return None
+        if proc.returncode != 0:
+            print(f"[uptake-verdict] psql failed for {name!r}: {proc.stderr.strip()}", file=sys.stderr)
+            return None
+        lines = list(csv.reader(io.StringIO(proc.stdout)))[1:]
+        rows.extend(json.loads(line[0]) for line in lines)
+        counts.append(f"{name}={len(lines)}")
+    print(f"[uptake-verdict] db rows: {', '.join(counts)}", file=sys.stderr)
+    return rows
+
+
 def session_counts(rows, since, until):
     """§2's coverage inputs. The counting lives in `verdict_core` so `peek` and this script
     cannot drift apart on what a session is; the transcript classifier is handed in from here."""
@@ -230,6 +297,19 @@ def main(argv=None):
         default=verdict_core.WINDOW_SINCE,
         help=f"ISO date; drop events observed before it (default: the window's start, {verdict_core.WINDOW_SINCE})",
     )
+    # A reading of a past period (not the registered window) needs its own ceiling; with only
+    # --since, the ceiling stayed at WINDOW_UNTIL and `--since 2026-11-01` read 0 rows.
+    ap.add_argument(
+        "--until",
+        default=verdict_core.WINDOW_UNTIL,
+        help=f"ISO date, inclusive on the WINDOW_TZ calendar (default: the window's end, {verdict_core.WINDOW_UNTIL})",
+    )
+    ap.add_argument(
+        "--source",
+        choices=("events", "db"),
+        default="events",
+        help="events: the engine's /events (1000 rows per name at most); db: the event table read-only",
+    )
     ap.add_argument("--agent", help="report only this adapter")
     ap.add_argument(
         "--midpoint",
@@ -243,7 +323,12 @@ def main(argv=None):
     )
     args = ap.parse_args(argv)
 
-    rows = fetch_events(args.url, args.limit, since_hours=hours_since(args.since))
+    since_hours = hours_since(args.since)
+    rows = (
+        fetch_events_db(since_hours)
+        if args.source == "db"
+        else fetch_events(args.url, args.limit, since_hours=since_hours)
+    )
     if rows is None:
         # Exit 2, distinct from "no events" (1) and "verdict printed" (0). A caller that cannot
         # tell an unreachable engine from an empty one reads absence as a measurement, which is
@@ -259,10 +344,8 @@ def main(argv=None):
     pre_rows, post_rows = partition_at_repair(rows)
     # The ceiling matters from 09-15: without it this counts events the pre-registered window
     # excludes while `peek` filters them out, and the two surfaces stop describing the same sample.
-    pre_agent, _ = collect(pre_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL)
-    per_agent, skipped_old = collect(
-        post_rows, since=args.since, agent=args.agent, until=verdict_core.WINDOW_UNTIL
-    )
+    pre_agent, _ = collect(pre_rows, since=args.since, agent=args.agent, until=args.until)
+    per_agent, skipped_old = collect(post_rows, since=args.since, agent=args.agent, until=args.until)
     # `--json` keeps stdout to exactly one line. A caller that pipes this into a parser should not
     # have to strip advisory prose, and prose on stdout is how a machine-readable mode stops being
     # machine-readable without anybody noticing.
@@ -335,8 +418,8 @@ def main(argv=None):
         # instrumentation defect that clause warns about. With no session-end signal, zero uptake
         # rows is a window nobody has finished a session in — indistinguishable from a broken
         # hook, and saying which would be a claim the data does not carry.
-        ended, _scored, _automated, source = session_counts(rows, args.since, verdict_core.WINDOW_UNTIL)
-        sample = uptake_core.window_sample(verdict_core.WINDOW_SINCE, verdict_core.WINDOW_UNTIL)
+        ended, _scored, _automated, source = session_counts(rows, args.since, args.until)
+        sample = uptake_core.window_sample(args.since, args.until)
         floors = (
             f" 표본 하한은 장부에서 지금 읽힌다: 세션 {sample.sessions}/{verdict_core.MIN_SESSIONS}"
             f" · 주입 프롬프트 {sample.prompts}/{verdict_core.MIN_INJECTED_PROMPTS}"
@@ -403,7 +486,8 @@ def main(argv=None):
             # and becomes an instrument investigation. Reported raw here because this script
             # cannot read transcripts — the automated share that made the raw ratio read 14%
             # against 83% for people (§8 D8) has to come from a caller that can classify.
-            "coverage": _coverage_payload(rows, args.since, verdict_core.WINDOW_UNTIL),
+            "window": {"since": args.since, "until_inclusive": args.until, "tz": str(verdict_core.WINDOW_TZ)},
+            "coverage": _coverage_payload(rows, args.since, args.until),
         }
         print(json.dumps(payload, ensure_ascii=False))
         return 0
@@ -425,7 +509,7 @@ def main(argv=None):
     sensitive = uptake_core.detector_is_sensitive()
     # §2 puts coverage before the thresholds: a rate over a seventh of the channel is not a
     # smaller version of the right answer, it is an answer about a different population.
-    cov = _coverage_payload(rows, args.since, verdict_core.WINDOW_UNTIL)
+    cov = _coverage_payload(rows, args.since, args.until)
     for who, c in sorted(per_agent.items()):
         v = verdict_core.verdict(
             c["sessions"],

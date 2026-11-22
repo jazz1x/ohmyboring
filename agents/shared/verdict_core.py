@@ -291,9 +291,9 @@ def unreported(rows):
 #: watched precisely because it is short. Fixed offset rather than the machine's local zone: this
 #: also runs inside a container, and a gate that moves with `TZ` is not a registered date.
 WINDOW_TZ = timezone(timedelta(hours=9))
-WINDOW_SINCE = "2026-09-18"
-WINDOW_UNTIL = "2026-10-02"
-MIDPOINT = "2026-09-25"
+WINDOW_SINCE = "2026-11-23"
+WINDOW_UNTIL = "2026-11-29"
+MIDPOINT = "2026-11-26"
 #: Scored sessions required at the midpoint, **per adapter** — the same basis as MIN_SESSIONS,
 #: which is applied per agent because the adapters run different products. Summing them would let
 #: 8 Claude Code sessions plus 3 from elsewhere clear a gate neither of them clears.

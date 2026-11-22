@@ -563,8 +563,7 @@ fn tool_query_arg(args: Option<&Value>) -> String {
         .iter()
         .filter_map(|key| args.get(key).and_then(Value::as_str))
         .find(|value| !value.is_empty())
-        .map(|value| value.chars().take(500).collect())
-        .unwrap_or_default()
+        .map_or_default(|value| value.chars().take(500).collect())
 }
 
 fn tool_outcome_snippet(out: &Result<ToolOut, ToolCallError>) -> String {
@@ -1472,8 +1471,7 @@ async fn store_new_note(
     let dup_suffix = duplicate
         .as_deref()
         .and_then(crate::vault::wiki_stem)
-        .map(|old| format!(" (supersedes wiki/{old}.md)"))
-        .unwrap_or_default();
+        .map_or_default(|old| format!(" (supersedes wiki/{old}.md)"));
     let label = format!("wiki/{wiki_id}.md{dup_suffix}");
     let message = finish_remembered_note(s, &path, &label, &front).await?;
     let supersedes_report =
@@ -2099,7 +2097,7 @@ fn parse_remember_note(
     let get_arr = |k: &str| {
         args.and_then(|a| a.get(k))
             .and_then(Value::as_array)
-            .map(|v| {
+            .map_or_default(|v| {
                 v.iter()
                     .filter_map(Value::as_str)
                     .map(str::trim)
@@ -2107,7 +2105,6 @@ fn parse_remember_note(
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
     };
 
     let title = get_str("title");

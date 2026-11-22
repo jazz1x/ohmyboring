@@ -46,9 +46,8 @@ pub(crate) async fn do_sync(
     };
     // Kernel A corpus = the vault's wiki dir (where remember writes). No vault → nothing to re-ingest
     // (remember ingests each note live; this walk only catches manual edits/deletes).
-    let dirs: Vec<String> = vault_dir
-        .map(|v| vec![v.join("wiki").to_string_lossy().into_owned()])
-        .unwrap_or_default();
+    let dirs: Vec<String> =
+        vault_dir.map_or_default(|v| vec![v.join("wiki").to_string_lossy().into_owned()]);
     let ingest = ingest::run(store, llm, cfg, &dirs).await?;
     // GC orphan semantic nodes (edges are rebuilt per-doc on re-ingest) — keeps the graph lean.
     match store.gc_orphans().await {
