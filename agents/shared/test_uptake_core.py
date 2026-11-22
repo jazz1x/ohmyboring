@@ -491,7 +491,9 @@ def test_a_row_with_no_usable_timestamp_is_still_counted():
 
 
 #: Fixed clock for the rolling-window tests: well after the closed verdict window.
-NOW = datetime(2026, 10, 20, 12, 0, tzinfo=verdict_core.WINDOW_TZ)
+#: 32.5 days after the window opens (was 2026-10-20 12:00 for a 09-18 window): past the close, so
+#: the window's rows are "closed", while NOW - 30 days still lands inside it.
+NOW = _window_open() + timedelta(days=32, hours=12)
 
 
 def _twin(row):
