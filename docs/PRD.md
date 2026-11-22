@@ -76,7 +76,7 @@ Recorded here because the clause above demands it of the scorer, and a change to
 
 **Why per adapter**: because the floor of 20 applies per adapter (each adapter runs a different product — §3 M8). Summed, 8 Claude Code sessions plus 3 from another adapter would **pass a gate neither of them passes**. Closed before the midpoint.
 
-**The midpoint is one-time** — it does not apply to an extended window. An extension changes none of the metric, floors or thresholds, and a daily progress alarm turns the red light into a background that trains itself to be ignored.
+**The midpoint is one-time** — a daily progress alarm turns the red light into a background that trains itself to be ignored.
 
 If the floor is not met at the close, a refused verdict is recorded and the window is **not extended** (metric, floors, thresholds unchanged). **The floor is not lowered.** Instead, "the injection channel could not produce a judgeable sample in seven days" is adopted as a product signal on par with "not working", and the R6 parameters are reopened. Because the exit is fixed as "the shortfall itself is the verdict" rather than "lower the floor", there is no freedom to adjust after seeing partial numbers at the close.
 
