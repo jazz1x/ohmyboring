@@ -21,10 +21,12 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers
+import transcript
 
 from ohmyboring import config as boring_config
 from ohmyboring.adapters import events as event_log
@@ -79,6 +81,26 @@ def transcript_cwd(tp):
     return ""
 
 
+def print_owner_corrections(since_iso: str, until_iso: str) -> int:
+    """C-WASTEVIEW1 S1: one line per owner sentence (`correction` or `other`), then the count."""
+    since, until = datetime.fromisoformat(since_iso), datetime.fromisoformat(until_iso)
+    paths = []
+    for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
+        paths.extend(glob.glob(os.path.join(d, "*", "*.jsonl")))  # top-level only, as the collector
+    sessions, total, hits = 0, 0, 0
+    for p in sorted(p for p in paths if os.path.getmtime(p) >= since.timestamp()):
+        found = transcript.owner_sentences(p, since, until)
+        sessions += bool(found)
+        for s in found:
+            hit = bool(transcript.OWNER_CORRECTION.search(s))
+            total, hits = total + 1, hits + hit
+            print(f"{'correction' if hit else 'other'}\t{os.path.basename(p)[:8]}\t{s}")
+    print(
+        f"owner_corrections {hits} / owner_sentences {total} sessions {sessions} since {since_iso} until {until_iso}"
+    )
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Backfill past Claude Code sessions into ohmyboring.")
     ap.add_argument(
@@ -87,7 +109,16 @@ def main():
         help="distill the MOST RECENT session immediately, ignoring done-markers and WITHOUT marking "
         "it done — so it is re-distillable on demand and the normal SessionEnd capture still runs.",
     )
+    ap.add_argument(
+        "--owner-corrections",
+        nargs=2,
+        metavar=("SINCE", "UNTIL"),
+        help="read-only: print the owner's sentences between two ISO instants and which match the "
+        "correction word rule; no distill, no event, no marker.",
+    )
     args = ap.parse_args()
+    if args.owner_corrections:
+        return print_owner_corrections(*args.owner_corrections)
     run_id = event_log.new_run_id("claude-collector")
 
     cutoff = time.time() - WINDOW_H * 3600

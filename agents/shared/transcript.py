@@ -251,6 +251,54 @@ def _claude_owner_text(obj: dict, text: str) -> str:
     return text
 
 
+#: C-WASTEVIEW1 S1: a fixed word rule, the one plan wiki-00000038878 counted with — reproach,
+#: negation, repetition, redo. Not tuned to any case; its precision is the judge's to read.
+OWNER_CORRECTION = re.compile(
+    r"왜|아니|말고|하지\s?마|안\s?되|안되|못\s|못하|못찾|또\s|다시|장난|제대로|틀렸|잘못|멈춰|그만|"
+    r"했는데|라고\s?했|말했|하라고|몇\s?번|계속|뭐하|어긋|낭비"
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.?!？])\s+|\n+")
+
+
+def _owner_row_text(obj: dict) -> str | None:
+    """What the owner typed in this row, or None when the row is not the owner's.
+
+    Owner = a user row Claude Code marks `origin.kind=human` in an interactive (`cli`) session;
+    headless runs and subagent briefs carry user rows too, and they are not the owner."""
+    content = (obj.get("message") or {}).get("content")
+    if obj.get("type") != "user" or not isinstance(content, str):
+        return None
+    if (obj.get("origin") or {}).get("kind") != "human" or obj.get("entrypoint") != "cli":
+        return None
+    return _claude_owner_text(obj, content.strip())
+
+
+def owner_sentences(path: str, since: datetime, until: datetime) -> list[str]:
+    """The owner's sentences in one Claude transcript between `since` and `until`.
+
+    Typed turns plus what the owner queued mid-turn (queue-operation enqueue), the latter only
+    when the session has a typed owner turn in the window; each message once."""
+    typed: list[str] = []
+    queued: list[str] = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            stamp = obj.get("timestamp")
+            if not stamp or not since <= datetime.fromisoformat(stamp.replace("Z", "+00:00")) < until:
+                continue
+            if obj.get("type") == "queue-operation" and obj.get("operation") == "enqueue":
+                queued.append(_claude_owner_text(obj, str(obj.get("content") or "").strip()))
+                continue
+            text = _owner_row_text(obj)
+            if text is not None:
+                typed.append(text)
+    messages = dict.fromkeys(t for t in typed + (queued if typed else []) if t)
+    return [s.strip() for m in messages for s in _SENTENCE_BREAK.split(m) if len(s.strip()) >= 2]
+
+
 # raw codex-jsonl bytes are dominated by function_call_output (huge shell/file
 # dumps) and reasoning (hidden CoT) — both stay dropped, they are why extraction
 # was ~2% of raw bytes in the first place and re-including them would just move
