@@ -11,6 +11,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from typing import NamedTuple
 
 from harness_prefixes import HARNESS_PREFIXES
 
@@ -260,13 +261,14 @@ OWNER_CORRECTION = re.compile(
 _SENTENCE_BREAK = re.compile(r"(?<=[.?!？])\s+|\n+")
 
 
-def _owner_row_text(obj: dict) -> str | None:
-    """What the owner typed in this row, or None when the row is not the owner's.
+def _typed_row(obj: dict) -> tuple[str, str] | None:
+    """("owner" | "first", what was typed) for a typed user row, None for any other row.
 
     Owner = a user row Claude Code marks `origin.kind=human` in an interactive (`cli`) session;
     headless runs and subagent briefs carry user rows too, and they are not the owner.
 
-    The first prompt of a session or of a /clear (`turnPosition.promptIndex == 1`) is dropped:
+    The first prompt of a session or of a /clear (`turnPosition.promptIndex == 1`) is "first", not
+    the owner's:
     that is where Orca types a seat's start order, a handoff pickup or a routine's brief, and
     those rows carry the same typed/human fields as the owner's own
     (~/.claude/projects/-Users-jongyun--claude/34495626-….jsonl:15 handoff pickup after /clear;
@@ -277,23 +279,42 @@ def _owner_row_text(obj: dict) -> str | None:
         return None
     if (obj.get("origin") or {}).get("kind") != "human" or obj.get("entrypoint") != "cli":
         return None
-    if (obj.get("turnPosition") or {}).get("promptIndex") == 1:
-        return None
-    return _claude_owner_text(obj, content.strip())
+    first = (obj.get("turnPosition") or {}).get("promptIndex") == 1
+    return ("first" if first else "owner", _claude_owner_text(obj, content.strip()))
 
 
-def owner_sentences(path: str, since: datetime, until: datetime) -> list[str]:
+class OwnerTranscript(NamedTuple):
+    """One transcript's owner sentences in a window, its seat name, and the first-prompt
+    sentences left out of `owner` (kept so their cost can be counted)."""
+
+    seat: str
+    owner: list[str]
+    first_prompts: list[str]
+
+
+def _sentences(messages: list[str]) -> list[str]:
+    unique = dict.fromkeys(m for m in messages if m)
+    return [s.strip() for m in unique for s in _SENTENCE_BREAK.split(m) if len(s.strip()) >= 2]
+
+
+def owner_sentences(path: str, since: datetime, until: datetime) -> OwnerTranscript:
     """The owner's sentences in one Claude transcript between `since` and `until`.
 
     Typed turns plus what the owner queued mid-turn (queue-operation enqueue), the latter only
-    when the session has a typed owner turn in the window; each message once."""
-    typed: list[str] = []
+    when the session has a typed owner turn in the window; each message once. The seat is the
+    session's last `agent-name` row (`/rename`, e.g. ~/.claude/projects/-Users-jongyun--claude/
+    211729a4-….jsonl:2 `{"type":"agent-name","agentName":"[global/judge]"}`), "" if none."""
+    typed: dict[str, list[str]] = {"owner": [], "first": []}
     queued: list[str] = []
+    seat = ""
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "agent-name":
+                seat = str(obj.get("agentName") or seat)
                 continue
             stamp = obj.get("timestamp")
             if not stamp or not since <= datetime.fromisoformat(stamp.replace("Z", "+00:00")) < until:
@@ -301,11 +322,11 @@ def owner_sentences(path: str, since: datetime, until: datetime) -> list[str]:
             if obj.get("type") == "queue-operation" and obj.get("operation") == "enqueue":
                 queued.append(_claude_owner_text(obj, str(obj.get("content") or "").strip()))
                 continue
-            text = _owner_row_text(obj)
-            if text is not None:
-                typed.append(text)
-    messages = dict.fromkeys(t for t in typed + (queued if typed else []) if t)
-    return [s.strip() for m in messages for s in _SENTENCE_BREAK.split(m) if len(s.strip()) >= 2]
+            row = _typed_row(obj)
+            if row is not None:
+                typed[row[0]].append(row[1])
+    owner = typed["owner"] + (queued if any(typed["owner"]) else [])
+    return OwnerTranscript(seat, _sentences(owner), _sentences(typed["first"]))
 
 
 # raw codex-jsonl bytes are dominated by function_call_output (huge shell/file

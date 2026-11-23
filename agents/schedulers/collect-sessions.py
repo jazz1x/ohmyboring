@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers
 import transcript
+import waste_kind
 
 from ohmyboring import config as boring_config
 from ohmyboring.adapters import events as event_log
@@ -81,23 +82,94 @@ def transcript_cwd(tp):
     return ""
 
 
+def _line(tag: str, seat: str, sid: str, text: str) -> None:
+    print(f"{tag}\t{seat or '이름 없음'}\t{sid}\t{','.join(waste_kind.waste_kinds(text))}\t{text}")
+
+
+def _register_lines():
+    """(register, "subject predicate value") for today's stalled and recurrences output, read the
+    way their HTTP routes read with default arguments — without the route's query_log write."""
+    import psycopg  # noqa: PLC0415 — only this read-only branch needs a DB driver
+
+    from ohmyboring.registers import pg as registers  # noqa: PLC0415
+
+    def text(c) -> str:
+        return f"{c.subject} {c.predicate} {c.value}"
+
+    match registers.http_args("stalled", {}), registers.http_args("recurrences", {}):
+        case Ok(st), Ok(rc):
+            pass
+        case (Err(rejected), _) | (_, Err(rejected)):
+            return Err(f"default arguments rejected: {rejected}")
+    query = registers.RegisterQuery(
+        st["limit"], st["project"], registers.NEXT_ACTION_KINDS, (), st["older_than_days"]
+    )
+    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn:
+        read = (
+            registers.stalled_register_rows(conn, query),
+            registers.recurrence_rows(conn, rc["days"], rc["project"], rc["limit"]),
+        )
+    match read:
+        case Ok(stalled), Ok(recurrences):
+            return Ok(
+                [("stalled", text(r)) for r in stalled.rows]
+                + [("recurrences", text(r.newer)) for r in recurrences]
+            )
+        case (Err(failure), _) | (_, Err(failure)):
+            return Err(str(failure))
+
+
 def print_owner_corrections(since_iso: str, until_iso: str) -> int:
-    """C-WASTEVIEW1 S1: one line per owner sentence (`correction` or `other`), then the count."""
+    """C-WASTEVIEW1 S1·S2: one line per owner sentence and register row with its waste kinds
+    (tag · seat · session · kinds · text), then the counts as `#` lines."""
     since, until = datetime.fromisoformat(since_iso), datetime.fromisoformat(until_iso)
     paths = []
     for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
         paths.extend(glob.glob(os.path.join(d, "*", "*.jsonl")))  # top-level only, as the collector
-    sessions, total, hits = 0, 0, 0
+    sessions, total, hits, first_total, first_hits = 0, 0, 0, 0, 0
+    kinds: dict[str, int] = {name: 0 for name, _ in waste_kind.WASTE_KINDS}
+    seats: dict[str, list[int]] = {}
     for p in sorted(p for p in paths if os.path.getmtime(p) >= since.timestamp()):
         found = transcript.owner_sentences(p, since, until)
-        sessions += bool(found)
-        for s in found:
+        sid, seat = os.path.basename(p)[:8], found.seat or "이름 없음"
+        sessions += bool(found.owner)
+        for s in found.owner:
             hit = bool(transcript.OWNER_CORRECTION.search(s))
             total, hits = total + 1, hits + hit
-            print(f"{'correction' if hit else 'other'}\t{os.path.basename(p)[:8]}\t{s}")
+            seats.setdefault(seat, [0, 0])
+            seats[seat][0] += hit
+            seats[seat][1] += 1
+            for name in waste_kind.waste_kinds(s) if hit else []:
+                kinds[name] += 1
+            _line("correction" if hit else "other", seat, sid, s)
+        for s in found.first_prompts:
+            hit = bool(transcript.OWNER_CORRECTION.search(s))
+            first_total, first_hits = first_total + 1, first_hits + hit
+            _line("first-correction" if hit else "first-other", seat, sid, s)
     print(
-        f"owner_corrections {hits} / owner_sentences {total} sessions {sessions} since {since_iso} until {until_iso}"
+        f"# owner_corrections {hits} / owner_sentences {total} sessions {sessions} since {since_iso} until {until_iso}"
     )
+    for name, n in kinds.items():
+        print(f"# kind {name} {n} / {hits}")
+    for seat, (c, n) in sorted(seats.items(), key=lambda kv: -kv[1][0]):
+        print(f"# seat {seat} corrections {c} / sentences {n}")
+    print(f"# first_prompt_corrections {first_hits} / first_prompt_sentences {first_total}")
+    if not os.environ.get("DOOR_PG_DSN"):
+        print("# registers not read: DOOR_PG_DSN unset")
+        return 0
+    match _register_lines():
+        case Err(reason):
+            print(f"# registers not read: {reason}")
+            return 1
+        case Ok(rows):
+            pass
+    for register, text in rows:
+        _line(f"register-{register}", "", "", text)
+    for register in ("stalled", "recurrences"):
+        mine = [t for r, t in rows if r == register]
+        print(
+            f"# register {register} with_kind {sum(bool(waste_kind.waste_kinds(t)) for t in mine)} / {len(mine)}"
+        )
     return 0
 
 
