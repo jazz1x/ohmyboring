@@ -264,11 +264,20 @@ def _owner_row_text(obj: dict) -> str | None:
     """What the owner typed in this row, or None when the row is not the owner's.
 
     Owner = a user row Claude Code marks `origin.kind=human` in an interactive (`cli`) session;
-    headless runs and subagent briefs carry user rows too, and they are not the owner."""
+    headless runs and subagent briefs carry user rows too, and they are not the owner.
+
+    The first prompt of a session or of a /clear (`turnPosition.promptIndex == 1`) is dropped:
+    that is where Orca types a seat's start order, a handoff pickup or a routine's brief, and
+    those rows carry the same typed/human fields as the owner's own
+    (~/.claude/projects/-Users-jongyun--claude/34495626-….jsonl:15 handoff pickup after /clear;
+    …/ad4848de-….jsonl:10 pr-review routine brief). 13 of the 15 machine lines the judge found
+    in the 11-23 sample sit there; an owner who opens a session by typing loses that one prompt."""
     content = (obj.get("message") or {}).get("content")
     if obj.get("type") != "user" or not isinstance(content, str):
         return None
     if (obj.get("origin") or {}).get("kind") != "human" or obj.get("entrypoint") != "cli":
+        return None
+    if (obj.get("turnPosition") or {}).get("promptIndex") == 1:
         return None
     return _claude_owner_text(obj, content.strip())
 
