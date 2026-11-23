@@ -86,42 +86,10 @@ def _line(tag: str, seat: str, sid: str, text: str) -> None:
     print(f"{tag}\t{seat or '이름 없음'}\t{sid}\t{','.join(waste_kind.waste_kinds(text))}\t{text}")
 
 
-def _register_lines():
-    """(register, "subject predicate value") for today's stalled and recurrences output, read the
-    way their HTTP routes read with default arguments — without the route's query_log write."""
-    import psycopg  # noqa: PLC0415 — only this read-only branch needs a DB driver
-
-    from ohmyboring.registers import pg as registers  # noqa: PLC0415
-
-    def text(c) -> str:
-        return f"{c.subject} {c.predicate} {c.value}"
-
-    match registers.http_args("stalled", {}), registers.http_args("recurrences", {}):
-        case Ok(st), Ok(rc):
-            pass
-        case (Err(rejected), _) | (_, Err(rejected)):
-            return Err(f"default arguments rejected: {rejected}")
-    query = registers.RegisterQuery(
-        st["limit"], st["project"], registers.NEXT_ACTION_KINDS, (), st["older_than_days"]
-    )
-    with psycopg.connect(os.environ["DOOR_PG_DSN"]) as conn:
-        read = (
-            registers.stalled_register_rows(conn, query),
-            registers.recurrence_rows(conn, rc["days"], rc["project"], rc["limit"]),
-        )
-    match read:
-        case Ok(stalled), Ok(recurrences):
-            return Ok(
-                [("stalled", text(r)) for r in stalled.rows]
-                + [("recurrences", text(r.newer)) for r in recurrences]
-            )
-        case (Err(failure), _) | (_, Err(failure)):
-            return Err(str(failure))
-
-
 def print_owner_corrections(since_iso: str, until_iso: str) -> int:
-    """C-WASTEVIEW1 S1·S2: one line per owner sentence and register row with its waste kinds
-    (tag · seat · session · kinds · text), then the counts as `#` lines."""
+    """C-WASTEVIEW1 S1·S2: one line per owner sentence with its waste kinds
+    (tag · seat · session · kinds · text), then the counts as `#` lines. Register rows are not
+    kinded: sessions wrote them, and the view must stand on the owner's words (38918)."""
     since, until = datetime.fromisoformat(since_iso), datetime.fromisoformat(until_iso)
     paths = []
     for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
@@ -154,22 +122,6 @@ def print_owner_corrections(since_iso: str, until_iso: str) -> int:
     for seat, (c, n) in sorted(seats.items(), key=lambda kv: -kv[1][0]):
         print(f"# seat {seat} corrections {c} / sentences {n}")
     print(f"# first_prompt_corrections {first_hits} / first_prompt_sentences {first_total}")
-    if not os.environ.get("DOOR_PG_DSN"):
-        print("# registers not read: DOOR_PG_DSN unset")
-        return 0
-    match _register_lines():
-        case Err(reason):
-            print(f"# registers not read: {reason}")
-            return 1
-        case Ok(rows):
-            pass
-    for register, text in rows:
-        _line(f"register-{register}", "", "", text)
-    for register in ("stalled", "recurrences"):
-        mine = [t for r, t in rows if r == register]
-        print(
-            f"# register {register} with_kind {sum(bool(waste_kind.waste_kinds(t)) for t in mine)} / {len(mine)}"
-        )
     return 0
 
 
