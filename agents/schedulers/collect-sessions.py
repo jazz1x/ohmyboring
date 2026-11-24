@@ -82,14 +82,15 @@ def transcript_cwd(tp):
     return ""
 
 
-def _line(tag: str, seat: str, sid: str, text: str) -> None:
-    print(f"{tag}\t{seat or '이름 없음'}\t{sid}\t{','.join(waste_kind.waste_kinds(text))}\t{text}")
+def _line(tag: str, seat: str, sid: str, where: str, text: str) -> None:
+    print(f"{tag}\t{seat or '이름 없음'}\t{sid}\t{','.join(waste_kind.waste_kinds(text))}\t{where}\t{text}")
 
 
 def print_owner_corrections(since_iso: str, until_iso: str) -> int:
-    """C-WASTEVIEW1 S1·S2: one line per owner sentence with its waste kinds
-    (tag · seat · session · kinds · text), then the counts as `#` lines. Register rows are not
-    kinded: sessions wrote them, and the view must stand on the owner's words (38918)."""
+    """C-WASTEVIEW1 S1·S2·S3: one line per owner sentence with its waste kinds and the transcript
+    location `path:line` of its row (tag · seat · session · kinds · location · text), then the counts
+    as `#` lines. Register rows are not kinded: sessions wrote them, and the view must stand on the
+    owner's words (38918)."""
     since, until = datetime.fromisoformat(since_iso), datetime.fromisoformat(until_iso)
     paths = []
     for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
@@ -102,18 +103,18 @@ def print_owner_corrections(since_iso: str, until_iso: str) -> int:
         sid, seat = os.path.basename(p)[:8], found.seat or "이름 없음"
         sessions += bool(found.owner)
         for s in found.owner:
-            hit = bool(transcript.OWNER_CORRECTION.search(s))
+            hit = bool(transcript.OWNER_CORRECTION.search(s.text))
             total, hits = total + 1, hits + hit
             seats.setdefault(seat, [0, 0])
             seats[seat][0] += hit
             seats[seat][1] += 1
-            for name in waste_kind.waste_kinds(s) if hit else []:
+            for name in waste_kind.waste_kinds(s.text) if hit else []:
                 kinds[name] += 1
-            _line("correction" if hit else "other", seat, sid, s)
+            _line("correction" if hit else "other", seat, sid, f"{p}:{s.line}", s.text)
         for s in found.first_prompts:
-            hit = bool(transcript.OWNER_CORRECTION.search(s))
+            hit = bool(transcript.OWNER_CORRECTION.search(s.text))
             first_total, first_hits = first_total + 1, first_hits + hit
-            _line("first-correction" if hit else "first-other", seat, sid, s)
+            _line("first-correction" if hit else "first-other", seat, sid, f"{p}:{s.line}", s.text)
     print(
         f"# owner_corrections {hits} / owner_sentences {total} sessions {sessions} since {since_iso} until {until_iso}"
     )

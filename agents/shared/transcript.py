@@ -283,18 +283,34 @@ def _typed_row(obj: dict) -> tuple[str, str] | None:
     return ("first" if first else "owner", _claude_owner_text(obj, content.strip()))
 
 
+class Located(NamedTuple):
+    """A sentence and the 1-based line of its transcript file where its message row sits."""
+
+    line: int
+    text: str
+
+
 class OwnerTranscript(NamedTuple):
     """One transcript's owner sentences in a window, its seat name, and the first-prompt
     sentences left out of `owner` (kept so their cost can be counted)."""
 
     seat: str
-    owner: list[str]
-    first_prompts: list[str]
+    owner: list[Located]
+    first_prompts: list[Located]
 
 
-def _sentences(messages: list[str]) -> list[str]:
-    unique = dict.fromkeys(m for m in messages if m)
-    return [s.strip() for m in unique for s in _SENTENCE_BREAK.split(m) if len(s.strip()) >= 2]
+def _sentences(messages: list[tuple[int, str]]) -> list[Located]:
+    """Split each distinct message into sentences; a message seen twice keeps its first line."""
+    first_line: dict[str, int] = {}
+    for at, m in messages:
+        if m:
+            first_line.setdefault(m, at)
+    return [
+        Located(at, s.strip())
+        for m, at in first_line.items()
+        for s in _SENTENCE_BREAK.split(m)
+        if len(s.strip()) >= 2
+    ]
 
 
 def owner_sentences(path: str, since: datetime, until: datetime) -> OwnerTranscript:
@@ -304,11 +320,11 @@ def owner_sentences(path: str, since: datetime, until: datetime) -> OwnerTranscr
     when the session has a typed owner turn in the window; each message once. The seat is the
     session's last `agent-name` row (`/rename`, e.g. ~/.claude/projects/-Users-jongyun--claude/
     211729a4-….jsonl:2 `{"type":"agent-name","agentName":"[global/judge]"}`), "" if none."""
-    typed: dict[str, list[str]] = {"owner": [], "first": []}
-    queued: list[str] = []
+    typed: dict[str, list[tuple[int, str]]] = {"owner": [], "first": []}
+    queued: list[tuple[int, str]] = []
     seat = ""
     with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
+        for n, line in enumerate(f, 1):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -320,12 +336,12 @@ def owner_sentences(path: str, since: datetime, until: datetime) -> OwnerTranscr
             if not stamp or not since <= datetime.fromisoformat(stamp.replace("Z", "+00:00")) < until:
                 continue
             if obj.get("type") == "queue-operation" and obj.get("operation") == "enqueue":
-                queued.append(_claude_owner_text(obj, str(obj.get("content") or "").strip()))
+                queued.append((n, _claude_owner_text(obj, str(obj.get("content") or "").strip())))
                 continue
             row = _typed_row(obj)
             if row is not None:
-                typed[row[0]].append(row[1])
-    owner = typed["owner"] + (queued if any(typed["owner"]) else [])
+                typed[row[0]].append((n, row[1]))
+    owner = typed["owner"] + (queued if any(text for _, text in typed["owner"]) else [])
     return OwnerTranscript(seat, _sentences(owner), _sentences(typed["first"]))
 
 
