@@ -11,6 +11,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from typing import NamedTuple
 
 from harness_prefixes import HARNESS_PREFIXES
 
@@ -249,6 +250,99 @@ def _claude_owner_text(obj: dict, text: str) -> str:
     if obj.get("isMeta") or obj.get("isCompactSummary") or text.startswith(_CLAUDE_USER_NOISE_MARKERS):
         return ""
     return text
+
+
+#: C-WASTEVIEW1 S1: a fixed word rule, the one plan wiki-00000038878 counted with — reproach,
+#: negation, repetition, redo. Not tuned to any case; its precision is the judge's to read.
+OWNER_CORRECTION = re.compile(
+    r"왜|아니|말고|하지\s?마|안\s?되|안되|못\s|못하|못찾|또\s|다시|장난|제대로|틀렸|잘못|멈춰|그만|"
+    r"했는데|라고\s?했|말했|하라고|몇\s?번|계속|뭐하|어긋|낭비"
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.?!？])\s+|\n+")
+
+
+def _typed_row(obj: dict) -> tuple[str, str] | None:
+    """("owner" | "first", what was typed) for a typed user row, None for any other row.
+
+    Owner = a user row Claude Code marks `origin.kind=human` in an interactive (`cli`) session;
+    headless runs and subagent briefs carry user rows too, and they are not the owner.
+
+    The first prompt of a session or of a /clear (`turnPosition.promptIndex == 1`) is "first", not
+    the owner's:
+    that is where Orca types a seat's start order, a handoff pickup or a routine's brief, and
+    those rows carry the same typed/human fields as the owner's own
+    (~/.claude/projects/-Users-jongyun--claude/34495626-….jsonl:15 handoff pickup after /clear;
+    …/ad4848de-….jsonl:10 pr-review routine brief). 13 of the 15 machine lines the judge found
+    in the 11-23 sample sit there; an owner who opens a session by typing loses that one prompt."""
+    content = (obj.get("message") or {}).get("content")
+    if obj.get("type") != "user" or not isinstance(content, str):
+        return None
+    if (obj.get("origin") or {}).get("kind") != "human" or obj.get("entrypoint") != "cli":
+        return None
+    first = (obj.get("turnPosition") or {}).get("promptIndex") == 1
+    return ("first" if first else "owner", _claude_owner_text(obj, content.strip()))
+
+
+class Located(NamedTuple):
+    """A sentence and the 1-based line of its transcript file where its message row sits."""
+
+    line: int
+    text: str
+
+
+class OwnerTranscript(NamedTuple):
+    """One transcript's owner sentences in a window, its seat name, and the first-prompt
+    sentences left out of `owner` (kept so their cost can be counted)."""
+
+    seat: str
+    owner: list[Located]
+    first_prompts: list[Located]
+
+
+def _sentences(messages: list[tuple[int, str]]) -> list[Located]:
+    """Split each distinct message into sentences; a message seen twice keeps its first line."""
+    first_line: dict[str, int] = {}
+    for at, m in messages:
+        if m:
+            first_line.setdefault(m, at)
+    return [
+        Located(at, s.strip())
+        for m, at in first_line.items()
+        for s in _SENTENCE_BREAK.split(m)
+        if len(s.strip()) >= 2
+    ]
+
+
+def owner_sentences(path: str, since: datetime, until: datetime) -> OwnerTranscript:
+    """The owner's sentences in one Claude transcript between `since` and `until`.
+
+    Typed turns plus what the owner queued mid-turn (queue-operation enqueue), the latter only
+    when the session has a typed owner turn in the window; each message once. The seat is the
+    session's last `agent-name` row (`/rename`, e.g. ~/.claude/projects/-Users-jongyun--claude/
+    211729a4-….jsonl:2 `{"type":"agent-name","agentName":"[global/judge]"}`), "" if none."""
+    typed: dict[str, list[tuple[int, str]]] = {"owner": [], "first": []}
+    queued: list[tuple[int, str]] = []
+    seat = ""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for n, line in enumerate(f, 1):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "agent-name":
+                seat = str(obj.get("agentName") or seat)
+                continue
+            stamp = obj.get("timestamp")
+            if not stamp or not since <= datetime.fromisoformat(stamp.replace("Z", "+00:00")) < until:
+                continue
+            if obj.get("type") == "queue-operation" and obj.get("operation") == "enqueue":
+                queued.append((n, _claude_owner_text(obj, str(obj.get("content") or "").strip())))
+                continue
+            row = _typed_row(obj)
+            if row is not None:
+                typed[row[0]].append((n, row[1]))
+    owner = typed["owner"] + (queued if any(text for _, text in typed["owner"]) else [])
+    return OwnerTranscript(seat, _sentences(owner), _sentences(typed["first"]))
 
 
 # raw codex-jsonl bytes are dominated by function_call_output (huge shell/file

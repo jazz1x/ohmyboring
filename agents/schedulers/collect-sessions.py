@@ -21,10 +21,13 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "src"))
 import markers
+import transcript
+import waste_kind
 
 from ohmyboring import config as boring_config
 from ohmyboring.adapters import events as event_log
@@ -79,6 +82,50 @@ def transcript_cwd(tp):
     return ""
 
 
+def _line(tag: str, seat: str, sid: str, where: str, text: str) -> None:
+    print(f"{tag}\t{seat or '이름 없음'}\t{sid}\t{','.join(waste_kind.waste_kinds(text))}\t{where}\t{text}")
+
+
+def print_owner_corrections(since_iso: str, until_iso: str) -> int:
+    """C-WASTEVIEW1 S1·S2·S3: one line per owner sentence with its waste kinds and the transcript
+    location `path:line` of its row (tag · seat · session · kinds · location · text), then the counts
+    as `#` lines. Register rows are not kinded: sessions wrote them, and the view must stand on the
+    owner's words (38918)."""
+    since, until = datetime.fromisoformat(since_iso), datetime.fromisoformat(until_iso)
+    paths = []
+    for d in boring_config.source_dirs(adapter="session-end") or [os.path.expanduser("~/.claude/projects")]:
+        paths.extend(glob.glob(os.path.join(d, "*", "*.jsonl")))  # top-level only, as the collector
+    sessions, total, hits, first_total, first_hits = 0, 0, 0, 0, 0
+    kinds: dict[str, int] = {name: 0 for name, _ in waste_kind.WASTE_KINDS}
+    seats: dict[str, list[int]] = {}
+    for p in sorted(p for p in paths if os.path.getmtime(p) >= since.timestamp()):
+        found = transcript.owner_sentences(p, since, until)
+        sid, seat = os.path.basename(p)[:8], found.seat or "이름 없음"
+        sessions += bool(found.owner)
+        for s in found.owner:
+            hit = bool(transcript.OWNER_CORRECTION.search(s.text))
+            total, hits = total + 1, hits + hit
+            seats.setdefault(seat, [0, 0])
+            seats[seat][0] += hit
+            seats[seat][1] += 1
+            for name in waste_kind.waste_kinds(s.text) if hit else []:
+                kinds[name] += 1
+            _line("correction" if hit else "other", seat, sid, f"{p}:{s.line}", s.text)
+        for s in found.first_prompts:
+            hit = bool(transcript.OWNER_CORRECTION.search(s.text))
+            first_total, first_hits = first_total + 1, first_hits + hit
+            _line("first-correction" if hit else "first-other", seat, sid, f"{p}:{s.line}", s.text)
+    print(
+        f"# owner_corrections {hits} / owner_sentences {total} sessions {sessions} since {since_iso} until {until_iso}"
+    )
+    for name, n in kinds.items():
+        print(f"# kind {name} {n} / {hits}")
+    for seat, (c, n) in sorted(seats.items(), key=lambda kv: -kv[1][0]):
+        print(f"# seat {seat} corrections {c} / sentences {n}")
+    print(f"# first_prompt_corrections {first_hits} / first_prompt_sentences {first_total}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Backfill past Claude Code sessions into ohmyboring.")
     ap.add_argument(
@@ -87,7 +134,16 @@ def main():
         help="distill the MOST RECENT session immediately, ignoring done-markers and WITHOUT marking "
         "it done — so it is re-distillable on demand and the normal SessionEnd capture still runs.",
     )
+    ap.add_argument(
+        "--owner-corrections",
+        nargs=2,
+        metavar=("SINCE", "UNTIL"),
+        help="read-only: print the owner's sentences between two ISO instants and which match the "
+        "correction word rule; no distill, no event, no marker.",
+    )
     args = ap.parse_args()
+    if args.owner_corrections:
+        return print_owner_corrections(*args.owner_corrections)
     run_id = event_log.new_run_id("claude-collector")
 
     cutoff = time.time() - WINDOW_H * 3600

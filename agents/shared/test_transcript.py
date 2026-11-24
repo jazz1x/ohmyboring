@@ -378,7 +378,42 @@ def test_codex_distill_clamp_default_and_env_override():
                 os.environ.pop(k, None)
 
 
+def test_owner_sentences_carry_the_line_of_their_row():
+    """C-WASTEVIEW1 S3: each owner sentence names the 1-based file line of the row it came from;
+    a message repeated later keeps its first line."""
+    stamp = "2026-11-23T01:00:00Z"
+    owner_row = {
+        "type": "user",
+        "timestamp": stamp,
+        "origin": {"kind": "human"},
+        "entrypoint": "cli",
+        "message": {"role": "user", "content": "왜 또 그래. 다시 해줘."},
+    }
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "s.jsonl")
+        _write(
+            path,
+            [
+                {"type": "agent-name", "agentName": "[x/judge]"},
+                owner_row,
+                {"type": "assistant", "timestamp": stamp, "message": {"role": "assistant", "content": "ok"}},
+                owner_row,
+                {**owner_row, "message": {"role": "user", "content": "다시 확인."}},
+            ],
+        )
+        found = transcript.owner_sentences(
+            path, datetime(2026, 11, 23, tzinfo=UTC), datetime(2026, 11, 24, tzinfo=UTC)
+        )
+    assert found.seat == "[x/judge]"
+    assert found.owner == [
+        transcript.Located(2, "왜 또 그래."),
+        transcript.Located(2, "다시 해줘."),
+        transcript.Located(5, "다시 확인."),
+    ], found.owner
+
+
 if __name__ == "__main__":
+    test_owner_sentences_carry_the_line_of_their_row()
     test_extract_claude_jsonl_text_and_list_content()
     test_extract_claude_jsonl_ignores_malformed_lines()
     test_extract_claude_jsonl_includes_allowlisted_tool_calls()
